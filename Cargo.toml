@@ -1,0 +1,57 @@
+[package]
+name = "corvo"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight native launcher"
+publish = false
+
+[[bin]]
+name = "corvo"
+path = "src/main.rs"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/corvo-core",
+    "crates/corvo-platform",
+    "crates/corvo-ui",
+    "crates/corvo-config",
+    "commands/app-launcher",
+    "commands/file-search",
+    "commands/clipboard-manager",
+    "commands/calculator",
+    "commands/snippets",
+    "commands/window-management",
+    "commands/emoji-picker",
+    "commands/quicklinks",
+    "commands/system-actions",
+    "commands/web-search-fallback",
+]
+
+[workspace.dependencies]
+async-trait = "0.1"
+frizbee = "0.13"
+corvo-core = { path = "crates/corvo-core" }
+corvo-platform = { path = "crates/corvo-platform" }
+directories = "6"
+phosphor-svgs = { version = "0.6.0-pre.1", default-features = false, features = ["str"] }
+serde = { version = "1", features = ["derive"] }
+smol = "2"
+toml = "0.8"
+
+[dependencies]
+corvo-app-launcher = { path = "commands/app-launcher" }
+corvo-calculator = { path = "commands/calculator" }
+corvo-clipboard-manager = { path = "commands/clipboard-manager" }
+corvo-config = { path = "crates/corvo-config" }
+corvo-core = { path = "crates/corvo-core" }
+corvo-emoji-picker = { path = "commands/emoji-picker" }
+corvo-file-search = { path = "commands/file-search" }
+corvo-platform = { path = "crates/corvo-platform" }
+corvo-quicklinks = { path = "commands/quicklinks" }
+corvo-snippets = { path = "commands/snippets" }
+corvo-system-actions = { path = "commands/system-actions" }
+corvo-ui = { path = "crates/corvo-ui" }
+corvo-web-search-fallback = { path = "commands/web-search-fallback" }
+corvo-window-management = { path = "commands/window-management" }
+smol = { workspace = true }

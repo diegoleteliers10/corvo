@@ -1,0 +1,15 @@
+[package]
+name = "corvo-window-management"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-platform = { workspace = true }
+phosphor-svgs = { workspace = true }
+
+[dev-dependencies]
+smol = { workspace = true }
+

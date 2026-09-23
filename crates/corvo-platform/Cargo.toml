@@ -1,0 +1,39 @@
+[package]
+name = "corvo-platform"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+global-hotkey = "0.8"
+smol = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSColor",
+    "NSImage",
+    "NSImageRep",
+    "NSPanel",
+    "NSPasteboard",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSWindow",
+    "NSWorkspace",
+    "libc",
+    "std",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+    "NSValue",
+    "std",
+] }

@@ -1,0 +1,10 @@
+[package]
+name = "corvo-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+inventory = "0.3"
+phosphor-svgs = { workspace = true }

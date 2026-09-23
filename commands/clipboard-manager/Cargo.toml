@@ -1,0 +1,16 @@
+[package]
+name = "corvo-clipboard-manager"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-platform = { workspace = true }
+directories = { workspace = true }
+frizbee = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+smol = { workspace = true }
+libc = "0.2"
