@@ -12,6 +12,59 @@ use std::sync::Arc;
 /// Upper bound handed to commands so no command can flood the result list.
 pub const DEFAULT_MAX_RESULTS: usize = 20;
 
+/// Scores a query against ordered text fields. Every query word must match.
+/// Earlier fields rank above later fields, so callers can pass title first.
+pub fn search_match_score(query: &str, fields: &[&str]) -> Option<f32> {
+    let query_words: Vec<String> = search_words(query);
+    if query_words.is_empty() {
+        return None;
+    }
+
+    let field_words: Vec<Vec<String>> = fields.iter().map(|field| search_words(field)).collect();
+    let mut total = 0.0;
+
+    for query_word in &query_words {
+        let best_match = field_words
+            .iter()
+            .enumerate()
+            .flat_map(|(field_index, words)| {
+                words.iter().filter_map(move |word| {
+                    let score = if word.as_str() == query_word.as_str() {
+                        100.0
+                    } else if word.starts_with(query_word.as_str()) {
+                        88.0
+                    } else if word.contains(query_word.as_str()) {
+                        74.0
+                    } else {
+                        return None;
+                    };
+                    Some(score - (field_index as f32 * 4.0))
+                })
+            })
+            .max_by(f32::total_cmp)?;
+        total += best_match;
+    }
+
+    let phrase_bonus = field_words
+        .iter()
+        .any(|words| {
+            words
+                .windows(query_words.len())
+                .any(|window| window.iter().map(String::as_str).eq(query_words.iter().map(String::as_str)))
+        }) as u8 as f32
+        * 8.0;
+
+    Some(total / query_words.len() as f32 + phrase_bonus)
+}
+
+fn search_words(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 pub use phosphor_svgs;
 
 /// Glyph kinds the UI knows how to draw.
@@ -51,8 +104,12 @@ pub struct SearchResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Open(PathBuf),
+    OpenAppUninstaller { name: String, path: PathBuf },
+    SetResultFavorite { result_id: String, title: String, favorite: bool },
+    SetResultHidden { result_id: String, title: String, hidden: bool },
     OpenUrl(String),
     Copy(String),
+    PasteText(String),
     CopyImage(PathBuf),
     PasteImage(PathBuf),
     RunShell(String),
@@ -112,12 +169,30 @@ impl fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-/// Read-only data the config layer loads for commands. Defined here so
-/// command crates never depend on `corvo-config` directly. Frecency and
-/// clipboard history join this trait in later phases.
+/// Runtime configuration and data shared by the config layer and commands.
+/// Defined here so command crates do not depend on `corvo-config` directly.
 pub trait DataStore: Send + Sync {
     fn snippets(&self) -> Vec<Snippet>;
     fn quicklinks(&self) -> Vec<Quicklink>;
+    fn replace_snippets(&self, snippets: Vec<Snippet>);
+    fn replace_quicklinks(&self, quicklinks: Vec<Quicklink>);
+    fn command_enabled(&self, command_id: &str) -> bool;
+    fn show_command_in_launcher(&self, command_id: &str) -> bool;
+    fn replace_command_availability(&self, availability: Vec<CommandAvailability>);
+    fn emoji_column_count(&self) -> usize;
+    fn emoji_skin_tone(&self) -> usize;
+    fn replace_emoji_preferences(&self, column_count: usize, skin_tone: usize);
+    fn clipboard_auto_paste(&self) -> bool;
+    fn replace_clipboard_auto_paste(&self, enabled: bool);
+    fn file_search_options(&self) -> FileSearchOptions;
+    fn replace_file_search_options(&self, options: FileSearchOptions);
+    fn escape_closes_window(&self) -> bool;
+    fn replace_escape_behavior(&self, close_window: bool);
+    fn interface_size_option(&self) -> usize;
+    fn transparency_level(&self) -> usize;
+    fn replace_interface_appearance(&self, size_option: usize, transparency_level: usize);
+    fn compact_mode(&self) -> bool;
+    fn replace_compact_mode(&self, enabled: bool);
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +206,23 @@ pub struct Snippet {
 pub struct Quicklink {
     pub name: String,
     pub url: String,
+    pub alias: Option<String>,
+    pub hotkey: Option<String>,
+    pub hidden: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandAvailability {
+    pub command_id: String,
+    pub enabled: bool,
+    pub show_in_launcher: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileSearchOptions {
+    pub enabled: bool,
+    pub search_scopes: Vec<String>,
+    pub ignore_patterns: Vec<String>,
 }
 
 /// Input handed to `Command::search`.
@@ -284,4 +376,3 @@ mod tests {
         }
     }
 }
-

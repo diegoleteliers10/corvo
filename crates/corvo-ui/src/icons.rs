@@ -1,7 +1,7 @@
 //! Phosphor Icons SVG renderer.
 
-use gpui::*;
 use corvo_core::Icon;
+use gpui::*;
 
 pub fn render_phosphor_svg(svg_data: &'static str, color: impl Into<Hsla>, size_px: f32) -> Svg {
     svg()

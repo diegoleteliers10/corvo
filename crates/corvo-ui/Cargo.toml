@@ -5,9 +5,12 @@ edition = "2021"
 publish = false
 
 [dependencies]
+corvo-clipboard-manager = { path = "../../commands/clipboard-manager" }
+corvo-config = { workspace = true }
 corvo-core = { workspace = true }
 corvo-platform = { workspace = true }
-corvo-clipboard-manager = { path = "../../commands/clipboard-manager" }
+corvo-system-actions = { path = "../../commands/system-actions" }
+corvo-web-search-fallback = { path = "../../commands/web-search-fallback" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 phosphor-svgs = { workspace = true }

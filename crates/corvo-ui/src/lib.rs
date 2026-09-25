@@ -4,18 +4,19 @@
 mod icons;
 mod settings;
 
-pub use settings::open_settings;
+pub use settings::{open_settings, open_settings_tab, SettingsTab};
 
 use corvo_core::{
-    Action, CommandAction, CommandError, CommandRegistry, ExecutionContext, Icon,
-    SearchContext, SearchResult,
+    Action, ActionGroup, CommandAction, CommandError, CommandRegistry, DataStore, ExecutionContext,
+    Icon, SearchContext, SearchResult,
 };
 use gpui::{
-    actions, div, font, img, prelude::*, px, rgb, rgba, size, uniform_list, App, AppContext, AsyncApp, Bounds,
-    ClickEvent, Context, Div, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
-    KeyBinding, KeyDownEvent, ParentElement, Pixels, Render, ScrollHandle, ScrollStrategy, SharedString, Size,
-    Stateful, Styled, Subscription, TextOverflow, TextRun, UniformListScrollHandle, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    actions, div, font, img, prelude::*, px, rgb, rgba, size, uniform_list, AnyElement, App,
+    AppContext, AsyncApp, Bounds, ClickEvent, Context, Div, FocusHandle, FontWeight, Global,
+    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Pixels, Render,
+    ScrollHandle, ScrollStrategy, SharedString, Size, Stateful, Styled, Subscription, TextOverflow,
+    TextRun, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions,
 };
 use smol::channel::Receiver;
 
@@ -23,6 +24,8 @@ const WINDOW_WIDTH: f32 = 750.0;
 const WINDOW_HEIGHT: f32 = 475.0;
 const ROW_HEIGHT: f32 = 38.0;
 const ICON_SIZE: f32 = 26.0;
+const CONFIDENT_SEARCH_SCORE: f32 = 80.0;
+const MAX_WEAK_SEARCH_RESULTS: usize = 8;
 
 // Raycast-like surfaces, black and gray, with the emerald accent and 90% opacity (10% translucent).
 const COLOR_BACKGROUND: u32 = 0x17181ae6;
@@ -37,21 +40,98 @@ const COLOR_TEXT_DIM: u32 = 0x8e8e93;
 const COLOR_TEXT_ICON: u32 = 0x9a9aa0;
 const COLOR_DESTRUCTIVE: u32 = 0xef4444;
 
+fn sort_search_results(results: &mut [SearchResult]) {
+    results.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn apply_result_preferences(
+    results: &mut Vec<SearchResult>,
+    settings: &corvo_config::Settings,
+) {
+    results.retain(|result| {
+        !settings
+            .result_item(&result.id, &result.title)
+            .is_some_and(|item| item.hidden)
+    });
+    results.sort_by(|left, right| {
+        let left_favorite = settings.result_is_favorite(&left.id);
+        let right_favorite = settings.result_is_favorite(&right.id);
+        right_favorite
+            .cmp(&left_favorite)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn cached_query_results(
+    query: &str,
+    max_results: usize,
+    fallback_enabled: bool,
+) -> Vec<SearchResult> {
+    let mut results: Vec<_> = cached_initial_results()
+        .into_iter()
+        .filter_map(|mut result| {
+            let score = corvo_core::search_match_score(
+                query,
+                &[&result.title, result.subtitle.as_deref().unwrap_or("")],
+            )?;
+            result.score = score;
+            Some(result)
+        })
+        .collect();
+    sort_search_results(&mut results);
+    let has_confident_match = results
+        .first()
+        .is_some_and(|result| result.score >= CONFIDENT_SEARCH_SCORE);
+    results.truncate(if has_confident_match {
+        max_results.saturating_sub(2)
+    } else {
+        MAX_WEAK_SEARCH_RESULTS
+    });
+    if fallback_enabled {
+        results.extend(corvo_web_search_fallback::search_results(query));
+    }
+    results
+}
+
 actions!(corvo_ui, [Dismiss]);
 
 struct RegistryGlobal(CommandRegistry);
 
 impl Global for RegistryGlobal {}
 
-static INITIAL_RESULTS: std::sync::OnceLock<std::sync::RwLock<Vec<SearchResult>>> = std::sync::OnceLock::new();
+pub(crate) struct StoreGlobal(pub std::sync::Arc<dyn DataStore>);
 
-pub fn preload_initial_results(registry: &CommandRegistry) {
-    let ctx = SearchContext { max_results: 2000, store: None };
+impl Global for StoreGlobal {}
+
+static INITIAL_RESULTS: std::sync::OnceLock<std::sync::RwLock<Vec<SearchResult>>> =
+    std::sync::OnceLock::new();
+
+pub fn preload_initial_results(registry: &CommandRegistry, store: std::sync::Arc<dyn DataStore>) {
+    let ctx = SearchContext {
+        max_results: 2000,
+        store: Some(store),
+    };
     let mut results = Vec::new();
     for command in registry.commands() {
-        results.extend(smol::block_on(command.search("", &ctx)));
+        if ctx.store.as_ref().is_some_and(|store| {
+            store.command_enabled(command.id()) && store.show_command_in_launcher(command.id())
+        }) {
+            results.extend(smol::block_on(command.search("", &ctx)));
+        }
     }
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(2000);
     let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
     if let Ok(mut lock) = cell.write() {
@@ -76,6 +156,7 @@ pub enum LauncherPage {
     Root,
     Emoji,
     Clipboard,
+    Uninstaller,
 }
 
 const EMOJI_CATEGORIES: &[&str] = &[
@@ -92,13 +173,7 @@ const EMOJI_CATEGORIES: &[&str] = &[
     "Office & Study",
 ];
 
-const CLIPBOARD_FILTERS: &[&str] = &[
-    "All Types",
-    "Text",
-    "Links",
-    "Images",
-    "JSON",
-];
+const CLIPBOARD_FILTERS: &[&str] = &["All Types", "Text", "Links", "Images", "JSON"];
 
 #[derive(Clone, Debug)]
 enum RootFlatItem {
@@ -112,13 +187,35 @@ enum ClipboardFlatItem {
     Row(usize),
 }
 
+#[derive(Clone, Debug)]
+struct UninstallTarget {
+    name: String,
+    path: std::path::PathBuf,
+}
+
+struct UninstallerReady {
+    target: UninstallTarget,
+    files: Vec<corvo_platform::AppFileEntry>,
+    selected_files: Vec<bool>,
+    focused: usize,
+    confirming: bool,
+    scan_in_progress: bool,
+    scan_limited: bool,
+    message: Option<String>,
+}
+
+enum UninstallerState {
+    Closed,
+    Ready(UninstallerReady),
+    Removing { target: UninstallTarget },
+}
+
 pub struct Launcher {
     focus_handle: FocusHandle,
     page: LauncherPage,
     query: String,
     cursor_idx: usize,
     cursor_visible: bool,
-    is_loading: bool,
     results: Vec<SearchResult>,
     selected: usize,
     search_seq: u64,
@@ -131,6 +228,7 @@ pub struct Launcher {
     root_to_flat: Vec<usize>,
     clipboard_flat_items: Vec<ClipboardFlatItem>,
     clipboard_to_flat: Vec<usize>,
+    uninstaller: UninstallerState,
     actions_open: bool,
     actions: Vec<CommandAction>,
     actions_title: String,
@@ -142,8 +240,13 @@ pub struct Launcher {
     previous_app: Option<i32>,
     previous_app_name: Option<String>,
     emoji_category_index: usize,
+    emoji_column_count: usize,
+    emoji_skin_tone: usize,
+    background_color: u32,
+    row_height: f32,
     clipboard_filter_index: usize,
     registry: CommandRegistry,
+    store: std::sync::Arc<dyn DataStore>,
     _activation_sub: Subscription,
 }
 
@@ -215,6 +318,40 @@ fn cursor_offset_for_query(
     shaped.x_for_index(byte_idx)
 }
 
+fn apply_emoji_skin_tone(emoji: &str, skin_tone: usize) -> String {
+    if skin_tone == 0 {
+        return emoji.to_string();
+    }
+    let modifier = char::from_u32(0x1f3fa + skin_tone as u32).unwrap_or(' ');
+    let mut output = String::with_capacity(emoji.len() + modifier.len_utf8());
+    let mut inserted = false;
+    for character in emoji.chars() {
+        output.push(character);
+        if !inserted && supports_emoji_skin_tone(character as u32) {
+            output.push(modifier);
+            inserted = true;
+        }
+    }
+    if inserted {
+        output
+    } else {
+        emoji.to_string()
+    }
+}
+
+fn supports_emoji_skin_tone(codepoint: u32) -> bool {
+    matches!(
+        codepoint,
+        0x261d | 0x26f9 | 0x270a..=0x270d | 0x1f385 | 0x1f3c2..=0x1f3c4 | 0x1f3c7
+            | 0x1f3ca..=0x1f3cc | 0x1f442..=0x1f450 | 0x1f466..=0x1f487 | 0x1f4aa
+            | 0x1f574..=0x1f575 | 0x1f57a | 0x1f590 | 0x1f595..=0x1f596
+            | 0x1f645..=0x1f647 | 0x1f64b..=0x1f64f | 0x1f6a3 | 0x1f6b4..=0x1f6b6
+            | 0x1f6c0 | 0x1f6cc | 0x1f90c..=0x1f93e | 0x1f9b5..=0x1f9b6
+            | 0x1f9b8..=0x1f9b9 | 0x1f9bb | 0x1f9cd..=0x1f9cf | 0x1f9d1..=0x1f9dd
+            | 0x1fac3..=0x1fac5 | 0x1faf0..=0x1faf8
+    )
+}
+
 fn cursor_index_from_click(
     query: &str,
     local_x: Pixels,
@@ -253,13 +390,7 @@ fn render_cursor(cursor_x: Pixels, height: Pixels, visible: bool) -> Div {
         .bottom(px(0.0))
         .flex()
         .items_center()
-        .child(
-            div()
-                .w(px(2.0))
-                .h(height)
-                .rounded_xs()
-                .bg(color),
-        )
+        .child(div().w(px(2.0)).h(height).rounded_xs().bg(color))
 }
 
 fn format_wrapped_preview_lines(text: &str, max_line_len: usize) -> Vec<String> {
@@ -320,9 +451,33 @@ fn format_wrapped_preview_lines(text: &str, max_line_len: usize) -> Vec<String> 
     result
 }
 
+fn format_file_size(size_bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = size_bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} B", size_bytes)
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 impl Launcher {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let store = cx.global::<StoreGlobal>().0.clone();
+        let emoji_column_count = store.emoji_column_count();
+        let emoji_skin_tone = store.emoji_skin_tone();
+        let background_color = launcher_background(store.transparency_level());
+        let row_height = if store.compact_mode() {
+            32.0
+        } else {
+            ROW_HEIGHT
+        };
         window.focus(&focus_handle, cx);
         let _activation_sub = cx.observe_window_activation(window, |launcher, window, _cx| {
             if !window.is_window_active() {
@@ -335,7 +490,6 @@ impl Launcher {
             query: String::new(),
             cursor_idx: 0,
             cursor_visible: true,
-            is_loading: false,
             results: cached_initial_results(),
             selected: 0,
             search_seq: 0,
@@ -348,6 +502,7 @@ impl Launcher {
             root_to_flat: Vec::new(),
             clipboard_flat_items: Vec::new(),
             clipboard_to_flat: Vec::new(),
+            uninstaller: UninstallerState::Closed,
             actions_open: false,
             actions: Vec::new(),
             actions_title: String::new(),
@@ -357,26 +512,30 @@ impl Launcher {
             previous_app: None,
             previous_app_name: None,
             emoji_category_index: 0,
+            emoji_column_count,
+            emoji_skin_tone,
+            background_color,
+            row_height,
             clipboard_filter_index: 0,
             registry: cx.global::<RegistryGlobal>().0.clone(),
+            store,
             _activation_sub,
         };
         launcher.rebuild_root_flat_items();
         launcher.start_cursor_blink(cx);
+        launcher.refresh(cx);
         launcher
     }
 
     fn start_cursor_blink(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_millis(530)).await;
-                let res = this.update(cx, |launcher, cx| {
-                    launcher.cursor_visible = !launcher.cursor_visible;
-                    cx.notify();
-                });
-                if res.is_err() {
-                    break;
-                }
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(530)).await;
+            let res = this.update(cx, |launcher, cx| {
+                launcher.cursor_visible = !launcher.cursor_visible;
+                cx.notify();
+            });
+            if res.is_err() {
+                break;
             }
         })
         .detach();
@@ -417,131 +576,201 @@ impl Launcher {
         false
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.cursor_visible = true;
-        let keystroke = &event.keystroke;
-        let key = keystroke.key.as_str();
-        if keystroke.modifiers.platform && key == "k" {
-            self.toggle_actions(cx);
-            cx.stop_propagation();
+    fn cursor_word_left(&mut self) {
+        if self.cursor_idx == 0 {
             return;
         }
-        if keystroke.modifiers.platform && key == "enter" && self.actions_open {
-            // The ⌘↵ hint marks the second action, as in Raycast.
-            if self.filtered_actions().len() > 1 {
-                self.action_selected = 1;
-                self.run_selected_action(window, cx);
+        let chars: Vec<char> = self.query.chars().collect();
+        let mut idx = self.cursor_idx;
+
+        while idx > 0 && chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        if idx > 0 {
+            let is_alnum = chars[idx - 1].is_alphanumeric();
+            while idx > 0
+                && !chars[idx - 1].is_whitespace()
+                && (chars[idx - 1].is_alphanumeric() == is_alnum)
+            {
+                idx -= 1;
             }
-            cx.stop_propagation();
+        }
+        self.cursor_idx = idx;
+    }
+
+    fn cursor_word_right(&mut self) {
+        let chars: Vec<char> = self.query.chars().collect();
+        let len = chars.len();
+        if self.cursor_idx >= len {
             return;
         }
-        if keystroke.modifiers.platform && keystroke.modifiers.control && key == "space" {
-            self.open_emoji_page(cx);
-            cx.stop_propagation();
-            return;
+        let mut idx = self.cursor_idx;
+
+        let is_alnum = chars[idx].is_alphanumeric();
+        while idx < len && !chars[idx].is_whitespace() && (chars[idx].is_alphanumeric() == is_alnum)
+        {
+            idx += 1;
         }
-        if keystroke.modifiers.platform && key == "c" && keystroke.modifiers.alt {
-            self.open_clipboard_page(cx);
-            cx.stop_propagation();
-            return;
+        while idx < len && chars[idx].is_whitespace() {
+            idx += 1;
         }
-        if keystroke.modifiers.platform && key == "," {
-            self.close_burger_menu(cx);
-            self.close_actions(cx);
-            open_settings(cx);
-            cx.stop_propagation();
-            return;
+        self.cursor_idx = idx;
+    }
+
+    fn delete_word_backward(&mut self) -> bool {
+        if self.cursor_idx == 0 {
+            return false;
         }
-        if keystroke.modifiers.platform && key == "left" {
-            self.cursor_idx = 0;
-            cx.notify();
-            cx.stop_propagation();
-            return;
+        let old_cursor = self.cursor_idx;
+        self.cursor_word_left();
+        let target_idx = self.cursor_idx;
+        self.cursor_idx = old_cursor;
+
+        if target_idx < self.cursor_idx {
+            let byte_start = self
+                .query
+                .char_indices()
+                .nth(target_idx)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_end = self
+                .query
+                .char_indices()
+                .nth(self.cursor_idx)
+                .map(|(i, _)| i)
+                .unwrap_or(self.query.len());
+            self.query.drain(byte_start..byte_end);
+            self.cursor_idx = target_idx;
+            true
+        } else {
+            false
         }
-        if keystroke.modifiers.platform && key == "right" {
-            self.cursor_idx = self.query.chars().count();
-            cx.notify();
-            cx.stop_propagation();
-            return;
+    }
+
+    fn delete_to_beginning_of_line(&mut self) -> bool {
+        if self.cursor_idx == 0 {
+            return false;
         }
-        if keystroke.modifiers.platform || keystroke.modifiers.control || keystroke.modifiers.alt {
-            return;
+        let byte_end = self
+            .query
+            .char_indices()
+            .nth(self.cursor_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.query.len());
+        self.query.drain(0..byte_end);
+        self.cursor_idx = 0;
+        true
+    }
+
+    fn delete_to_end_of_line(&mut self) -> bool {
+        let total_chars = self.query.chars().count();
+        if self.cursor_idx >= total_chars {
+            return false;
         }
+        let byte_start = self
+            .query
+            .char_indices()
+            .nth(self.cursor_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.query.len());
+        self.query.truncate(byte_start);
+        true
+    }
+
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(text) = corvo_platform::read_clipboard_text() {
+            let clean: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+            if clean.is_empty() {
+                return false;
+            }
+            if self.actions_open {
+                self.actions_filter.push_str(&clean);
+                self.action_selected = 0;
+                cx.notify();
+                return true;
+            } else {
+                self.insert_str(&clean);
+                self.refresh_current_page(cx);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn refresh_current_page(&mut self, cx: &mut Context<Self>) {
+        match self.page {
+            LauncherPage::Root => self.refresh(cx),
+            LauncherPage::Emoji => self.refresh_emoji(cx),
+            LauncherPage::Clipboard => self.refresh_clipboard(cx),
+            LauncherPage::Uninstaller => {
+                let visible = self.uninstaller_visible_indices();
+                if let UninstallerState::Ready(ready) = &mut self.uninstaller {
+                    ready.focused = visible.first().copied().unwrap_or(0);
+                    ready.confirming = false;
+                    ready.message = None;
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.filter_dropdown_open {
-            let max_idx = match self.page {
-                LauncherPage::Emoji => EMOJI_CATEGORIES.len().saturating_sub(1),
-                LauncherPage::Clipboard => CLIPBOARD_FILTERS.len().saturating_sub(1),
-                _ => 0,
-            };
-            match key {
-                "escape" | "tab" => {
-                    self.close_filter_dropdown(cx);
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    self.apply_filter_dropdown_selection(cx);
-                    cx.stop_propagation();
-                }
-                "up" => {
-                    self.filter_dropdown_selected = self.filter_dropdown_selected.saturating_sub(1);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "down" => {
-                    self.filter_dropdown_selected = (self.filter_dropdown_selected + 1).min(max_idx);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                _ => {
-                    cx.stop_propagation();
-                }
-            }
-            return;
-        }
-        if self.burger_menu_open && key == "escape" {
+            self.close_filter_dropdown(cx);
+        } else if self.burger_menu_open {
             self.close_burger_menu(cx);
-            cx.stop_propagation();
-            return;
+        } else if self.actions_open {
+            self.close_actions(cx);
+        } else if self.store.escape_closes_window() {
+            self.dismiss(window);
+        } else if self.page == LauncherPage::Uninstaller {
+            let confirming =
+                matches!(&self.uninstaller, UninstallerState::Ready(ready) if ready.confirming);
+            if confirming {
+                if let UninstallerState::Ready(ready) = &mut self.uninstaller {
+                    ready.confirming = false;
+                    ready.message = None;
+                }
+                cx.notify();
+            } else if !self.query.is_empty() {
+                self.query.clear();
+                self.cursor_idx = 0;
+                cx.notify();
+            } else {
+                self.open_root_page(cx);
+            }
+        } else if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
+            if !self.query.is_empty() {
+                self.query.clear();
+                self.cursor_idx = 0;
+                self.refresh_current_page(cx);
+            } else {
+                self.open_root_page(cx);
+            }
+        } else {
+            if !self.query.is_empty() {
+                self.query.clear();
+                self.cursor_idx = 0;
+                self.refresh(cx);
+            } else {
+                self.dismiss(window);
+            }
         }
-        if self.actions_open {
-            match key {
-                "escape" => {
-                    self.close_actions(cx);
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    self.run_selected_action(window, cx);
-                    cx.stop_propagation();
-                }
-                "up" => {
-                    self.action_selected = self.action_selected.saturating_sub(1);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "down" => {
-                    let last = self.filtered_actions().len().saturating_sub(1);
-                    self.action_selected = (self.action_selected + 1).min(last);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "backspace" => {
-                    if self.actions_filter.pop().is_some() {
-                        self.action_selected = 0;
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }
-                "tab" | "left" | "right" | "home" | "end" | "pageup" | "pagedown" => {}
-                other => {
-                    let typed = keystroke
-                        .key_char
-                        .clone()
-                        .or_else(|| (other.chars().count() == 1).then(|| other.to_string()));
-                    if let Some(text) = typed {
-                        self.actions_filter.push_str(&text);
-                        self.action_selected = 0;
-                        cx.notify();
-                        cx.stop_propagation();
+    }
+
+    fn execute_secondary_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == LauncherPage::Clipboard {
+            if let Some(res) = self.selected_result() {
+                if let Some(id) = res.id.strip_prefix("clipboard-manager:entry:") {
+                    if let Some(entry) = corvo_clipboard_manager::get_entry(id) {
+                        if let Some(path) = entry.image_path() {
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                corvo_platform::copy_image_to_pasteboard(&bytes);
+                            }
+                        } else {
+                            let _ = corvo_platform::platform_ops().copy_text(&entry.text);
+                        }
+                        self.dismiss(window);
                     }
                 }
             }
@@ -549,94 +778,323 @@ impl Launcher {
         }
 
         if self.page == LauncherPage::Emoji {
-            match key {
-                "escape" => {
-                    if !self.query.is_empty() {
-                        self.query.clear();
-                        self.cursor_idx = 0;
-                        self.refresh_emoji(cx);
-                    } else {
-                        self.open_root_page(cx);
+            self.execute_selected_emoji(window, cx);
+            return;
+        }
+
+        let Some(result) = self.selected_result().cloned() else {
+            return;
+        };
+        let Some(command_id) = result.id.split(':').next() else {
+            return;
+        };
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == command_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let actions = command.actions(&result.id);
+        if let Some(secondary) = actions.get(1) {
+            let action = Ok(secondary.action.clone());
+            self.perform(action, window, cx);
+        }
+    }
+
+    fn execute_copy_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.page == LauncherPage::Clipboard {
+            self.execute_secondary_selected(window, cx);
+            return true;
+        }
+        if self.page == LauncherPage::Emoji {
+            self.execute_selected_emoji(window, cx);
+            return true;
+        }
+        let Some(result) = self.selected_result().cloned() else {
+            return false;
+        };
+        let Some(command_id) = result.id.split(':').next() else {
+            return false;
+        };
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == command_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let actions = command.actions(&result.id);
+        if let Some(copy_act) = actions
+            .iter()
+            .find(|a| a.label.to_lowercase().contains("copy"))
+        {
+            let action = Ok(copy_act.action.clone());
+            self.perform(action, window, cx);
+            return true;
+        }
+        false
+    }
+
+    fn handle_filter_dropdown_key(&mut self, key: &str, ctrl: bool, cx: &mut Context<Self>) {
+        let max_idx = match self.page {
+            LauncherPage::Emoji => EMOJI_CATEGORIES.len().saturating_sub(1),
+            LauncherPage::Clipboard => CLIPBOARD_FILTERS.len().saturating_sub(1),
+            _ => 0,
+        };
+        match key {
+            "escape" | "tab" => {
+                self.close_filter_dropdown(cx);
+            }
+            "enter" => {
+                self.apply_filter_dropdown_selection(cx);
+            }
+            "up" => {
+                self.filter_dropdown_selected = self.filter_dropdown_selected.saturating_sub(1);
+                cx.notify();
+            }
+            "p" if ctrl => {
+                self.filter_dropdown_selected = self.filter_dropdown_selected.saturating_sub(1);
+                cx.notify();
+            }
+            "down" => {
+                self.filter_dropdown_selected = (self.filter_dropdown_selected + 1).min(max_idx);
+                cx.notify();
+            }
+            "n" if ctrl => {
+                self.filter_dropdown_selected = (self.filter_dropdown_selected + 1).min(max_idx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_actions_palette_key(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = keystroke.key.as_str();
+        let cmd = keystroke.modifiers.platform;
+        let ctrl = keystroke.modifiers.control;
+        let alt = keystroke.modifiers.alt;
+
+        // ⌘1..⌘9: Direct action execution
+        if cmd && !ctrl && !alt {
+            if let Ok(digit) = key.parse::<usize>() {
+                if (1..=9).contains(&digit) {
+                    let target_idx = digit - 1;
+                    let filtered = self.filtered_actions();
+                    if target_idx < filtered.len() {
+                        self.action_selected = target_idx;
+                        self.run_selected_action(window, cx);
+                        return;
                     }
-                    cx.stop_propagation();
                 }
-                "backspace" => {
-                    if self.backspace_char() {
-                        self.refresh_emoji(cx);
-                    } else {
-                        self.open_root_page(cx);
-                    }
-                    cx.stop_propagation();
-                }
-                "delete" => {
-                    if self.delete_char() {
-                        self.refresh_emoji(cx);
-                    }
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    self.execute_selected_emoji(window, cx);
-                    cx.stop_propagation();
-                }
-                "left" => {
-                    self.select_emoji_delta(-1, cx);
-                    cx.stop_propagation();
-                }
-                "right" => {
-                    self.select_emoji_delta(1, cx);
-                    cx.stop_propagation();
-                }
-                "up" => {
-                    self.select_emoji_delta(-8, cx);
-                    cx.stop_propagation();
-                }
-                "down" => {
-                    self.select_emoji_delta(8, cx);
-                    cx.stop_propagation();
-                }
-                "pageup" => {
-                    self.select_emoji_delta(-24, cx);
-                    cx.stop_propagation();
-                }
-                "pagedown" => {
-                    self.select_emoji_delta(24, cx);
-                    cx.stop_propagation();
-                }
-                "home" => {
-                    self.select(0, cx);
-                    cx.stop_propagation();
-                }
-                "end" => {
-                    let last = self.results.len().saturating_sub(1);
-                    self.select(last, cx);
-                    cx.stop_propagation();
-                }
-                "space" => {
-                    self.insert_str(" ");
-                    self.refresh_emoji(cx);
-                    cx.stop_propagation();
-                }
-                "tab" => {
-                    self.toggle_filter_dropdown(cx);
-                    cx.stop_propagation();
-                }
-                key => {
-                    let typed = keystroke
-                        .key_char
-                        .clone()
-                        .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
-                    if let Some(text) = typed {
-                        self.insert_str(&text);
-                        self.refresh_emoji(cx);
-                        cx.stop_propagation();
-                    }
-                }
+            }
+        }
+
+        // ⌘↵: Execute secondary action
+        if cmd && !ctrl && !alt && key == "enter" {
+            if self.filtered_actions().len() > 1 {
+                self.action_selected = 1;
+                self.run_selected_action(window, cx);
             }
             return;
         }
 
+        // ⌘V: Paste into actions filter
+        if cmd && !ctrl && !alt && key == "v" {
+            self.paste_from_clipboard(cx);
+            return;
+        }
+
+        // Enter: Execute selected action
+        if !cmd && !ctrl && !alt && key == "enter" {
+            self.run_selected_action(window, cx);
+            return;
+        }
+
+        // Up / ⌃P: Move selection up
+        if (!cmd && !ctrl && !alt && key == "up") || (!cmd && ctrl && !alt && key == "p") {
+            self.action_selected = self.action_selected.saturating_sub(1);
+            cx.notify();
+            return;
+        }
+
+        // Down / ⌃N: Move selection down
+        if (!cmd && !ctrl && !alt && key == "down") || (!cmd && ctrl && !alt && key == "n") {
+            let last = self.filtered_actions().len().saturating_sub(1);
+            self.action_selected = (self.action_selected + 1).min(last);
+            cx.notify();
+            return;
+        }
+
+        // ⌥⌫ / ⌃W: Delete word backward in actions filter
+        if (!cmd && !ctrl && alt && key == "backspace") || (!cmd && ctrl && !alt && key == "w") {
+            while self.actions_filter.ends_with(char::is_whitespace) {
+                self.actions_filter.pop();
+            }
+            while !self.actions_filter.is_empty()
+                && !self.actions_filter.ends_with(char::is_whitespace)
+            {
+                self.actions_filter.pop();
+            }
+            self.action_selected = 0;
+            cx.notify();
+            return;
+        }
+
+        // ⌘⌫ / ⌃U: Clear actions filter
+        if (cmd && !ctrl && !alt && key == "backspace") || (!cmd && ctrl && !alt && key == "u") {
+            if !self.actions_filter.is_empty() {
+                self.actions_filter.clear();
+                self.action_selected = 0;
+                cx.notify();
+            }
+            return;
+        }
+
+        // Backspace: Delete character
+        if !cmd && !ctrl && !alt && key == "backspace" {
+            if self.actions_filter.pop().is_some() {
+                self.action_selected = 0;
+                cx.notify();
+            }
+            return;
+        }
+
+        if !cmd
+            && !ctrl
+            && !alt
+            && matches!(
+                key,
+                "tab" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
+            )
+        {
+            return;
+        }
+
+        if cmd || ctrl || alt {
+            return;
+        }
+
+        let typed = keystroke
+            .key_char
+            .clone()
+            .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
+        if let Some(text) = typed {
+            self.actions_filter.push_str(&text);
+            self.action_selected = 0;
+            cx.notify();
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        let keystroke = &event.keystroke;
+        let key = keystroke.key.as_str();
+        let mods = &keystroke.modifiers;
+
+        let cmd = mods.platform;
+        let ctrl = mods.control;
+        let alt = mods.alt;
+        let shift = mods.shift;
+
+        // Stage 0: Global App & Window Lifecycle
+        if cmd && !ctrl && !alt && !shift {
+            match key {
+                "q" => {
+                    self.dismiss(window);
+                    std::process::exit(0);
+                }
+                "w" => {
+                    self.dismiss(window);
+                    cx.stop_propagation();
+                    return;
+                }
+                "," => {
+                    self.close_burger_menu(cx);
+                    self.close_actions(cx);
+                    self.close_filter_dropdown(cx);
+                    open_settings(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "k" => {
+                    if self.page != LauncherPage::Uninstaller {
+                        self.toggle_actions(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ⌃⌘Space: Switch to Emoji picker
+        if cmd && ctrl && !alt && key == "space" {
+            self.open_emoji_page(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌥⌘C: Switch to Clipboard manager
+        if cmd && alt && !ctrl && key == "c" {
+            self.open_clipboard_page(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Stage 1: Escape Modal Layer Unwinding
+        if !cmd && !ctrl && !alt && key == "escape" {
+            self.handle_escape(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Stage 2: Modal Overlays (Dropdown, Burger, Actions)
+        if self.filter_dropdown_open {
+            self.handle_filter_dropdown_key(key, ctrl, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        if self.burger_menu_open {
+            self.close_burger_menu(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        if self.actions_open {
+            self.handle_actions_palette_key(keystroke, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        if self.page == LauncherPage::Uninstaller {
+            if cmd && !ctrl && !alt && key == "enter" {
+                self.begin_uninstall(cx);
+                cx.stop_propagation();
+                return;
+            }
+            if !cmd && !ctrl && !alt && key == "space" && self.query.is_empty() {
+                self.toggle_uninstaller_focus(cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
+
+        // Stage 3: Contextual List Actions
         if self.page == LauncherPage::Clipboard {
-            if keystroke.modifiers.platform && key == "backspace" {
+            // ⌘⌫ / ⌘⌦: Delete selected clipboard entry from history
+            if cmd && !ctrl && !alt && (key == "backspace" || key == "delete") {
                 if let Some(res) = self.selected_result() {
                     if let Some(id) = res.id.strip_prefix("clipboard-manager:entry:") {
                         corvo_clipboard_manager::delete_entry(id);
@@ -646,208 +1104,254 @@ impl Launcher {
                     }
                 }
             }
-            if keystroke.modifiers.platform && (key == "enter" || key == "c") && !self.actions_open {
-                if let Some(res) = self.selected_result() {
-                    if let Some(id) = res.id.strip_prefix("clipboard-manager:entry:") {
-                        if let Some(entry) = corvo_clipboard_manager::get_entry(id) {
-                            if let Some(path) = entry.image_path() {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    corvo_platform::copy_image_to_pasteboard(&bytes);
-                                }
-                            } else {
-                                let _ = corvo_platform::platform_ops().copy_text(&entry.text);
-                            }
-                            self.dismiss(window);
-                            cx.stop_propagation();
-                            return;
-                        }
-                    }
-                }
-            }
-            if keystroke.modifiers.platform || keystroke.modifiers.control || keystroke.modifiers.alt {
+            // ⌘C or ⌘↵: Copy entry to clipboard without pasting
+            if cmd && !ctrl && !alt && (key == "c" || key == "enter") {
+                self.execute_secondary_selected(window, cx);
+                cx.stop_propagation();
                 return;
             }
-            match key {
-                "escape" => {
-                    if !self.query.is_empty() {
-                        self.query.clear();
-                        self.cursor_idx = 0;
-                        self.refresh_clipboard(cx);
-                    } else {
-                        self.open_root_page(cx);
-                    }
-                    cx.stop_propagation();
-                }
-                "backspace" => {
-                    if self.backspace_char() {
-                        self.refresh_clipboard(cx);
-                    } else {
-                        self.open_root_page(cx);
-                    }
-                    cx.stop_propagation();
-                }
-                "delete" => {
-                    if self.delete_char() {
-                        self.refresh_clipboard(cx);
-                    }
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    self.execute_selected(window, cx);
-                    cx.stop_propagation();
-                }
-                "up" => {
-                    self.select(self.selected.saturating_sub(1), cx);
-                    cx.stop_propagation();
-                }
-                "down" => {
-                    let last = self.results.len().saturating_sub(1);
-                    self.select((self.selected + 1).min(last), cx);
-                    cx.stop_propagation();
-                }
-                "pageup" => {
-                    self.select(self.selected.saturating_sub(8), cx);
-                    cx.stop_propagation();
-                }
-                "pagedown" => {
-                    let last = self.results.len().saturating_sub(1);
-                    self.select((self.selected + 8).min(last), cx);
-                    cx.stop_propagation();
-                }
-                "home" => {
-                    if self.query.is_empty() {
-                        self.select(0, cx);
-                    } else {
-                        self.cursor_idx = 0;
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }
-                "end" => {
-                    if self.query.is_empty() {
-                        let last = self.results.len().saturating_sub(1);
-                        self.select(last, cx);
-                    } else {
-                        self.cursor_idx = self.query.chars().count();
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }
-                "left" => {
-                    self.cursor_idx = self.cursor_idx.saturating_sub(1);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "right" => {
-                    self.cursor_idx = (self.cursor_idx + 1).min(self.query.chars().count());
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "space" => {
-                    self.insert_str(" ");
-                    self.refresh_clipboard(cx);
-                    cx.stop_propagation();
-                }
-                "tab" => {
-                    self.toggle_filter_dropdown(cx);
-                    cx.stop_propagation();
-                }
-                key => {
-                    let typed = keystroke
-                        .key_char
-                        .clone()
-                        .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
-                    if let Some(text) = typed {
-                        self.insert_str(&text);
-                        self.refresh_clipboard(cx);
-                        cx.stop_propagation();
-                    }
-                }
-            }
+        }
+
+        // ⌘↵: Secondary Action on selected row (Root / Main List)
+        if cmd && !ctrl && !alt && key == "enter" {
+            self.execute_secondary_selected(window, cx);
+            cx.stop_propagation();
             return;
         }
 
-        match key {
-            "backspace" => {
-                if self.backspace_char() {
-                    self.refresh(cx);
-                }
+        // ⌘C: Copy selected item in Root if query is empty or on non-text selection
+        if cmd && !ctrl && !alt && key == "c" {
+            if self.page != LauncherPage::Uninstaller && self.execute_copy_action(window, cx) {
                 cx.stop_propagation();
+                return;
             }
-            "delete" => {
-                if self.delete_char() {
-                    self.refresh(cx);
-                }
+        }
+
+        // Stage 4: List Navigation & Activation
+        // Up / ⌃P: Move selection up
+        if (!cmd && !ctrl && !alt && key == "up") || (!cmd && ctrl && !alt && key == "p") {
+            if self.page == LauncherPage::Emoji {
+                self.select_emoji_delta(-(self.emoji_column_count as isize), cx);
+            } else {
+                self.select(self.selected_position().saturating_sub(1), cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // Down / ⌃N: Move selection down
+        if (!cmd && !ctrl && !alt && key == "down") || (!cmd && ctrl && !alt && key == "n") {
+            if self.page == LauncherPage::Emoji {
+                self.select_emoji_delta(self.emoji_column_count as isize, cx);
+            } else {
+                let last = self.selectable_count().saturating_sub(1);
+                self.select((self.selected_position() + 1).min(last), cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // PageUp / PageDown
+        if !cmd && !ctrl && !alt && key == "pageup" {
+            let delta = if self.page == LauncherPage::Emoji {
+                self.emoji_column_count * 3
+            } else {
+                8
+            };
+            self.select(self.selected_position().saturating_sub(delta), cx);
+            cx.stop_propagation();
+            return;
+        }
+        if !cmd && !ctrl && !alt && key == "pagedown" {
+            let delta = if self.page == LauncherPage::Emoji {
+                self.emoji_column_count * 3
+            } else {
+                8
+            };
+            let last = self.selectable_count().saturating_sub(1);
+            self.select((self.selected_position() + delta).min(last), cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Enter: Execute primary action
+        if !cmd && !ctrl && !alt && key == "enter" {
+            self.execute_selected(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Tab: Toggle filter dropdown on Emoji/Clipboard
+        if !cmd && !ctrl && !alt && key == "tab" {
+            if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
+                self.toggle_filter_dropdown(cx);
                 cx.stop_propagation();
+                return;
             }
-            "enter" => {
-                self.execute_selected(window, cx);
+        }
+
+        // Emoji grid lateral movement
+        if self.page == LauncherPage::Emoji && !cmd && !ctrl && !alt {
+            if key == "left" {
+                self.select_emoji_delta(-1, cx);
                 cx.stop_propagation();
+                return;
             }
-            "up" => {
-                self.select(self.selected.saturating_sub(1), cx);
+            if key == "right" {
+                self.select_emoji_delta(1, cx);
                 cx.stop_propagation();
+                return;
             }
-            "down" => {
-                let last = self.results.len().saturating_sub(1);
-                self.select((self.selected + 1).min(last), cx);
-                cx.stop_propagation();
-            }
-            "pageup" => {
-                self.select(self.selected.saturating_sub(6), cx);
-                cx.stop_propagation();
-            }
-            "pagedown" => {
-                let last = self.results.len().saturating_sub(1);
-                self.select((self.selected + 6).min(last), cx);
-                cx.stop_propagation();
-            }
-            "home" => {
-                if self.query.is_empty() {
-                    self.select(0, cx);
-                } else {
-                    self.cursor_idx = 0;
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            "end" => {
-                if self.query.is_empty() {
-                    let last = self.results.len().saturating_sub(1);
-                    self.select(last, cx);
-                } else {
-                    self.cursor_idx = self.query.chars().count();
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            "left" => {
-                self.cursor_idx = self.cursor_idx.saturating_sub(1);
+        }
+
+        // Stage 5: macOS Text Editing Primitives
+        // ⌘V: Paste
+        if cmd && !ctrl && !alt && key == "v" {
+            self.paste_from_clipboard(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌥←: Word backward
+        if !cmd && !ctrl && alt && key == "left" {
+            self.cursor_word_left();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌥→: Word forward
+        if !cmd && !ctrl && alt && key == "right" {
+            self.cursor_word_right();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌘← / ⌃A: Line start
+        if (cmd && !ctrl && !alt && key == "left") || (!cmd && ctrl && !alt && key == "a") {
+            self.cursor_idx = 0;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌘→ / ⌃E: Line end
+        if (cmd && !ctrl && !alt && key == "right") || (!cmd && ctrl && !alt && key == "e") {
+            self.cursor_idx = self.query.chars().count();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // Left / Right: Single character movement
+        if !cmd && !ctrl && !alt && key == "left" && self.page != LauncherPage::Emoji {
+            self.cursor_idx = self.cursor_idx.saturating_sub(1);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if !cmd && !ctrl && !alt && key == "right" && self.page != LauncherPage::Emoji {
+            self.cursor_idx = (self.cursor_idx + 1).min(self.query.chars().count());
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // Home / End
+        if !cmd && !ctrl && !alt && key == "home" {
+            if self.query.is_empty() {
+                self.select(0, cx);
+            } else {
+                self.cursor_idx = 0;
                 cx.notify();
-                cx.stop_propagation();
             }
-            "right" => {
-                self.cursor_idx = (self.cursor_idx + 1).min(self.query.chars().count());
+            cx.stop_propagation();
+            return;
+        }
+        if !cmd && !ctrl && !alt && key == "end" {
+            if self.query.is_empty() {
+                let last = self.selectable_count().saturating_sub(1);
+                self.select(last, cx);
+            } else {
+                self.cursor_idx = self.query.chars().count();
                 cx.notify();
-                cx.stop_propagation();
             }
-            "space" => {
-                self.insert_str(" ");
-                self.refresh(cx);
-                cx.stop_propagation();
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌥⌫ / ⌃W: Delete word backward
+        if (!cmd && !ctrl && alt && key == "backspace") || (!cmd && ctrl && !alt && key == "w") {
+            if self.delete_word_backward() {
+                self.refresh_current_page(cx);
             }
-            "tab" | "escape" => {}
-            key => {
-                let typed = keystroke
-                    .key_char
-                    .clone()
-                    .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
-                if let Some(text) = typed {
-                    self.insert_str(&text);
-                    self.refresh(cx);
-                    cx.stop_propagation();
-                }
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌘⌫ / ⌃U: Delete to beginning of line (in Root / Emoji pages)
+        if (cmd && !ctrl && !alt && key == "backspace") || (!cmd && ctrl && !alt && key == "u") {
+            if self.delete_to_beginning_of_line() {
+                self.refresh_current_page(cx);
             }
+            cx.stop_propagation();
+            return;
+        }
+
+        // ⌃K: Delete to end of line (kill line)
+        if !cmd && ctrl && !alt && key == "k" {
+            if self.delete_to_end_of_line() {
+                self.refresh_current_page(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // Backspace: Delete character backward
+        if !cmd && !ctrl && !alt && key == "backspace" {
+            if self.backspace_char() {
+                self.refresh_current_page(cx);
+            } else if self.page == LauncherPage::Emoji
+                || self.page == LauncherPage::Clipboard
+                || self.page == LauncherPage::Uninstaller
+            {
+                self.open_root_page(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // Delete: Delete character forward
+        if !cmd && !ctrl && !alt && key == "delete" {
+            if self.delete_char() {
+                self.refresh_current_page(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // Space
+        if !cmd && !ctrl && !alt && key == "space" {
+            self.insert_str(" ");
+            self.refresh_current_page(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Stage 6: Character Typing Guard
+        if cmd || ctrl || alt {
+            return;
+        }
+
+        let typed = keystroke
+            .key_char
+            .clone()
+            .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
+        if let Some(text) = typed {
+            self.insert_str(&text);
+            self.refresh_current_page(cx);
+            cx.stop_propagation();
         }
     }
 
@@ -893,10 +1397,94 @@ impl Launcher {
         self.actions_open = false;
         self.burger_menu_open = false;
         self.filter_dropdown_open = false;
-        self.clipboard_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+        self.clipboard_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
         corvo_clipboard_manager::poll_clipboard_with_source(self.previous_app_name.as_deref());
         self.refresh_clipboard(cx);
         cx.notify();
+    }
+
+    fn open_uninstaller_page(
+        &mut self,
+        name: String,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let path = path.canonicalize().unwrap_or(path);
+        let target = UninstallTarget { name, path };
+        self.page = LauncherPage::Uninstaller;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.actions_open = false;
+        self.actions.clear();
+        self.actions_filter.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        let app_file = corvo_platform::AppFileEntry {
+            path: target.path.clone(),
+            location: target
+                .path
+                .parent()
+                .map(|parent| parent.display().to_string())
+                .unwrap_or_default(),
+            size_bytes: 0,
+            is_application: true,
+        };
+        self.uninstaller = UninstallerState::Ready(UninstallerReady {
+            target: target.clone(),
+            files: vec![app_file],
+            selected_files: vec![true],
+            focused: 0,
+            confirming: false,
+            scan_in_progress: true,
+            scan_limited: false,
+            message: None,
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let scan_target = target.clone();
+            let files =
+                smol::unblock(move || corvo_platform::associated_app_files(&scan_target.path))
+                    .await;
+            let _ = this.update(cx, |launcher, cx| {
+                let UninstallerState::Ready(ready) = &mut launcher.uninstaller else {
+                    return;
+                };
+                if ready.target.path != target.path {
+                    return;
+                }
+                match files {
+                    Ok(scan) => {
+                        let previous_selection: std::collections::HashMap<_, _> = ready
+                            .files
+                            .iter()
+                            .zip(&ready.selected_files)
+                            .map(|(file, selected)| (file.path.clone(), *selected))
+                            .collect();
+                        ready.selected_files = scan
+                            .files
+                            .iter()
+                            .map(|file| previous_selection.get(&file.path).copied().unwrap_or(true))
+                            .collect();
+                        ready.focused = scan
+                            .files
+                            .iter()
+                            .position(|file| file.is_application)
+                            .unwrap_or(0);
+                        ready.files = scan.files;
+                        ready.scan_limited = scan.reached_scan_limit;
+                    }
+                    Err(error) => {
+                        ready.message = Some(error.to_string());
+                    }
+                }
+                ready.scan_in_progress = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_clipboard_filter(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -963,7 +1551,8 @@ impl Launcher {
                 let sec = ResultSection::from_result(res);
                 if current_sec != Some(sec) {
                     current_sec = Some(sec);
-                    self.root_flat_items.push(RootFlatItem::Header(sec.title().into()));
+                    self.root_flat_items
+                        .push(RootFlatItem::Header(sec.title().into()));
                 }
             }
             self.root_to_flat[res_idx] = self.root_flat_items.len();
@@ -981,10 +1570,12 @@ impl Launcher {
             let section = res.subtitle.clone().unwrap_or_else(|| "Today".into());
             if current_sec.as_ref() != Some(&section) {
                 current_sec = Some(section.clone());
-                self.clipboard_flat_items.push(ClipboardFlatItem::Header(section.into()));
+                self.clipboard_flat_items
+                    .push(ClipboardFlatItem::Header(section.into()));
             }
             self.clipboard_to_flat[res_idx] = self.clipboard_flat_items.len();
-            self.clipboard_flat_items.push(ClipboardFlatItem::Row(res_idx));
+            self.clipboard_flat_items
+                .push(ClipboardFlatItem::Row(res_idx));
         }
     }
 
@@ -998,6 +1589,15 @@ impl Launcher {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.page == LauncherPage::Uninstaller {
+            let visible = self.uninstaller_visible_indices();
+            if let UninstallerState::Ready(ready) = &mut self.uninstaller {
+                ready.focused = visible.get(index).copied().unwrap_or(0);
+                ready.confirming = false;
+            }
+            cx.notify();
+            return;
+        }
         if self.results.is_empty() {
             self.selected = 0;
             cx.notify();
@@ -1005,14 +1605,19 @@ impl Launcher {
         }
         if self.page == LauncherPage::Clipboard {
             self.selected = index.min(self.results.len().saturating_sub(1));
-            let flat_idx = self.clipboard_to_flat.get(self.selected).copied().unwrap_or(0);
-            self.clipboard_scroll_handle.scroll_to_item(flat_idx, ScrollStrategy::Nearest);
+            let flat_idx = self
+                .clipboard_to_flat
+                .get(self.selected)
+                .copied()
+                .unwrap_or(0);
+            self.clipboard_scroll_handle
+                .scroll_to_item(flat_idx, ScrollStrategy::Nearest);
             cx.notify();
             return;
         }
         if self.page == LauncherPage::Emoji {
             self.selected = index.min(self.results.len().saturating_sub(1));
-            let row = self.selected / 8;
+            let row = self.selected / self.emoji_column_count;
             self.emoji_scroll_handle.scroll_to_item(row);
             cx.notify();
             return;
@@ -1024,6 +1629,156 @@ impl Launcher {
         cx.notify();
     }
 
+    fn uninstaller_visible_indices(&self) -> Vec<usize> {
+        let query = self.query.to_lowercase();
+        match &self.uninstaller {
+            UninstallerState::Ready(ready) => ready
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| {
+                    query.is_empty()
+                        || file
+                            .path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.to_lowercase().contains(&query))
+                        || file.location.to_lowercase().contains(&query)
+                        || file.path.to_string_lossy().to_lowercase().contains(&query)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn selectable_count(&self) -> usize {
+        if self.page == LauncherPage::Uninstaller {
+            self.uninstaller_visible_indices().len()
+        } else {
+            self.results.len()
+        }
+    }
+
+    fn selected_position(&self) -> usize {
+        if self.page == LauncherPage::Uninstaller {
+            let visible = self.uninstaller_visible_indices();
+            let focused = match &self.uninstaller {
+                UninstallerState::Ready(ready) => ready.focused,
+                _ => 0,
+            };
+            visible
+                .iter()
+                .position(|index| *index == focused)
+                .unwrap_or(0)
+        } else {
+            self.selected
+        }
+    }
+
+    fn toggle_uninstaller_focus(&mut self, cx: &mut Context<Self>) {
+        if let UninstallerState::Ready(ready) = &mut self.uninstaller {
+            if let Some(selected) = ready.selected_files.get_mut(ready.focused) {
+                *selected = !*selected;
+                ready.confirming = false;
+                ready.message = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn begin_uninstall(&mut self, cx: &mut Context<Self>) {
+        let UninstallerState::Ready(ready) = &mut self.uninstaller else {
+            return;
+        };
+        if ready.scan_in_progress {
+            return;
+        }
+        let selected_count = ready
+            .selected_files
+            .iter()
+            .filter(|selected| **selected)
+            .count();
+        if selected_count == 0 {
+            ready.message = Some("Select at least one item to move to Trash".into());
+            ready.confirming = false;
+            cx.notify();
+            return;
+        }
+        if !ready.confirming {
+            ready.confirming = true;
+            ready.message = Some(format!("Move {selected_count} selected items to Trash?"));
+            cx.notify();
+            return;
+        }
+        let target = ready.target.clone();
+        let scan_limited = ready.scan_limited;
+        let paths: Vec<_> = ready
+            .files
+            .iter()
+            .zip(&ready.selected_files)
+            .filter(|(_, selected)| **selected)
+            .map(|(file, _)| file.path.clone())
+            .collect();
+        let files = ready.files.clone();
+        self.uninstaller = UninstallerState::Removing {
+            target: target.clone(),
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let moved_paths = paths.clone();
+            let trash_target = target.clone();
+            let result = smol::unblock(move || {
+                corvo_platform::move_app_files_to_trash(&trash_target.path, &paths)
+                    .map(|()| moved_paths)
+            })
+            .await;
+            let (files, reached_scan_limit, message) = match result {
+                Ok(moved_paths) => {
+                    let moved_paths: std::collections::HashSet<_> =
+                        moved_paths.into_iter().collect();
+                    let remaining: Vec<_> = files
+                        .into_iter()
+                        .filter(|file| !moved_paths.contains(&file.path))
+                        .collect();
+                    (
+                        remaining,
+                        scan_limited,
+                        Some(format!("Moved {} items to Trash", moved_paths.len())),
+                    )
+                }
+                Err(error) => {
+                    let scan_target = target.clone();
+                    let current_scan = smol::unblock(move || {
+                        corvo_platform::associated_app_files(&scan_target.path)
+                    })
+                    .await;
+                    match current_scan {
+                        Ok(scan) => (scan.files, scan.reached_scan_limit, Some(error.to_string())),
+                        Err(_) => (files, scan_limited, Some(error.to_string())),
+                    }
+                }
+            };
+            let _ = this.update(cx, |launcher, cx| {
+                let selected_files = vec![false; files.len()];
+                launcher.uninstaller = UninstallerState::Ready(UninstallerReady {
+                    target,
+                    files,
+                    selected_files,
+                    focused: 0,
+                    confirming: false,
+                    scan_in_progress: false,
+                    scan_limited: reached_scan_limit,
+                    message,
+                });
+                launcher.query.clear();
+                launcher.cursor_idx = 0;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn selected_result(&self) -> Option<&SearchResult> {
         self.results.get(self.selected)
     }
@@ -1031,24 +1786,113 @@ impl Launcher {
     /// Runs every command's search on the background executor and swaps
     /// the result list when they answer.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.is_loading = true;
-        cx.notify();
         let query = self.query.clone();
         let commands = self.registry.commands().to_vec();
+        let launcher_store = self.store.clone();
+        let settings = corvo_config::Settings::load();
+        let fallback_enabled = self.store.command_enabled("web-search-fallback");
         let max_results = if query.is_empty() { 2000 } else { 100 };
+        if query.is_empty() {
+            self.results = cached_initial_results();
+        } else {
+            self.results = cached_query_results(&query, max_results, fallback_enabled);
+        }
+        apply_result_preferences(&mut self.results, &settings);
+        self.rebuild_root_flat_items();
+        self.selected = 0;
+        self.results_scroll_handle.scroll_to_item(0);
+        cx.notify();
         // Only the latest refresh may write results; a stale task from
         // an older query never overwrites the current list.
         self.search_seq += 1;
         let seq = self.search_seq;
+        let search_settings = settings.clone();
         cx.spawn(async move |this, cx| {
-            let ctx = SearchContext { max_results, store: None };
-            let mut results = Vec::new();
-            for command in &commands {
-                results.extend(command.search(&query, &ctx).await);
+            let ctx = SearchContext {
+                max_results,
+                store: Some(launcher_store),
+            };
+            let searchable: Vec<_> = commands
+                .into_iter()
+                .filter(|command| {
+                    command.id() != "web-search-fallback"
+                        && ctx
+                            .store
+                            .as_ref()
+                            .is_some_and(|store| store.command_enabled(command.id()))
+                })
+                .collect();
+            let search_count = searchable.len();
+            let (sender, receiver) = smol::channel::unbounded();
+            for command in searchable {
+                let sender = sender.clone();
+                let query = query.clone();
+                let ctx = ctx.clone();
+                smol::spawn(async move {
+                    let results = command.search(&query, &ctx).await;
+                    let _ = sender.send(results).await;
+                })
+                .detach();
             }
-            results
-                .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            results.truncate(max_results);
+            drop(sender);
+            let mut results = Vec::new();
+            for _ in 0..search_count {
+                let Ok(mut batch) = receiver.recv().await else {
+                    break;
+                };
+                if query.is_empty() {
+                    batch.retain(|result| {
+                        let command_id = result.id.split(':').next().unwrap_or_default();
+                        ctx.store
+                            .as_ref()
+                            .is_some_and(|store| store.show_command_in_launcher(command_id))
+                    });
+                }
+                results.extend(batch);
+                apply_result_preferences(&mut results, &search_settings);
+                if !query.is_empty() {
+                    let mut partial_results = results.clone();
+                    let has_confident_match = partial_results
+                        .first()
+                        .is_some_and(|result| result.score >= CONFIDENT_SEARCH_SCORE);
+                    let partial_limit = if has_confident_match {
+                        max_results.saturating_sub(2)
+                    } else {
+                        MAX_WEAK_SEARCH_RESULTS
+                    };
+                    partial_results.truncate(partial_limit);
+                    if fallback_enabled {
+                        partial_results.extend(corvo_web_search_fallback::search_results(&query));
+                    }
+                    apply_result_preferences(&mut partial_results, &search_settings);
+                    let _ = this.update(cx, |launcher, cx| {
+                        if launcher.search_seq == seq {
+                            launcher.results = partial_results;
+                            launcher.rebuild_root_flat_items();
+                            launcher.selected = 0;
+                            launcher.results_scroll_handle.scroll_to_item(0);
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+            apply_result_preferences(&mut results, &search_settings);
+            if !query.is_empty() {
+                let has_confident_match = results
+                    .first()
+                    .is_some_and(|result| result.score >= CONFIDENT_SEARCH_SCORE);
+                if has_confident_match {
+                    results.truncate(max_results.saturating_sub(2));
+                } else {
+                    results.truncate(MAX_WEAK_SEARCH_RESULTS);
+                }
+                if fallback_enabled {
+                    results.extend(corvo_web_search_fallback::search_results(&query));
+                }
+                apply_result_preferences(&mut results, &search_settings);
+            } else {
+                results.truncate(max_results);
+            }
             if query.is_empty() {
                 if let Some(cell) = INITIAL_RESULTS.get() {
                     if let Ok(mut lock) = cell.write() {
@@ -1062,7 +1906,6 @@ impl Launcher {
                     launcher.rebuild_root_flat_items();
                     launcher.selected = 0;
                     launcher.results_scroll_handle.scroll_to_item(0);
-                    launcher.is_loading = false;
                     launcher.actions_open = false;
                     launcher.actions = Vec::new();
                     launcher.actions_filter = String::new();
@@ -1074,7 +1917,6 @@ impl Launcher {
     }
 
     fn refresh_emoji(&mut self, cx: &mut Context<Self>) {
-        self.is_loading = true;
         cx.notify();
         let query = self.query.clone();
         let selected_category = if self.emoji_category_index > 0 {
@@ -1083,16 +1925,23 @@ impl Launcher {
             None
         };
         let commands = self.registry.commands().to_vec();
+        let launcher_store = self.store.clone();
         let Some(command) = commands.iter().find(|c| c.id() == "emoji-picker").cloned() else {
-            self.is_loading = false;
             cx.notify();
             return;
         };
+        if !self.store.command_enabled(command.id()) {
+            cx.notify();
+            return;
+        }
 
         self.search_seq += 1;
         let seq = self.search_seq;
         cx.spawn(async move |this, cx| {
-            let ctx = SearchContext { max_results: 1071, store: None };
+            let ctx = SearchContext {
+                max_results: 1071,
+                store: Some(launcher_store),
+            };
             let raw_query = format!("emoji-page:{query}");
             let mut results = command.search(&raw_query, &ctx).await;
             if let Some(cat) = selected_category {
@@ -1102,7 +1951,6 @@ impl Launcher {
                 if launcher.search_seq == seq && launcher.page == LauncherPage::Emoji {
                     launcher.results = results;
                     launcher.selected = 0;
-                    launcher.is_loading = false;
                     launcher.emoji_scroll_handle.scroll_to_item(0);
                     cx.notify();
                 }
@@ -1112,7 +1960,6 @@ impl Launcher {
     }
 
     fn refresh_clipboard(&mut self, cx: &mut Context<Self>) {
-        self.is_loading = true;
         cx.notify();
         let query = self.query.clone();
         let filter_name = match self.clipboard_filter_index {
@@ -1123,26 +1970,44 @@ impl Launcher {
             _ => "all",
         };
         let commands = self.registry.commands().to_vec();
-        let Some(command) = commands.iter().find(|c| c.id() == "clipboard-manager").cloned() else {
-            self.is_loading = false;
+        let launcher_store = self.store.clone();
+        let Some(command) = commands
+            .iter()
+            .find(|c| c.id() == "clipboard-manager")
+            .cloned()
+        else {
             cx.notify();
             return;
         };
+        if !self.store.command_enabled(command.id()) {
+            cx.notify();
+            return;
+        }
 
         self.search_seq += 1;
         let seq = self.search_seq;
         cx.spawn(async move |this, cx| {
-            let ctx = SearchContext { max_results: 100, store: None };
+            let ctx = SearchContext {
+                max_results: 100,
+                store: Some(launcher_store),
+            };
             let raw_query = format!("clipboard-page:filter={filter_name}:{query}");
             let results = command.search(&raw_query, &ctx).await;
             let _ = this.update(cx, |launcher, cx| {
                 if launcher.search_seq == seq && launcher.page == LauncherPage::Clipboard {
                     launcher.results = results;
                     launcher.rebuild_clipboard_flat_items();
-                    launcher.selected = launcher.selected.min(launcher.results.len().saturating_sub(1));
-                    let flat_idx = launcher.clipboard_to_flat.get(launcher.selected).copied().unwrap_or(0);
-                    launcher.clipboard_scroll_handle.scroll_to_item(flat_idx, ScrollStrategy::Nearest);
-                    launcher.is_loading = false;
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    let flat_idx = launcher
+                        .clipboard_to_flat
+                        .get(launcher.selected)
+                        .copied()
+                        .unwrap_or(0);
+                    launcher
+                        .clipboard_scroll_handle
+                        .scroll_to_item(flat_idx, ScrollStrategy::Nearest);
                     cx.notify();
                 }
             });
@@ -1176,6 +2041,46 @@ impl Launcher {
             return;
         };
         let mut actions = command.actions(&result_id);
+        let settings = corvo_config::Settings::load();
+        let config = settings.result_item(&result_id, &title).cloned().unwrap_or_default();
+        let favorite = settings.result_is_favorite(&result_id);
+        actions.push(CommandAction {
+            id: "launcher:favorite".into(),
+            label: if favorite {
+                "Remove from Favorites".into()
+            } else {
+                "Add to Favorites".into()
+            },
+            action: Action::SetResultFavorite {
+                result_id: result_id.clone(),
+                title: title.clone(),
+                favorite: !favorite,
+            },
+            icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::STAR),
+            group: corvo_core::ActionGroup::Standard,
+            hotkey: Some("⇧⌘F"),
+        });
+        actions.push(CommandAction {
+            id: "launcher:hide".into(),
+            label: if config.hidden {
+                "Show in Search".into()
+            } else {
+                "Hide from Search".into()
+            },
+            action: Action::SetResultHidden {
+                result_id: result_id.clone(),
+                title: title.clone(),
+                hidden: !config.hidden,
+            },
+            icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::EYE_SLASH),
+            group: corvo_core::ActionGroup::Standard,
+            hotkey: Some("⇧⌘H"),
+        });
+        actions.sort_by_key(|action| match action.group {
+            corvo_core::ActionGroup::Primary => 0,
+            corvo_core::ActionGroup::Standard => 1,
+            corvo_core::ActionGroup::Destructive => 2,
+        });
         let target = self.previous_app_name.as_deref().unwrap_or("Active App");
         for act in &mut actions {
             if act.label == "Paste to Active App" {
@@ -1226,6 +2131,7 @@ impl Launcher {
 
         div()
             .id("filter-dropdown-menu")
+            .occlude()
             .absolute()
             .top(px(46.0))
             .right(px(14.0))
@@ -1260,8 +2166,16 @@ impl Launcher {
                     .child(
                         div()
                             .text_size(px(13.0))
-                            .text_color(if is_active { rgb(COLOR_ACCENT) } else { rgb(COLOR_TEXT) })
-                            .font_weight(if is_active { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                            .text_color(if is_active {
+                                rgb(COLOR_ACCENT)
+                            } else {
+                                rgb(COLOR_TEXT)
+                            })
+                            .font_weight(if is_active {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
                             .child(label),
                     )
                     .when(is_active, |row| {
@@ -1283,6 +2197,7 @@ impl Launcher {
         ];
         div()
             .id("burger-menu")
+            .occlude()
             .absolute()
             .left(px(12.0))
             .bottom(px(10.0))
@@ -1298,6 +2213,7 @@ impl Launcher {
                 let label_str = label.to_string();
                 let is_quit = *label == "Quit Corvo";
                 let is_preferences = *label == "Preferences...";
+                let is_about = *label == "About Corvo";
                 div()
                     .id(SharedString::from(format!("burger-item-{idx}")))
                     .flex()
@@ -1312,6 +2228,8 @@ impl Launcher {
                         launcher.close_burger_menu(cx);
                         if is_preferences {
                             open_settings(cx);
+                        } else if is_about {
+                            open_settings_tab(SettingsTab::About, cx);
                         } else if is_quit {
                             launcher.dismiss(window);
                             std::process::exit(0);
@@ -1323,13 +2241,8 @@ impl Launcher {
                             .when(is_quit, |l| l.text_color(rgb(COLOR_DESTRUCTIVE)))
                             .child(label_str),
                     )
-                    .when_some(*hotkey, |row, key| {
-                        row.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(COLOR_TEXT_DIM))
-                                .child(key),
-                        )
+                    .when_some(*hotkey, |row, hotkey| {
+                        row.child(div().flex().gap_1().children(hotkey.chars().map(keycap)))
                     })
             }))
     }
@@ -1340,17 +2253,19 @@ impl Launcher {
         self.actions
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                filter.is_empty() || entry.label.to_lowercase().contains(&filter)
-            })
+            .filter(|(_, entry)| filter.is_empty() || entry.label.to_lowercase().contains(&filter))
             .map(|(index, _)| index)
             .collect()
     }
 
     fn run_selected_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let filtered = self.filtered_actions();
-        let Some(position) = filtered.get(self.action_selected) else { return };
-        let Some(entry) = self.actions.get(*position) else { return };
+        let Some(position) = filtered.get(self.action_selected) else {
+            return;
+        };
+        let Some(entry) = self.actions.get(*position) else {
+            return;
+        };
         let entry_id = entry.id.clone();
         let action = Ok(entry.action.clone());
         let is_repeatable = entry_id.contains("volume-up")
@@ -1367,11 +2282,17 @@ impl Launcher {
     }
 
     fn execute_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == LauncherPage::Uninstaller {
+            self.toggle_uninstaller_focus(cx);
+            return;
+        }
         if self.page == LauncherPage::Emoji {
             self.execute_selected_emoji(window, cx);
             return;
         }
-        let Some(result) = self.selected_result().cloned() else { return };
+        let Some(result) = self.selected_result().cloned() else {
+            return;
+        };
         if result.id == "emoji-picker:open" {
             self.open_emoji_page(cx);
             return;
@@ -1380,7 +2301,9 @@ impl Launcher {
             self.open_clipboard_page(cx);
             return;
         }
-        let Some(command_id) = result.id.split(':').next() else { return };
+        let Some(command_id) = result.id.split(':').next() else {
+            return;
+        };
         let Some(command) = self
             .registry
             .commands()
@@ -1391,7 +2314,24 @@ impl Launcher {
             return;
         };
         let result_id = result.id.clone();
-        let ctx = ExecutionContext::default();
+        let ctx = ExecutionContext {
+            store: Some(self.store.clone()),
+        };
+        let actions = command.actions(&result_id);
+        if let Some(primary) = actions
+            .iter()
+            .find(|a| a.group == ActionGroup::Primary)
+            .or_else(|| actions.first())
+        {
+            let primary_action = primary.action.clone();
+            cx.spawn(async move |_this, _cx| {
+                let _ = command.execute(&result_id, &ctx).await;
+            })
+            .detach();
+            self.perform(Ok(primary_action), window, cx);
+            return;
+        }
+
         cx.spawn_in(window, async move |this, cx| {
             let action = command.execute(&result_id, &ctx).await;
             let _ = this.update_in(cx, |launcher, window, cx| {
@@ -1402,9 +2342,15 @@ impl Launcher {
     }
 
     fn execute_selected_emoji(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(result) = self.results.get(self.selected) else { return };
-        let glyph = result.id.strip_prefix("emoji-picker:").unwrap_or(&result.title);
-        let action = Ok(Action::Copy(glyph.to_owned()));
+        let Some(result) = self.results.get(self.selected) else {
+            return;
+        };
+        let raw_glyph = result
+            .id
+            .strip_prefix("emoji-picker:")
+            .unwrap_or(&result.title);
+        let glyph = apply_emoji_skin_tone(raw_glyph, self.emoji_skin_tone);
+        let action = Ok(Action::PasteText(glyph));
         self.perform(action, window, cx);
     }
 
@@ -1417,12 +2363,33 @@ impl Launcher {
         let ops = corvo_platform::platform_ops();
         match action {
             Ok(Action::Open(path)) => {
+                self.previous_app = None;
+                window.remove_window();
                 let _ = ops.open_path(&path);
-                self.dismiss(window);
+            }
+            Ok(Action::OpenAppUninstaller { name, path }) => {
+                self.open_uninstaller_page(name, path, cx);
+            }
+            Ok(Action::SetResultFavorite {
+                result_id,
+                title,
+                favorite,
+            }) => {
+                self.save_result_flag(&result_id, &title, None, Some(favorite));
+                self.refresh(cx);
+            }
+            Ok(Action::SetResultHidden {
+                result_id,
+                title,
+                hidden,
+            }) => {
+                self.save_result_flag(&result_id, &title, Some(hidden), None);
+                self.refresh(cx);
             }
             Ok(Action::OpenUrl(url)) => {
+                self.previous_app = None;
+                window.remove_window();
                 let _ = corvo_platform::open_url(&url);
-                self.dismiss(window);
             }
             Ok(Action::RunShell(cmd)) => {
                 let is_repeatable = self.selected_result().is_some_and(|r| {
@@ -1444,15 +2411,16 @@ impl Launcher {
                     .detach();
                     cx.notify();
                 } else {
-                    self.dismiss(window);
-                    cx.spawn(async move |_this, _cx| {
-                        smol::Timer::after(std::time::Duration::from_millis(50)).await;
-                        let _ = corvo_platform::run_shell(&cmd);
-                    })
-                    .detach();
+                    self.previous_app = None;
+                    window.remove_window();
+                    let _ = corvo_platform::run_shell(&cmd);
                 }
             }
             Ok(Action::Copy(text)) => {
+                let _ = ops.copy_text(&text);
+                self.dismiss(window);
+            }
+            Ok(Action::PasteText(text)) => {
                 let previous_pid = self.previous_app.take();
                 window.remove_window();
                 if let Some(pid) = previous_pid {
@@ -1525,10 +2493,33 @@ impl Launcher {
         }
     }
 
+    fn save_result_flag(
+        &self,
+        result_id: &str,
+        title: &str,
+        hidden: Option<bool>,
+        favorite: Option<bool>,
+    ) {
+        let mut settings = corvo_config::Settings::load();
+        if settings.set_result_item_flags(result_id, title, hidden, favorite) {
+            if let Err(error) = settings.save() {
+                eprintln!("corvo: could not save item preferences: {error}");
+            }
+        }
+        if let (Some(hidden), Some(_index)) = (hidden, result_id.strip_prefix("quicklinks:")) {
+            let mut quicklinks = corvo_config::QuicklinksFile::load();
+            if let Some(link) = quicklinks.quicklinks.iter_mut().find(|link| link.name == title) {
+                link.hidden = hidden;
+                if let Err(error) = quicklinks.save() {
+                    eprintln!("corvo: could not save quicklink visibility: {error}");
+                }
+            }
+        }
+    }
+
     /// Closes the panel and hands activation back to the app that was
     /// frontmost when it opened.
     fn dismiss(&mut self, window: &mut Window) {
-        self.is_loading = false;
         window.remove_window();
         if let Some(pid) = self.previous_app.take() {
             corvo_platform::activate_app(pid);
@@ -1604,7 +2595,7 @@ impl Launcher {
                             div()
                                 .id(SharedString::from(format!("section-header-{title}")))
                                 .w_full()
-                                .h(px(ROW_HEIGHT))
+                                .h(px(self.row_height))
                                 .px(px(6.0))
                                 .flex()
                                 .items_end()
@@ -1702,7 +2693,7 @@ impl Launcher {
                     .child(icons::render_phosphor_svg(
                         phosphor_svgs::style::regular::CARET_LEFT,
                         rgb(COLOR_TEXT_DIM),
-                        16.0,
+                        20.0,
                     )),
             )
             .child(
@@ -1729,25 +2720,41 @@ impl Launcher {
                     .px_2p5()
                     .py_1()
                     .rounded_full()
-                    .when(self.filter_dropdown_open || is_filtered, |s| s.bg(rgb(COLOR_ROW_SELECTED)))
-                    .when(!self.filter_dropdown_open && !is_filtered, |s| s.bg(rgb(COLOR_PILL)))
+                    .when(self.filter_dropdown_open || is_filtered, |s| {
+                        s.bg(rgb(COLOR_ROW_SELECTED))
+                    })
+                    .when(!self.filter_dropdown_open && !is_filtered, |s| {
+                        s.bg(rgb(COLOR_PILL))
+                    })
                     .hover(|s| s.bg(rgb(COLOR_ROW_SELECTED)))
                     .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
                         launcher.toggle_filter_dropdown(cx);
                     }))
                     .child(icons::render_phosphor_svg(
                         phosphor_svgs::style::regular::SQUARES_FOUR,
-                        if is_filtered { rgb(COLOR_ACCENT) } else { rgb(COLOR_TEXT_DIM) },
+                        if is_filtered {
+                            rgb(COLOR_ACCENT)
+                        } else {
+                            rgb(COLOR_TEXT_DIM)
+                        },
                         14.0,
                     ))
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(if is_filtered { rgb(COLOR_ACCENT) } else { rgb(COLOR_TEXT) })
+                            .text_color(if is_filtered {
+                                rgb(COLOR_ACCENT)
+                            } else {
+                                rgb(COLOR_TEXT)
+                            })
                             .child(cat_label),
                     )
                     .child(icons::render_phosphor_svg(
-                        if self.filter_dropdown_open { phosphor_svgs::style::regular::CARET_UP } else { phosphor_svgs::style::regular::CARET_DOWN },
+                        if self.filter_dropdown_open {
+                            phosphor_svgs::style::regular::CARET_UP
+                        } else {
+                            phosphor_svgs::style::regular::CARET_DOWN
+                        },
                         rgb(COLOR_TEXT_DIM),
                         12.0,
                     )),
@@ -1787,20 +2794,26 @@ impl Launcher {
             return div().id("no-emoji-results").flex_1();
         }
 
-        let num_rows = (self.results.len() + 7) / 8;
+        let column_count = self.emoji_column_count;
+        let num_rows = (self.results.len() + column_count - 1) / column_count;
         let mut rows: Vec<Stateful<Div>> = Vec::with_capacity(num_rows);
 
         for row_idx in 0..num_rows {
-            let start = row_idx * 8;
-            let end = (start + 8).min(self.results.len());
-            let mut cells: Vec<Stateful<Div>> = Vec::with_capacity(8);
+            let start = row_idx * column_count;
+            let end = (start + column_count).min(self.results.len());
+            let mut cells: Vec<Stateful<Div>> = Vec::with_capacity(column_count);
 
             for idx in start..end {
                 let is_selected = idx == self.selected;
-                let glyph = match &self.results[idx].icon {
+                let raw_glyph = match &self.results[idx].icon {
                     Icon::Glyph(g) => (*g).to_string(),
-                    _ => self.results[idx].id.strip_prefix("emoji-picker:").unwrap_or(&self.results[idx].title).to_string(),
+                    _ => self.results[idx]
+                        .id
+                        .strip_prefix("emoji-picker:")
+                        .unwrap_or(&self.results[idx].title)
+                        .to_string(),
                 };
+                let glyph = apply_emoji_skin_tone(&raw_glyph, self.emoji_skin_tone);
                 cells.push(
                     div()
                         .id(SharedString::from(format!("emoji-cell-{idx}")))
@@ -1826,18 +2839,16 @@ impl Launcher {
                             launcher.selected = idx;
                             launcher.execute_selected_emoji(window, cx);
                         }))
-                        .child(
-                            div()
-                                .text_size(px(28.0))
-                                .child(glyph),
-                        ),
+                        .child(div().text_size(px(28.0)).child(glyph)),
                 );
             }
 
-            for dummy_idx in (end - start)..8 {
+            for dummy_idx in (end - start)..column_count {
                 cells.push(
                     div()
-                        .id(SharedString::from(format!("emoji-dummy-{row_idx}-{dummy_idx}")))
+                        .id(SharedString::from(format!(
+                            "emoji-dummy-{row_idx}-{dummy_idx}"
+                        )))
                         .flex_1()
                         .h(px(62.0)),
                 );
@@ -1923,7 +2934,7 @@ impl Launcher {
                     .child(icons::render_phosphor_svg(
                         phosphor_svgs::style::regular::CARET_LEFT,
                         rgb(COLOR_TEXT_DIM),
-                        16.0,
+                        20.0,
                     )),
             )
             .child(
@@ -1955,29 +2966,319 @@ impl Launcher {
                     .px_2p5()
                     .py_1()
                     .rounded_full()
-                    .when(self.filter_dropdown_open || is_filtered, |s| s.bg(rgb(COLOR_ROW_SELECTED)))
-                    .when(!self.filter_dropdown_open && !is_filtered, |s| s.bg(rgb(COLOR_PILL)))
+                    .when(self.filter_dropdown_open || is_filtered, |s| {
+                        s.bg(rgb(COLOR_ROW_SELECTED))
+                    })
+                    .when(!self.filter_dropdown_open && !is_filtered, |s| {
+                        s.bg(rgb(COLOR_PILL))
+                    })
                     .hover(|s| s.bg(rgb(COLOR_ROW_SELECTED)))
                     .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
                         launcher.toggle_filter_dropdown(cx);
                     }))
                     .child(icons::render_phosphor_svg(
                         phosphor_svgs::style::regular::FUNNEL,
-                        if is_filtered { rgb(COLOR_ACCENT) } else { rgb(COLOR_TEXT_DIM) },
+                        if is_filtered {
+                            rgb(COLOR_ACCENT)
+                        } else {
+                            rgb(COLOR_TEXT_DIM)
+                        },
                         13.0,
                     ))
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(if is_filtered { rgb(COLOR_ACCENT) } else { rgb(COLOR_TEXT) })
+                            .text_color(if is_filtered {
+                                rgb(COLOR_ACCENT)
+                            } else {
+                                rgb(COLOR_TEXT)
+                            })
                             .child(current_filter_label),
                     )
                     .child(icons::render_phosphor_svg(
-                        if self.filter_dropdown_open { phosphor_svgs::style::regular::CARET_UP } else { phosphor_svgs::style::regular::CARET_DOWN },
+                        if self.filter_dropdown_open {
+                            phosphor_svgs::style::regular::CARET_UP
+                        } else {
+                            phosphor_svgs::style::regular::CARET_DOWN
+                        },
                         rgb(COLOR_TEXT_DIM),
                         12.0,
                     ))
             })
+    }
+
+    fn uninstaller_search_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let font_size = px(18.0);
+        let cursor_x = cursor_offset_for_query(&self.query, self.cursor_idx, font_size, window);
+        let target_name = match &self.uninstaller {
+            UninstallerState::Removing { target }
+            | UninstallerState::Ready(UninstallerReady { target, .. }) => target.name.as_str(),
+            UninstallerState::Closed => "Uninstall Application",
+        };
+        let input = if self.query.is_empty() {
+            div()
+                .id("uninstaller-input-content")
+                .relative()
+                .flex_1()
+                .h(px(26.0))
+                .flex()
+                .items_center()
+                .child(render_cursor(px(0.0), px(22.0), self.cursor_visible))
+                .child(
+                    div()
+                        .pt(px(1.5))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child("Filter files and folders..."),
+                )
+        } else {
+            div()
+                .id("uninstaller-input-content")
+                .relative()
+                .flex_1()
+                .h(px(26.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .pt(px(1.5))
+                        .text_color(rgb(COLOR_TEXT))
+                        .child(self.query.clone()),
+                )
+                .child(render_cursor(cursor_x, px(22.0), self.cursor_visible))
+        };
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .py_2p5()
+            .child(
+                div()
+                    .id("uninstaller-back")
+                    .cursor_pointer()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .hover(|style| style.bg(rgb(COLOR_PILL)))
+                    .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
+                        launcher.open_root_page(cx);
+                    }))
+                    .child(icons::render_phosphor_svg(
+                        phosphor_svgs::style::regular::CARET_LEFT,
+                        rgb(COLOR_TEXT_DIM),
+                        20.0,
+                    )),
+            )
+            .child(
+                div()
+                    .id("uninstaller-input-area")
+                    .flex_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|launcher, event: &ClickEvent, window, cx| {
+                        let local_x = (event.position().x - px(53.0)).max(px(0.0));
+                        launcher.cursor_idx =
+                            cursor_index_from_click(&launcher.query, local_x, px(18.0), window);
+                        launcher.cursor_visible = true;
+                        cx.notify();
+                    }))
+                    .child(input),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(target_name.to_string()),
+            )
+    }
+
+    fn uninstaller_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let visible = self.uninstaller_visible_indices();
+        match &self.uninstaller {
+            UninstallerState::Removing { .. } => div()
+                .id("uninstaller-removing")
+                .flex_1()
+                .px_4()
+                .py_3()
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child("Moving selected files to Trash..."),
+            UninstallerState::Closed => div().id("uninstaller-closed").flex_1(),
+            UninstallerState::Ready(ready) => {
+                let selected_count = ready
+                    .selected_files
+                    .iter()
+                    .filter(|selected| **selected)
+                    .count();
+                let selected_size = ready
+                    .files
+                    .iter()
+                    .zip(&ready.selected_files)
+                    .filter(|(_, selected)| **selected)
+                    .map(|(file, _)| file.size_bytes)
+                    .fold(0u64, u64::saturating_add);
+                let rows = visible.iter().map(|index| {
+                    let index = *index;
+                    let file = &ready.files[index];
+                    let selected = ready.selected_files.get(index).copied().unwrap_or(false);
+                    let focused = ready.focused == index;
+                    let label = file
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Unknown file");
+                    let size = format_file_size(file.size_bytes);
+                    let path = file.location.clone();
+                    let icon = if file.is_application {
+                        phosphor_svgs::style::regular::APP_WINDOW
+                    } else if file.path.is_dir() {
+                        phosphor_svgs::style::regular::FOLDER
+                    } else {
+                        phosphor_svgs::style::regular::FILE
+                    };
+                    div()
+                        .id(SharedString::from(format!("uninstaller-row-{index}")))
+                        .w_full()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .h(px(48.0))
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .when(focused, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
+                        .when(!focused, |row| row.hover(|style| style.bg(rgb(0x181b1e))))
+                        .on_click(cx.listener(move |launcher, _: &ClickEvent, _window, cx| {
+                            if let UninstallerState::Ready(ready) = &mut launcher.uninstaller {
+                                ready.focused = index;
+                                ready.confirming = false;
+                                if let Some(checked) = ready.selected_files.get_mut(index) {
+                                    *checked = !*checked;
+                                }
+                            }
+                            cx.notify();
+                        }))
+                        .child(icons::render_phosphor_svg(
+                            if selected {
+                                phosphor_svgs::style::regular::CHECK_SQUARE
+                            } else {
+                                phosphor_svgs::style::regular::SQUARE
+                            },
+                            if selected {
+                                rgb(COLOR_ACCENT)
+                            } else {
+                                rgb(COLOR_TEXT_DIM)
+                            },
+                            18.0,
+                        ))
+                        .child(icons::render_phosphor_svg(icon, rgb(COLOR_TEXT_ICON), 18.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(rgb(COLOR_TEXT))
+                                        .whitespace_nowrap()
+                                        .text_overflow(TextOverflow::Truncate(
+                                            SharedString::new_static("..."),
+                                        ))
+                                        .child(label.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(path),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(rgb(COLOR_TEXT_DIM))
+                                .child(size),
+                        )
+                });
+                div()
+                    .id("uninstaller-content")
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .pb_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .py_2()
+                            .text_size(px(12.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(format!(
+                                "{selected_count} of {} files selected · {}",
+                                ready.files.len(),
+                                format_file_size(selected_size)
+                            )),
+                    )
+                    .when(ready.scan_limited, |view| {
+                        view.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .pb_2()
+                                .text_size(px(12.0))
+                                .text_color(rgb(COLOR_DESTRUCTIVE))
+                                .child("Scan limit reached. Some related files may not appear."),
+                        )
+                    })
+                    .when_some(ready.message.clone(), |view, message| {
+                        view.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .pb_2()
+                                .text_size(px(12.0))
+                                .text_color(if ready.confirming {
+                                    rgb(COLOR_DESTRUCTIVE)
+                                } else {
+                                    rgb(COLOR_TEXT_DIM)
+                                })
+                                .child(message),
+                        )
+                    })
+                    .child(if ready.files.is_empty() {
+                        div()
+                            .id("uninstaller-empty")
+                            .flex_1()
+                            .px_1()
+                            .py_2()
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child("No related files found")
+                    } else if visible.is_empty() {
+                        div()
+                            .id("uninstaller-filter-empty")
+                            .flex_1()
+                            .px_1()
+                            .py_2()
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child("No matching files")
+                    } else {
+                        div()
+                            .id("uninstaller-rows")
+                            .flex_1()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .overflow_y_scroll()
+                            .children(rows)
+                    })
+            }
+        }
     }
 
     fn clipboard_split_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1987,12 +3288,7 @@ impl Launcher {
             .flex()
             .overflow_hidden()
             .child(self.clipboard_list(cx))
-            .child(
-                div()
-                    .w(px(1.0))
-                    .self_stretch()
-                    .bg(rgb(COLOR_DIVIDER)),
-            )
+            .child(div().w(px(1.0)).self_stretch().bg(rgb(COLOR_DIVIDER)))
             .child(self.clipboard_preview_pane(cx))
     }
 
@@ -2019,28 +3315,34 @@ impl Launcher {
                 uniform_list(
                     "clipboard-uniform-list",
                     self.clipboard_flat_items.len(),
-                    cx.processor(|launcher: &mut Self, range: std::ops::Range<usize>, _window, cx| {
-                        range.map(|flat_idx| match &launcher.clipboard_flat_items[flat_idx] {
-                            ClipboardFlatItem::Header(title) => div()
-                                .id(SharedString::from(format!("clipboard-section-{flat_idx}")))
-                                .h(px(ROW_HEIGHT))
-                                .px(px(6.0))
-                                .flex()
-                                .items_end()
-                                .pb_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(COLOR_TEXT_DIM))
-                                        .child(title.clone()),
-                                ),
-                            ClipboardFlatItem::Row(result_idx) => {
-                                let result = &launcher.results[*result_idx];
-                                launcher.clipboard_row(*result_idx, result, cx)
-                            }
-                        }).collect::<Vec<_>>()
-                    }),
+                    cx.processor(
+                        |launcher: &mut Self, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .map(|flat_idx| match &launcher.clipboard_flat_items[flat_idx] {
+                                    ClipboardFlatItem::Header(title) => div()
+                                        .id(SharedString::from(format!(
+                                            "clipboard-section-{flat_idx}"
+                                        )))
+                                        .h(px(launcher.row_height))
+                                        .px(px(6.0))
+                                        .flex()
+                                        .items_end()
+                                        .pb_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(COLOR_TEXT_DIM))
+                                                .child(title.clone()),
+                                        ),
+                                    ClipboardFlatItem::Row(result_idx) => {
+                                        let result = &launcher.results[*result_idx];
+                                        launcher.clipboard_row(*result_idx, result, cx)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    ),
                 )
                 .track_scroll(&self.clipboard_scroll_handle)
                 .flex_1(),
@@ -2061,7 +3363,7 @@ impl Launcher {
             .items_center()
             .px(px(6.0))
             .mb_0p5()
-            .h(px(ROW_HEIGHT))
+            .h(px(self.row_height))
             .rounded_lg()
             .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
             .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
@@ -2081,7 +3383,7 @@ impl Launcher {
                             Icon::Image(path) if path.exists() => Some(path.clone()),
                             _ => None,
                         },
-                        |el, path| el.child(img(path).size(px(ICON_SIZE)).rounded_md()),
+                        |el, path| el.child(img(path).size(px(ICON_SIZE))),
                     )
                     .when(
                         match &result.icon {
@@ -2136,18 +3438,22 @@ impl Launcher {
         };
 
         let content_view = if let Some(img_path) = entry.image_path() {
-            let (disp_w, disp_h) = if let (Some(w), Some(h)) = (entry.image_width, entry.image_height) {
-                if w > 0 && h > 0 {
-                    let max_w = 420.0f32;
-                    let max_h = 240.0f32;
-                    let scale = (max_w / w as f32).min(max_h / h as f32).min(1.0);
-                    ((w as f32 * scale).round().max(32.0), (h as f32 * scale).round().max(32.0))
+            let (disp_w, disp_h) =
+                if let (Some(w), Some(h)) = (entry.image_width, entry.image_height) {
+                    if w > 0 && h > 0 {
+                        let max_w = 420.0f32;
+                        let max_h = 240.0f32;
+                        let scale = (max_w / w as f32).min(max_h / h as f32).min(1.0);
+                        (
+                            (w as f32 * scale).round().max(32.0),
+                            (h as f32 * scale).round().max(32.0),
+                        )
+                    } else {
+                        (180.0, 180.0)
+                    }
                 } else {
                     (180.0, 180.0)
-                }
-            } else {
-                (180.0, 180.0)
-            };
+                };
 
             div()
                 .id("clip-preview-image-box")
@@ -2163,12 +3469,7 @@ impl Launcher {
                 .bg(rgb(0x121315))
                 .border_1()
                 .border_color(rgb(0x27272a))
-                .child(
-                    img(img_path)
-                        .w(px(disp_w))
-                        .h(px(disp_h))
-                        .rounded_md(),
-                )
+                .child(img(img_path).w(px(disp_w)).h(px(disp_h)).rounded_md())
         } else {
             Self::render_clipboard_text_preview(&entry.text)
         };
@@ -2322,29 +3623,19 @@ impl Launcher {
                 .flex_col()
                 .gap_2()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(rgb(0x113c30))
-                                .text_size(px(11.0))
-                                .text_color(rgb(COLOR_ACCENT))
-                                .font_weight(FontWeight::BOLD)
-                                .child("↗ Link"),
-                        ),
+                    div().flex().items_center().gap_2().child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(rgb(0x113c30))
+                            .text_size(px(11.0))
+                            .text_color(rgb(COLOR_ACCENT))
+                            .font_weight(FontWeight::BOLD)
+                            .child("↗ Link"),
+                    ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .children(url_lines),
-                )
+                .child(div().flex().flex_col().gap_0p5().children(url_lines))
         } else if is_latex {
             let lines: Vec<Div> = format_wrapped_preview_lines(raw_text, 50)
                 .into_iter()
@@ -2547,22 +3838,22 @@ impl Launcher {
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0x38bdf8))
                                 .child("</> Code"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(COLOR_TEXT_DIM))
-                            .child(format!("{} lines", lines.len())),
-                    ),
-            )
-            .child(
-                div()
-                    .font_family("Menlo")
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .children(lines),
-            )
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(COLOR_TEXT_DIM))
+                                .child(format!("{} lines", lines.len())),
+                        ),
+                )
+                .child(
+                    div()
+                        .font_family("Menlo")
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .children(lines),
+                )
         } else if is_markdown {
             let mut in_code_block = false;
             let mut md_elements: Vec<Div> = Vec::new();
@@ -2645,7 +3936,10 @@ impl Launcher {
                         );
                     }
                 } else if let Some(bullet) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
-                    for (b_idx, wrapped_bullet) in format_wrapped_preview_lines(bullet, 48).into_iter().enumerate() {
+                    for (b_idx, wrapped_bullet) in format_wrapped_preview_lines(bullet, 48)
+                        .into_iter()
+                        .enumerate()
+                    {
                         md_elements.push(
                             div()
                                 .min_w(px(0.0))
@@ -2720,13 +4014,7 @@ impl Launcher {
                                 .child("M↓ Markdown"),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1p5()
-                        .children(md_elements),
-                )
+                .child(div().flex().flex_col().gap_1p5().children(md_elements))
         } else {
             let lines: Vec<Div> = format_wrapped_preview_lines(raw_text, 50)
                 .into_iter()
@@ -2768,41 +4056,66 @@ impl Launcher {
     /// an actions filter at the bottom.
     fn actions_menu(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let filtered = self.filtered_actions();
-        let rows = (0..filtered.len()).filter_map(|position| {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut previous_group = None;
+        for position in 0..filtered.len() {
             let index = filtered[position];
-            let entry = self.actions.get(index)?;
+            let Some(entry) = self.actions.get(index) else {
+                continue;
+            };
             let selected = position == self.action_selected;
-            Some(
+            if previous_group.is_some_and(|group| group != entry.group) {
+                rows.push(
+                    div()
+                        .flex_none()
+                        .mx_1()
+                        .my_1()
+                        .h(px(1.0))
+                        .bg(rgb(COLOR_DIVIDER))
+                        .into_any_element(),
+                );
+            }
+            previous_group = Some(entry.group);
+            rows.push(
                 div()
                     .id(SharedString::from(format!("action-{position}")))
+                    .flex_none()
+                    .w_full()
                     .flex()
                     .items_center()
-                    .px(px(6.0))
-                    .mb_0p5()
-                    .h(px(ROW_HEIGHT))
-                    .rounded_lg()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .cursor_pointer()
                     .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
+                    .when(!selected, |row| row.hover(|style| style.bg(rgb(COLOR_ROW_SELECTED))))
                     .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
                         launcher.action_selected = position;
                         launcher.run_selected_action(window, cx);
                     }))
-                    .child(action_icon(&entry.icon))
+                    .child(action_icon(
+                        &entry.icon,
+                        entry.group == corvo_core::ActionGroup::Destructive,
+                    ))
                     .child(
                         div()
-                            .text_size(px(14.0))
-                            .when(entry.group == corvo_core::ActionGroup::Destructive, |label| {
-                                label.text_color(rgb(COLOR_DESTRUCTIVE))
-                            })
+                            .text_size(px(13.0))
+                            .when(
+                                entry.group == corvo_core::ActionGroup::Destructive,
+                                |label| label.text_color(rgb(COLOR_DESTRUCTIVE)),
+                            )
                             .child(entry.label.clone()),
                     )
                     .child(div().flex_1())
                     .when_some(entry.hotkey, |row, hotkey| {
                         row.child(div().flex().gap_1().children(hotkey.chars().map(keycap)))
-                    }),
-            )
-        });
+                    })
+                    .into_any_element(),
+            );
+        }
         div()
             .id("actions-menu")
+            .occlude()
             .absolute()
             .right(px(12.0))
             .bottom(px(10.0))
@@ -2849,9 +4162,11 @@ impl Launcher {
                     .items_center()
                     .px_2()
                     .py_2()
-                    .text_size(px(15.0))
+                    .text_size(px(13.0))
                     .child(if self.actions_filter.is_empty() {
-                        div().text_color(rgb(COLOR_TEXT_DIM)).child("Search for actions...")
+                        div()
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child("Search for actions...")
                     } else {
                         div().child(self.actions_filter.clone())
                     }),
@@ -2859,6 +4174,18 @@ impl Launcher {
     }
 
     fn primary_action_label(&self) -> (&'static str, &'static str) {
+        if self.page == LauncherPage::Uninstaller {
+            let confirming =
+                matches!(&self.uninstaller, UninstallerState::Ready(ready) if ready.confirming);
+            return (
+                if confirming {
+                    "Confirm Move to Trash"
+                } else {
+                    "Move to Trash"
+                },
+                "↵",
+            );
+        }
         if self.page == LauncherPage::Clipboard {
             return ("Paste to Active App", "↵");
         }
@@ -2892,18 +4219,19 @@ impl Launcher {
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Div {
-        let (action_name, action_key) = if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
-            let target = self.previous_app_name.as_deref().unwrap_or("Active App");
-            (format!("Paste to {target}"), "↵")
-        } else {
-            let (name, key) = self.primary_action_label();
-            if name == "Paste to Active App" {
+        let (action_name, action_key) =
+            if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
                 let target = self.previous_app_name.as_deref().unwrap_or("Active App");
-                (format!("Paste to {target}"), key)
+                (format!("Paste to {target}"), "↵")
             } else {
-                (name.to_string(), key)
-            }
-        };
+                let (name, key) = self.primary_action_label();
+                if name == "Paste to Active App" {
+                    let target = self.previous_app_name.as_deref().unwrap_or("Active App");
+                    (format!("Paste to {target}"), key)
+                } else {
+                    (name.to_string(), key)
+                }
+            };
         div()
             .flex_none()
             .flex()
@@ -2929,7 +4257,9 @@ impl Launcher {
                     )),
             )
             .when_some(
-                self.results.get(self.selected).filter(|_| self.page == LauncherPage::Emoji),
+                self.results
+                    .get(self.selected)
+                    .filter(|_| self.page == LauncherPage::Emoji),
                 |footer, res| {
                     footer.child(
                         div()
@@ -2955,22 +4285,34 @@ impl Launcher {
                 },
             )
             .child(div().flex_1())
-            .child(
-                div()
-                    .id("footer-open")
-                    .on_click(cx.listener(|launcher, _: &ClickEvent, window, cx| {
-                        launcher.execute_selected(window, cx);
-                    }))
-                    .child(action_pill(&action_name, action_key)),
+            .when(
+                self.page != LauncherPage::Uninstaller
+                    || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress),
+                |footer| {
+                    footer.child(
+                        div()
+                            .id("footer-open")
+                            .on_click(cx.listener(|launcher, _: &ClickEvent, window, cx| {
+                                if launcher.page == LauncherPage::Uninstaller {
+                                    launcher.begin_uninstall(cx);
+                                } else {
+                                    launcher.execute_selected(window, cx);
+                                }
+                            }))
+                            .child(action_pill(&action_name, action_key)),
+                    )
+                },
             )
-            .child(
-                div()
-                    .id("footer-actions")
-                    .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
-                        launcher.toggle_actions(cx);
-                    }))
-                    .child(action_pill("Actions", "⌘K")),
-            )
+            .when(self.page != LauncherPage::Uninstaller, |footer| {
+                footer.child(
+                    div()
+                        .id("footer-actions")
+                        .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
+                            launcher.toggle_actions(cx);
+                        }))
+                        .child(action_pill("Actions", "⌘K")),
+                )
+            })
     }
 
     fn result_row(
@@ -2989,7 +4331,7 @@ impl Launcher {
             .cursor_pointer()
             .px(px(8.0))
             .mb_0p5()
-            .h(px(ROW_HEIGHT))
+            .h(px(self.row_height))
             .rounded_lg()
             .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(0x181b1e))))
@@ -2997,7 +4339,10 @@ impl Launcher {
                 launcher.select(index, cx);
                 launcher.execute_selected(window, cx);
             }))
-            .child(icon(result.icon.clone()))
+            .child(icon(
+                result.icon.clone(),
+                result.id.starts_with("app-launcher:"),
+            ))
             .child(
                 div()
                     .flex()
@@ -3006,8 +4351,16 @@ impl Launcher {
                     .child(
                         div()
                             .text_size(px(14.0))
-                            .text_color(if selected { rgb(0xffffff) } else { rgb(COLOR_TEXT) })
-                            .font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                            .text_color(if selected {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(COLOR_TEXT)
+                            })
+                            .font_weight(if selected {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
                             .child(result.title.clone()),
                     )
                     .when_some(result.subtitle.clone(), |row, sub| {
@@ -3028,23 +4381,24 @@ impl Launcher {
                         .py_0p5()
                         .rounded_sm()
                         .text_size(px(12.0))
-                        .text_color(if selected { rgb(0x8cb8a3) } else { rgb(COLOR_TEXT_DIM) })
+                        .text_color(if selected {
+                            rgb(0x8cb8a3)
+                        } else {
+                            rgb(COLOR_TEXT_DIM)
+                        })
                         .child(accessory),
                 )
             })
     }
-
 }
 
 /// The magnifier icon at the left of the search row.
 fn search_icon() -> Div {
-    div()
-        .flex_none()
-        .child(icons::render_phosphor_svg(
-            phosphor_svgs::style::regular::MAGNIFYING_GLASS,
-            rgb(COLOR_TEXT_ICON),
-            20.0,
-        ))
+    div().flex_none().child(icons::render_phosphor_svg(
+        phosphor_svgs::style::regular::MAGNIFYING_GLASS,
+        rgb(COLOR_TEXT_ICON),
+        20.0,
+    ))
 }
 
 /// A hint pill: action label plus a keycap, as in the Raycast footer.
@@ -3115,7 +4469,12 @@ fn keycap(glyph: char) -> Div {
 }
 
 /// The icon slot of an actions-menu row.
-fn action_icon(icon: &Icon) -> Div {
+fn action_icon(icon: &Icon, destructive: bool) -> Div {
+    let icon_color = if destructive {
+        rgb(COLOR_DESTRUCTIVE)
+    } else {
+        rgb(COLOR_TEXT_ICON)
+    };
     let slot = div()
         .flex_none()
         .mr(px(8.0))
@@ -3127,43 +4486,48 @@ fn action_icon(icon: &Icon) -> Div {
     if let Some(svg_data) = icons::icon_svg_data(icon) {
         slot.child(icons::render_phosphor_svg(
             svg_data,
-            rgb(COLOR_TEXT_ICON),
-            18.0,
+            icon_color,
+            17.0,
         ))
     } else if let Icon::Glyph(glyph) = icon {
         slot.text_size(px(16.0))
-            .text_color(rgb(COLOR_TEXT_ICON))
+            .text_color(icon_color)
             .child(*glyph)
     } else {
         slot.child(icons::render_phosphor_svg(
             phosphor_svgs::style::regular::APP_WINDOW,
-            rgb(COLOR_TEXT_ICON),
-            18.0,
+            icon_color,
+            17.0,
         ))
     }
 }
 
 /// The icon slot at the left of a row: a decoded PNG when the command
 /// extracted one, a vector SVG or glyph otherwise.
-fn icon(icon: Icon) -> Div {
-    let slot = div().flex_none().mr(px(8.0)).size(px(ICON_SIZE));
+fn icon(icon: Icon, is_application: bool) -> Div {
+    let icon_size = if is_application { ICON_SIZE } else { 18.0 };
+    let slot = div()
+        .flex_none()
+        .mr(px(8.0))
+        .size(px(ICON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center();
     match icon {
-        Icon::Image(path) => {
-            slot.child(img(path).size(px(ICON_SIZE)).rounded_md())
-        }
+        Icon::Image(path) => slot.child(img(path).size(px(icon_size))),
         Icon::Glyph(glyph) if !glyph.is_empty() => slot.child(
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(ICON_SIZE - 4.0))
+                .text_size(px(icon_size))
                 .text_color(rgb(COLOR_TEXT_ICON))
                 .child(glyph),
         ),
         other => {
-            let svg = icons::icon_svg_data(&other)
-                .unwrap_or(phosphor_svgs::style::regular::APP_WINDOW);
+            let svg =
+                icons::icon_svg_data(&other).unwrap_or(phosphor_svgs::style::regular::APP_WINDOW);
             slot.child(
                 div()
                     .size_full()
@@ -3173,35 +4537,25 @@ fn icon(icon: Icon) -> Div {
                     .child(icons::render_phosphor_svg(
                         svg,
                         rgb(COLOR_TEXT_ICON),
-                        ICON_SIZE,
+                        icon_size,
                     )),
             )
         }
     }
 }
 
-
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_root = self.page == LauncherPage::Root;
         let is_emoji = self.page == LauncherPage::Emoji;
         let is_clipboard = self.page == LauncherPage::Clipboard;
+        let is_uninstaller = self.page == LauncherPage::Uninstaller;
         div()
             .track_focus(&self.focus_handle)
             .key_context("Launcher")
             .on_action(cx.listener(
                 |launcher: &mut Self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>| {
-                    if launcher.filter_dropdown_open {
-                        launcher.close_filter_dropdown(cx);
-                    } else if launcher.burger_menu_open {
-                        launcher.close_burger_menu(cx);
-                    } else if launcher.actions_open {
-                        launcher.close_actions(cx);
-                    } else if launcher.page == LauncherPage::Emoji || launcher.page == LauncherPage::Clipboard {
-                        launcher.open_root_page(cx);
-                    } else {
-                        launcher.dismiss(window);
-                    }
+                    launcher.handle_escape(window, cx);
                 },
             ))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -3214,7 +4568,7 @@ impl Render for Launcher {
             .border_1()
             .border_color(rgb(COLOR_DIVIDER))
             .overflow_hidden()
-            .bg(rgba(COLOR_BACKGROUND))
+            .bg(rgba(self.background_color))
             .text_color(rgb(COLOR_TEXT))
             .font_family("Helvetica")
             .when(is_root, |view| {
@@ -3230,13 +4584,42 @@ impl Render for Launcher {
                 view.child(self.clipboard_search_row(window, cx))
                     .child(self.clipboard_split_view(cx))
             })
+            .when(is_uninstaller, |view| {
+                view.child(self.uninstaller_search_row(window, cx))
+                    .child(self.uninstaller_list(cx))
+            })
             .child(self.footer(cx))
-            .children(self.actions_open.then(|| self.actions_menu(cx)))
-            .children(self.burger_menu_open.then(|| self.burger_menu(cx)))
+            .when(self.actions_open, |view| {
+                view.child(
+                    div()
+                        .id("actions-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
+                            launcher.close_actions(cx);
+                        })),
+                )
+                .child(self.actions_menu(cx))
+            })
+            .when(self.burger_menu_open, |view| {
+                view.child(
+                    div()
+                        .id("burger-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
+                            launcher.close_burger_menu(cx);
+                        })),
+                )
+                .child(self.burger_menu(cx))
+            })
             .when(self.filter_dropdown_open, |view| {
                 view.child(
                     div()
                         .id("filter-dropdown-backdrop")
+                        .occlude()
                         .absolute()
                         .inset_0()
                         .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
@@ -3263,32 +4646,359 @@ fn info_row(label: &str, value: &str) -> Div {
                 .text_color(rgb(COLOR_TEXT_DIM))
                 .child(label.to_string()),
         )
-        .child(
-            div()
-                .text_color(rgb(COLOR_TEXT))
-                .child(value.to_string()),
-        )
+        .child(div().text_color(rgb(COLOR_TEXT)).child(value.to_string()))
 }
 
-/// Starts the GPUI app. Every `()` on `toggle_rx` shows or hides the
-/// launcher window.
-pub fn run(registry: CommandRegistry, toggle_rx: Receiver<()>) {
+struct HotkeyManagerGlobal(std::rc::Rc<std::cell::RefCell<corvo_platform::hotkey::HotkeyManager>>);
+impl gpui::Global for HotkeyManagerGlobal {}
+
+/// Collects hotkey bindings configured across all settings tabs and files.
+pub fn collect_hotkey_bindings(
+    settings: &corvo_config::Settings,
+) -> Vec<(String, corvo_platform::HotkeyIntent)> {
+    let mut bindings = Vec::new();
+
+    // 1. Applications
+    if settings.applications.enabled {
+        for (app_path, cfg) in &settings.applications.app_configs {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::LaunchApp(std::path::PathBuf::from(app_path)),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2. Window Management
+    for (action_id, cfg) in &settings.window_management.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::TileWindow(action_id.clone()),
+                ));
+            }
+        }
+    }
+
+    // 3. System Actions
+    if settings.system_actions.enabled {
+        for (action_id, cfg) in &settings.system_actions.items {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::RunSystemAction(action_id.clone()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 4. System Settings
+    if settings.system_settings.enabled {
+        for (setting_id, cfg) in &settings.system_settings.items {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::OpenSystemSetting(setting_id.clone()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 5. Commands
+    for (cmd_id, cfg) in &settings.commands.items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::Command(cmd_id.clone()),
+                ));
+            }
+        }
+    }
+
+    // 6. Clipboard
+    if settings.clipboard.enabled {
+        for (item_name, cfg) in &settings.clipboard.command_items {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    if item_name == "Clipboard History" {
+                        bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. Emojis
+    for (item_name, cfg) in &settings.emojis.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                if item_name == "Search Emoji & Symbols" {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::EmojiPicker));
+                }
+            }
+        }
+    }
+
+    // 8. Quicklinks
+    let quicklinks_file = corvo_config::QuicklinksFile::load();
+    for q in &quicklinks_file.quicklinks {
+        if let Some(ref hk) = q.hotkey {
+            if !hk.is_empty() && !q.url.is_empty() {
+                bindings.push((hk.clone(), corvo_platform::HotkeyIntent::OpenUrl(q.url.clone())));
+            }
+        }
+    }
+    for (name, cfg) in &settings.quicklinks.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                if !quicklinks_file.quicklinks.iter().any(|q| &q.name == name) {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::OpenUrl(name.clone())));
+                }
+            }
+        }
+    }
+
+    bindings
+}
+
+/// Dynamically updates the global hotkey engine with the current configuration.
+pub fn reload_active_hotkeys(settings: &corvo_config::Settings, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<HotkeyManagerGlobal>() {
+        let bindings = collect_hotkey_bindings(settings);
+        handle.0.borrow_mut().update_bindings(&settings.hotkey, bindings);
+    }
+}
+
+/// Starts the GPUI app. Every `HotkeyIntent` on `intent_rx` triggers the
+/// corresponding launcher action or headless execution.
+pub fn run(
+    registry: CommandRegistry,
+    store: std::sync::Arc<dyn DataStore>,
+    intent_tx: smol::channel::Sender<corvo_platform::HotkeyIntent>,
+    intent_rx: Receiver<corvo_platform::HotkeyIntent>,
+) {
     gpui_platform::application().run(|cx: &mut App| {
         // Runs after GPUI sets the regular policy, so the launcher
         // stays out of the Dock and Cmd+Tab (SPEC §6).
         corvo_platform::run_as_agent();
         cx.set_global(RegistryGlobal(registry));
+        cx.set_global(StoreGlobal(store));
         cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("Launcher"))]);
 
+        // Initialize dynamic global hotkey subsystem
+        let hotkey_mgr = corvo_platform::hotkey::HotkeyManager::new(intent_tx);
+        let hotkey_holder = std::rc::Rc::new(std::cell::RefCell::new(hotkey_mgr));
+        cx.set_global(HotkeyManagerGlobal(hotkey_holder));
+
+        let (reload_tx, reload_rx) = smol::channel::unbounded::<()>();
+        corvo_platform::hotkey::set_reload_sender(reload_tx);
+
+        let initial_settings = corvo_config::Settings::load();
+        reload_active_hotkeys(&initial_settings, cx);
+
+        // Listen for reload notifications when user updates hotkeys in settings
         cx.spawn(async move |cx: &mut AsyncApp| {
-            while toggle_rx.recv().await.is_ok() {
-                cx.update(toggle);
+            while reload_rx.recv().await.is_ok() {
+                let _ = cx.update(|cx| {
+                    let settings = corvo_config::Settings::load();
+                    reload_active_hotkeys(&settings, cx);
+                });
+            }
+        })
+        .detach();
+
+        // Listen for incoming hotkey intents
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            while let Ok(intent) = intent_rx.recv().await {
+                match intent {
+                    corvo_platform::HotkeyIntent::ToggleLauncher => {
+                        cx.update(toggle);
+                    }
+                    corvo_platform::HotkeyIntent::TileWindow(action_id) => {
+                        smol::spawn(async move {
+                            if let Err(err) = corvo_platform::tile_window(None, &action_id) {
+                                eprintln!("corvo: headless tile window error: {err}");
+                            }
+                        })
+                        .detach();
+                    }
+                    corvo_platform::HotkeyIntent::LaunchApp(path) => {
+                        let ops = corvo_platform::platform_ops();
+                        let _ = ops.open_path(&path);
+                    }
+                    corvo_platform::HotkeyIntent::OpenUrl(url) => {
+                        let _ = corvo_platform::open_url(&url);
+                    }
+                    corvo_platform::HotkeyIntent::RunSystemAction(action_id) => {
+                        cx.update(|cx| {
+                            execute_system_action_intent(&action_id, cx);
+                        });
+                    }
+                    corvo_platform::HotkeyIntent::OpenSystemSetting(setting_id) => {
+                        cx.update(|cx| {
+                            execute_system_setting_intent(&setting_id, cx);
+                        });
+                    }
+                    corvo_platform::HotkeyIntent::ClipboardHistory => {
+                        cx.update(|cx| {
+                            open_launcher_with_page(LauncherPage::Clipboard, cx);
+                        });
+                    }
+                    corvo_platform::HotkeyIntent::EmojiPicker => {
+                        cx.update(|cx| {
+                            open_launcher_with_page(LauncherPage::Emoji, cx);
+                        });
+                    }
+                    corvo_platform::HotkeyIntent::Command(cmd_id) => {
+                        cx.update(|cx| {
+                            open_launcher_with_command_or_query(&cmd_id, cx);
+                        });
+                    }
+                }
             }
         })
         .detach();
 
         open_launcher(cx);
     });
+}
+
+fn execute_system_action_intent(action_id: &str, cx: &mut App) {
+    let registry = cx.global::<RegistryGlobal>().0.clone();
+    if let Some(cmd) = registry.commands().iter().find(|c| c.id() == "system-actions") {
+        let mut target_id = action_id.to_string();
+        for action in corvo_system_actions::get_system_actions() {
+            if action.id == action_id || action.title.eq_ignore_ascii_case(action_id) {
+                target_id = action.id.to_string();
+                break;
+            }
+        }
+        let result_id = format!("system-actions:action:{target_id}");
+        let ctx = ExecutionContext::default();
+        if let Ok(action) = smol::block_on(cmd.execute(&result_id, &ctx)) {
+            match action {
+                Action::RunShell(shell_cmd) => {
+                    let _ = corvo_platform::run_shell(&shell_cmd);
+                }
+                Action::OpenUrl(url) => {
+                    let _ = corvo_platform::open_url(&url);
+                }
+                Action::Open(path) => {
+                    let _ = corvo_platform::platform_ops().open_path(&path);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn execute_system_setting_intent(setting_id: &str, cx: &mut App) {
+    let registry = cx.global::<RegistryGlobal>().0.clone();
+    if let Some(cmd) = registry.commands().iter().find(|c| c.id() == "system-actions") {
+        let mut target_id = setting_id.to_string();
+        for setting in corvo_system_actions::get_system_settings() {
+            if setting.id == setting_id || setting.title.eq_ignore_ascii_case(setting_id) {
+                target_id = setting.id.to_string();
+                break;
+            }
+        }
+        let result_id = format!("system-actions:setting:{target_id}");
+        let ctx = ExecutionContext::default();
+        if let Ok(action) = smol::block_on(cmd.execute(&result_id, &ctx)) {
+            match action {
+                Action::RunShell(shell_cmd) => {
+                    let _ = corvo_platform::run_shell(&shell_cmd);
+                }
+                Action::OpenUrl(url) => {
+                    let _ = corvo_platform::open_url(&url);
+                }
+                Action::Open(path) => {
+                    let _ = corvo_platform::platform_ops().open_path(&path);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn open_launcher_with_command_or_query(cmd_id: &str, cx: &mut App) {
+    match cmd_id {
+        "clipboard-history" | "Clipboard History" => {
+            open_launcher_with_page(LauncherPage::Clipboard, cx);
+        }
+        "emojis" | "Search Emoji & Symbols" => {
+            open_launcher_with_page(LauncherPage::Emoji, cx);
+        }
+        query => {
+            open_launcher_with_query(query, cx);
+        }
+    }
+}
+
+fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |launcher, _window, cx| match page {
+                LauncherPage::Clipboard => launcher.open_clipboard_page(cx),
+                LauncherPage::Emoji => launcher.open_emoji_page(cx),
+                _ => {
+                    launcher.page = page;
+                    launcher.refresh(cx);
+                    cx.notify();
+                }
+            });
+            cx.activate(true);
+            return;
+        }
+    }
+    open_launcher(cx);
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        let _ = handle.update(cx, |launcher, _window, cx| match page {
+            LauncherPage::Clipboard => launcher.open_clipboard_page(cx),
+            LauncherPage::Emoji => launcher.open_emoji_page(cx),
+            _ => {
+                launcher.page = page;
+                launcher.refresh(cx);
+                cx.notify();
+            }
+        });
+    }
+}
+
+fn open_launcher_with_query(query: &str, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |launcher, _window, cx| {
+                launcher.page = LauncherPage::Root;
+                launcher.query = query.to_string();
+                launcher.cursor_idx = query.chars().count();
+                launcher.refresh(cx);
+                cx.notify();
+            });
+            cx.activate(true);
+            return;
+        }
+    }
+    open_launcher(cx);
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        let q = query.to_string();
+        let _ = handle.update(cx, |launcher, _window, cx| {
+            launcher.page = LauncherPage::Root;
+            launcher.query = q;
+            launcher.cursor_idx = launcher.query.chars().count();
+            launcher.refresh(cx);
+            cx.notify();
+        });
+    }
 }
 
 fn toggle(cx: &mut App) {
@@ -3306,7 +5016,15 @@ fn active_display_id() -> Option<gpui::DisplayId> {
 }
 
 fn open_launcher(cx: &mut App) {
-    let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
+    let store = cx.global::<StoreGlobal>().0.clone();
+    let size_scale = match store.interface_size_option() {
+        0 => 0.9,
+        2 => 1.1,
+        _ => 1.0,
+    };
+    let window_width = WINDOW_WIDTH * size_scale;
+    let window_height = WINDOW_HEIGHT * size_scale;
+    let window_size = size(px(window_width), px(window_height));
     let display_id = active_display_id();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(centered_bounds(window_size, cx))),
@@ -3340,7 +5058,8 @@ fn open_launcher(cx: &mut App) {
         None => (corvo_platform::frontmost_app_pid(), None),
     };
     cx.activate(true);
-    corvo_platform::make_panel_instant(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64);
+    corvo_platform::update_screens_cache();
+    corvo_platform::make_panel_instant(window_width as f64, window_height as f64);
     // The empty query lists the whole corpus, so the first paint shows
     // apps while the corpus scan is still settling. Always start at Home.
     let _ = window.update(cx, |launcher, window, cx| {
@@ -3361,7 +5080,12 @@ fn open_launcher(cx: &mut App) {
         launcher.refresh(cx);
         window.activate_window();
     });
-    corvo_platform::order_panel_front(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64);
+    corvo_platform::order_panel_front(window_width as f64, window_height as f64);
+}
+
+fn launcher_background(transparency_level: usize) -> u32 {
+    let alpha = 255u32.saturating_sub(transparency_level.min(4) as u32 * 25 / 2);
+    (COLOR_BACKGROUND & 0xffff_ff00) | alpha
 }
 
 fn centered_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {

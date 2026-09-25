@@ -6,12 +6,63 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
-    Icon, SearchContext, SearchResult,
+    search_match_score, Icon, SearchContext, SearchResult,
 };
 
-const RETENTION_SECS: u64 = 30 * 86_400; // 30 days
-const MAX_ENTRIES: usize = 1000;
 const MAX_ENTRY_CHARS: usize = 100_000;
+#[cfg(test)]
+const RETENTION_SECS: u64 = 30 * 86_400;
+
+#[derive(Clone, Copy)]
+pub struct ClipboardPreferences {
+    pub enabled: bool,
+    pub retention_days: u32,
+    pub max_entries: usize,
+    pub save_images: bool,
+    pub save_colors: bool,
+}
+
+impl Default for ClipboardPreferences {
+    fn default() -> Self {
+        Self { enabled: true, retention_days: 30, max_entries: 500, save_images: true, save_colors: true }
+    }
+}
+
+fn preferences_store() -> &'static RwLock<ClipboardPreferences> {
+    static PREFERENCES: OnceLock<RwLock<ClipboardPreferences>> = OnceLock::new();
+    PREFERENCES.get_or_init(|| RwLock::new(ClipboardPreferences::default()))
+}
+
+fn preferences() -> ClipboardPreferences {
+    preferences_store().read().map(|current| *current).unwrap_or_default()
+}
+
+fn current_clipboard_image() -> Option<Vec<u8>> {
+    preferences().save_images.then(corvo_platform::read_clipboard_image).flatten()
+}
+
+pub fn set_preferences(value: ClipboardPreferences) {
+    let value = ClipboardPreferences { max_entries: value.max_entries.max(1), ..value };
+    let was_enabled = preferences_store().read().map(|current| current.enabled).unwrap_or(true);
+    if !was_enabled && value.enabled {
+        let count = corvo_platform::clipboard_change_count();
+        if let Some(store) = STORE.get() {
+            if let Ok(mut history) = store.write() {
+                history.last_change_count = count;
+            }
+        }
+    }
+    let should_prune = if let Ok(mut current) = preferences_store().write() {
+        let changed = current.retention_days != value.retention_days || current.max_entries != value.max_entries;
+        *current = value;
+        changed
+    } else {
+        false
+    };
+    if should_prune {
+        prune_history_to_preferences();
+    }
+}
 
 fn history_file_path() -> PathBuf {
     let dirs = directories::ProjectDirs::from("", "", "corvo")
@@ -46,7 +97,7 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let cutoff = now.saturating_sub(RETENTION_SECS);
+    let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
 
     let (keep, expired): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.timestamp_secs >= cutoff);
     for e in expired {
@@ -55,8 +106,9 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
         }
     }
     let mut entries = keep;
-    if entries.len() > MAX_ENTRIES {
-        for e in entries.drain(MAX_ENTRIES..) {
+    let max_entries = preferences().max_entries;
+    if entries.len() > max_entries {
+        for e in entries.drain(max_entries..) {
             if let Some(path) = e.image_path() {
                 let _ = fs::remove_file(path);
             }
@@ -74,7 +126,7 @@ fn save_entries_atomic(entries: &[ClipboardEntry]) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let cutoff = now.saturating_sub(RETENTION_SECS);
+    let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
 
     let (keep, expired): (Vec<_>, Vec<_>) = entries.iter().cloned().partition(|e| e.timestamp_secs >= cutoff);
     for e in expired {
@@ -83,8 +135,9 @@ fn save_entries_atomic(entries: &[ClipboardEntry]) {
         }
     }
     let mut filtered = keep;
-    if filtered.len() > MAX_ENTRIES {
-        for e in filtered.drain(MAX_ENTRIES..) {
+    let max_entries = preferences().max_entries;
+    if filtered.len() > max_entries {
+        for e in filtered.drain(max_entries..) {
             if let Some(path) = e.image_path() {
                 let _ = fs::remove_file(path);
             }
@@ -146,13 +199,13 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
         };
         let count = corvo_platform::clipboard_change_count();
         history.last_change_count = count;
-        if !corvo_platform::clipboard_is_concealed() {
+        if preferences().enabled && !corvo_platform::clipboard_is_concealed() {
             let source = corvo_platform::frontmost_app_info()
                 .map(|(_, name)| name)
                 .filter(|name| name != "Corvo" && name != "corvo")
                 .unwrap_or_else(|| "Fastty".into());
 
-            if let Some(png_bytes) = corvo_platform::read_clipboard_image() {
+            if let Some(png_bytes) = current_clipboard_image() {
                 let hash = simple_hash(&png_bytes);
                 let already_latest = history.entries.first().map_or(false, |first| {
                     first.image_hash == Some(hash)
@@ -160,7 +213,7 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                 if !already_latest {
                     if let Some(entry) = create_image_entry(png_bytes, source) {
                         history.entries.insert(0, entry);
-                        if history.entries.len() > MAX_ENTRIES {
+                        if history.entries.len() > preferences().max_entries {
                             if let Some(removed) = history.entries.pop() {
                                 if let Some(path) = removed.image_path() {
                                     let _ = fs::remove_file(path);
@@ -172,18 +225,21 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                 }
             } else if let Some(text) = corvo_platform::read_clipboard_text() {
                 let trimmed = text.trim();
-                if !trimmed.is_empty() {
+                if !trimmed.is_empty() && should_record_text(&text) {
                     let text = if text.len() > MAX_ENTRY_CHARS {
                         text.chars().take(MAX_ENTRY_CHARS).collect()
                     } else {
                         text
                     };
-                    let already_latest = history.entries.first().map_or(false, |first| first.text == text && !first.is_image());
+                    let already_latest = history
+                        .entries
+                        .first()
+                        .map_or(false, |first| first.text == text && !first.is_image());
                     if !already_latest {
                         let entry = create_entry(text, source);
                         history.entries.insert(0, entry);
-                        if history.entries.len() > MAX_ENTRIES {
-                            history.entries.truncate(MAX_ENTRIES);
+                        if history.entries.len() > preferences().max_entries {
+                            history.entries.truncate(preferences().max_entries);
                         }
                         save_entries_atomic(&history.entries);
                     }
@@ -323,6 +379,9 @@ pub fn poll_clipboard() {
 }
 
 pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
+    if !preferences().enabled {
+        return;
+    }
     let count = corvo_platform::clipboard_change_count();
     let store_arc = store();
     let Ok(mut history) = store_arc.write() else { return };
@@ -344,7 +403,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
         .unwrap_or_else(|| "Fastty".into());
 
     // 1. Check for image content first
-    if let Some(png_bytes) = corvo_platform::read_clipboard_image() {
+    if let Some(png_bytes) = current_clipboard_image() {
         let hash = simple_hash(&png_bytes);
         let already_latest = history.entries.first().map_or(false, |first| {
             first.image_hash == Some(hash)
@@ -352,7 +411,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
         if !already_latest {
             if let Some(entry) = create_image_entry(png_bytes, source) {
                 history.entries.insert(0, entry);
-                if history.entries.len() > MAX_ENTRIES {
+                if history.entries.len() > preferences().max_entries {
                     if let Some(removed) = history.entries.pop() {
                         if let Some(path) = removed.image_path() {
                             let _ = fs::remove_file(path);
@@ -367,7 +426,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
 
     // 2. Fall back to text content
     if let Some(text) = corvo_platform::read_clipboard_text() {
-        if text.trim().is_empty() {
+        if text.trim().is_empty() || !should_record_text(&text) {
             return;
         }
         let text = if text.len() > MAX_ENTRY_CHARS {
@@ -382,7 +441,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
         }
         let entry = create_entry(text, source);
         history.entries.insert(0, entry);
-        if history.entries.len() > MAX_ENTRIES {
+        if history.entries.len() > preferences().max_entries {
             if let Some(removed) = history.entries.pop() {
                 if let Some(path) = removed.image_path() {
                     let _ = fs::remove_file(path);
@@ -415,11 +474,53 @@ pub fn all_entries() -> Vec<ClipboardEntry> {
     poll_clipboard();
     let store_arc = store();
     let Ok(history) = store_arc.read() else { return Vec::new() };
-    let mut entries = history.entries.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let prefs = preferences();
+    let cutoff = now.saturating_sub(u64::from(prefs.retention_days) * 86_400);
+    let mut entries: Vec<_> = history
+        .entries
+        .iter()
+        .filter(|entry| entry.timestamp_secs >= cutoff)
+        .take(prefs.max_entries)
+        .cloned()
+        .collect();
     for entry in &mut entries {
         refresh_entry_time(entry);
     }
     entries
+}
+
+fn prune_history_to_preferences() {
+    let Some(store) = STORE.get() else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let prefs = preferences();
+    let cutoff = now.saturating_sub(u64::from(prefs.retention_days) * 86_400);
+    if let Ok(mut history) = store.write() {
+        let (keep, expired): (Vec<_>, Vec<_>) = history
+            .entries
+            .drain(..)
+            .partition(|entry| entry.timestamp_secs >= cutoff);
+        for entry in expired {
+            if let Some(path) = entry.image_path() {
+                let _ = fs::remove_file(path);
+            }
+        }
+        history.entries = keep;
+        if history.entries.len() > prefs.max_entries {
+            for entry in history.entries.drain(prefs.max_entries..) {
+                if let Some(path) = entry.image_path() {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        save_entries_atomic(&history.entries);
+    }
 }
 
 pub fn delete_entry(id: &str) {
@@ -456,6 +557,9 @@ pub fn start_watcher() {
     smol::spawn(async {
         loop {
             smol::Timer::after(std::time::Duration::from_millis(400)).await;
+            if !preferences().enabled {
+                continue;
+            }
             let current_count = corvo_platform::clipboard_change_count();
             let last_count = {
                 let s = store();
@@ -502,6 +606,29 @@ fn is_json(text: &str) -> bool {
     } else {
         false
     }
+}
+
+fn is_color_code(text: &str) -> bool {
+    let value = text.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    let lower = value.to_ascii_lowercase();
+    let Some((name, values)) = lower.split_once('(') else { return false };
+    let Some(values) = values.strip_suffix(')') else { return false };
+    if !matches!(name.trim(), "rgb" | "rgba") {
+        return false;
+    }
+    let components: Vec<_> = values.split(',').map(str::trim).collect();
+    let expected = if name.trim() == "rgba" { 4 } else { 3 };
+    components.len() == expected
+        && components.iter().all(|component| {
+            component.strip_suffix('%').unwrap_or(component).parse::<f32>().is_ok()
+        })
+}
+
+fn should_record_text(text: &str) -> bool {
+    preferences().save_colors || !is_color_code(text)
 }
 
 #[derive(Default)]
@@ -561,6 +688,8 @@ impl Command for ClipboardManagerCommand {
                             "Link".to_string()
                         } else if entry.image_path().is_some() {
                             "Image".to_string()
+                        } else if preferences().save_colors && is_color_code(&entry.text) {
+                            "Color".to_string()
                         } else {
                             entry.source_app
                         };
@@ -601,6 +730,8 @@ impl Command for ClipboardManagerCommand {
                         "Link".to_string()
                     } else if entry.image_path().is_some() {
                         "Image".to_string()
+                    } else if preferences().save_colors && is_color_code(&entry.text) {
+                        "Color".to_string()
                     } else {
                         entry.source_app.clone()
                     };
@@ -628,34 +759,40 @@ impl Command for ClipboardManagerCommand {
         }
 
         let mut results = Vec::new();
-        if "clipboard history".contains(&q)
-            || "clipboard".contains(&q)
-            || "paste".contains(&q)
-            || "history".contains(&q)
-            || "copied".contains(&q)
-        {
+        if let Some(score) = search_match_score(
+            &q,
+            &["Clipboard History", "clipboard clip paste history copied"],
+        ) {
             results.push(SearchResult {
                 id: "clipboard-manager:open".into(),
                 title: "Clipboard History".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Clipboard,
-                score: 110.0,
+                score: score + 12.0,
                 accessory: Some("⌥⌘C".into()),
             });
         }
         results
     }
 
-    async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError> {
         if result_id == "clipboard-manager:open" {
             return Ok(Action::ShowToast("Clipboard History".into()));
         }
         if let Some(id) = result_id.strip_prefix("clipboard-manager:entry:") {
             if let Some(entry) = get_entry(id) {
                 if let Some(path) = entry.image_path() {
-                    return Ok(Action::PasteImage(path));
+                    return Ok(if ctx.store.as_ref().is_some_and(|store| store.clipboard_auto_paste()) {
+                        Action::PasteImage(path)
+                    } else {
+                        Action::CopyImage(path)
+                    });
                 } else {
-                    return Ok(Action::Copy(entry.text));
+                    return Ok(if ctx.store.as_ref().is_some_and(|store| store.clipboard_auto_paste()) {
+                        Action::PasteText(entry.text)
+                    } else {
+                        Action::Copy(entry.text)
+                    });
                 }
             }
         }

@@ -9,6 +9,30 @@ publish = false
 name = "corvo"
 path = "src/main.rs"
 
+[package.metadata.deb]
+name = "corvo"
+maintainer = "Diego Letelier <diegoleteliers10@users.noreply.github.com>"
+copyright = "2026, Diego Letelier"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Corvo is a lightweight native application launcher designed for speed, \
+low memory usage, and seamless developer workflows. Built with Rust and GPUI, \
+it offers raycast-like commands, window management, system actions, clipboard history, \
+and a fully configurable setup."""
+section = "utils"
+priority = "optional"
+revision = ""
+assets = [
+    ["target/release/corvo", "usr/bin/", "755"],
+    ["packaging/linux/corvo.desktop", "usr/share/applications/", "644"],
+    ["assets/corvoIcon.png", "usr/share/icons/hicolor/512x512/apps/corvo.png", "644"],
+    ["assets/corvoIcon.png", "usr/share/pixmaps/corvo.png", "644"],
+    ["README.md", "usr/share/doc/corvo/README.md", "644"],
+]
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
+
 [workspace]
 resolver = "2"
 members = [
@@ -31,6 +55,7 @@ members = [
 [workspace.dependencies]
 async-trait = "0.1"
 frizbee = "0.13"
+corvo-config = { path = "crates/corvo-config" }
 corvo-core = { path = "crates/corvo-core" }
 corvo-platform = { path = "crates/corvo-platform" }
 directories = "6"

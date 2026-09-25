@@ -5,7 +5,7 @@
 
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
-    Icon, SearchContext, SearchResult,
+    search_match_score, Icon, SearchContext, SearchResult,
 };
 
 /// The glyph plus the keyword strings it answers to. The first keyword
@@ -1133,18 +1133,16 @@ impl Command for EmojiPickerCommand {
         }
 
         let mut results = Vec::new();
-        if "search emoji & symbols".contains(&q)
-            || "emoji".contains(&q)
-            || "symbols".contains(&q)
-            || "smiley".contains(&q)
-            || "emoticon".contains(&q)
-        {
+        if let Some(score) = search_match_score(
+            &q,
+            &["Search Emoji & Symbols", "emoji emoticon smiley symbols"],
+        ) {
             results.push(SearchResult {
                 id: "emoji-picker:open".into(),
                 title: "Search Emoji & Symbols".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
-                score: 115.0,
+                score: score + 12.0,
                 accessory: Some("⌃⌘Space".into()),
             });
         }

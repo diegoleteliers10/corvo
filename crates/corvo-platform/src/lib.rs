@@ -8,9 +8,14 @@ use std::sync::Arc;
 
 pub mod hotkey;
 pub mod ipc;
+pub mod permissions;
+pub use hotkey::HotkeyIntent;
+pub use permissions::PermissionKind;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod app_uninstall;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -32,6 +37,22 @@ pub struct AppEntry {
     /// PNG extracted from the app's icon, ready to render. `None` when
     /// the OS keeps its icons in a format this platform cannot read.
     pub icon_png: Option<PathBuf>,
+}
+
+/// One app bundle or app-scoped data item that can move to the system Trash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppFileEntry {
+    pub path: PathBuf,
+    pub location: String,
+    pub size_bytes: u64,
+    pub is_application: bool,
+}
+
+/// Results from a bounded scan of common app-data locations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppFileScan {
+    pub files: Vec<AppFileEntry>,
+    pub reached_scan_limit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +110,13 @@ pub fn make_panel_instant(width: f64, height: f64) {
 pub fn order_panel_front(width: f64, height: f64) {
     #[cfg(target_os = "macos")]
     macos::order_panel_front(width, height);
+}
+
+/// Orders a window matching dimensions front and makes it key, synchronously.
+/// No-op outside macOS.
+pub fn order_window_front(width: f64, height: f64) {
+    #[cfg(target_os = "macos")]
+    macos::order_window_front(width, height);
 }
 
 /// The pid of the frontmost app, unless it is this process. No-op
@@ -187,12 +215,59 @@ pub fn is_accessibility_trusted(prompt: bool) -> bool {
     true
 }
 
+/// Queries whether the process has macOS Full Disk Access permissions.
+pub fn is_full_disk_access_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::read_dir("/Library/Application Support/com.apple.TCC").is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Queries whether the process has macOS Calendar permissions.
+pub fn is_calendar_access_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::is_calendar_access_granted();
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
 /// Returns the display ID of the display containing the cursor, or primary display.
 pub fn active_display_id() -> Option<u32> {
     #[cfg(target_os = "macos")]
     return macos::active_display_id();
     #[cfg(not(target_os = "macos"))]
     None
+}
+
+/// Lists installed applications within custom search scopes.
+pub fn list_apps_in_scopes(scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
+    #[cfg(target_os = "macos")]
+    return macos::list_apps_in_scopes(scopes);
+    #[cfg(not(target_os = "macos"))]
+    platform_ops().list_apps()
+}
+
+/// Finds an app bundle and data named with its bundle identifier.
+pub fn associated_app_files(app_path: &std::path::Path) -> PlatformResult<AppFileScan> {
+    #[cfg(target_os = "macos")]
+    return app_uninstall::associated_app_files(app_path);
+    #[cfg(not(target_os = "macos"))]
+    Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
+}
+
+/// Moves selected app files to the system Trash after a fresh safety check.
+pub fn move_app_files_to_trash(app_path: &std::path::Path, paths: &[PathBuf]) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return app_uninstall::move_app_files_to_trash(app_path, paths);
+    #[cfg(not(target_os = "macos"))]
+    Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
+}
+
+/// Whether this host can show the app uninstall action.
+pub const fn supports_app_uninstall() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// Executes a shell command on the host platform.
@@ -226,7 +301,7 @@ pub fn run_shell(cmd: &str) -> PlatformResult<()> {
 pub fn open_url(url: &str) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("open").arg(url).status();
+        let status = std::process::Command::new("open").arg(url).spawn();
         if status.is_ok() {
             Ok(())
         } else {
@@ -237,7 +312,7 @@ pub fn open_url(url: &str) -> PlatformResult<()> {
     {
         let status = std::process::Command::new("cmd")
             .args(["/c", "start", "", url])
-            .status();
+            .spawn();
         if status.is_ok() {
             Ok(())
         } else {
@@ -246,7 +321,7 @@ pub fn open_url(url: &str) -> PlatformResult<()> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let status = std::process::Command::new("xdg-open").arg(url).status();
+        let status = std::process::Command::new("xdg-open").arg(url).spawn();
         if status.is_ok() {
             Ok(())
         } else {
@@ -286,3 +361,10 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         Ok(())
     }
 }
+
+/// Updates the display cache for multi-monitor geometry calculation.
+pub fn update_screens_cache() {
+    #[cfg(target_os = "macos")]
+    macos::update_screens_cache();
+}
+

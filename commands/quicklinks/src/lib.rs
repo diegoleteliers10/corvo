@@ -1,13 +1,21 @@
+use std::hash::{Hash, Hasher};
 use std::sync::{OnceLock, RwLock};
 
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    Quicklink, SearchContext, SearchResult,
+    Quicklink, SearchContext, SearchResult, search_match_score,
 };
 
 fn cached_quicklinks() -> &'static RwLock<Vec<Quicklink>> {
     static CACHE: OnceLock<RwLock<Vec<Quicklink>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+fn quicklink_key(link: &Quicklink) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    link.name.hash(&mut hasher);
+    link.url.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[derive(Default)]
@@ -34,20 +42,34 @@ impl Command for QuicklinksCommand {
         if let Ok(mut cache) = cached_quicklinks().write() {
             *cache = links.clone();
         }
-        links
+        let mut results: Vec<SearchResult> = links
             .iter()
-            .enumerate()
-            .filter(|(_, link)| q.is_empty() || link.name.to_lowercase().contains(&q))
-            .take(ctx.max_results)
-            .map(|(index, link)| SearchResult {
-                id: format!("quicklinks:{index}"),
+            .filter_map(|link| {
+                if link.hidden {
+                    return None;
+                }
+                let score = if q.is_empty() {
+                    70.0
+                } else {
+                    search_match_score(
+                        &q,
+                        &[link.name.as_str(), link.alias.as_deref().unwrap_or(""), link.url.as_str()],
+                    )?
+                };
+                Some((link, score))
+            })
+            .map(|(link, score)| SearchResult {
+                id: format!("quicklinks:{}", quicklink_key(link)),
                 title: link.name.clone(),
                 subtitle: Some(link.url.clone()),
                 icon: Icon::Link,
-                score: if q.is_empty() { 70.0 } else { 80.0 },
-                accessory: None,
+                score,
+                accessory: link.hotkey.clone(),
             })
-            .collect()
+            .collect();
+        results.sort_by(|left, right| right.score.total_cmp(&left.score));
+        results.truncate(ctx.max_results);
+        results
     }
 
     async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError> {
@@ -57,11 +79,8 @@ impl Command for QuicklinksCommand {
         let Some(store) = ctx.store.as_ref() else {
             return Err(CommandError::NotFound);
         };
-        let Ok(index) = index.parse::<usize>() else {
-            return Err(CommandError::NotFound);
-        };
         let links = store.quicklinks();
-        let Some(link) = links.get(index) else {
+        let Some(link) = links.iter().find(|link| quicklink_key(link) == index && !link.hidden) else {
             return Err(CommandError::NotFound);
         };
         Ok(Action::OpenUrl(link.url.clone()))
@@ -71,13 +90,10 @@ impl Command for QuicklinksCommand {
         let Some(index) = result_id.strip_prefix("quicklinks:") else {
             return Vec::new();
         };
-        let Ok(index) = index.parse::<usize>() else {
-            return Vec::new();
-        };
         let Ok(cache) = cached_quicklinks().read() else {
             return Vec::new();
         };
-        let Some(link) = cache.get(index) else {
+        let Some(link) = cache.iter().find(|link| quicklink_key(link) == index) else {
             return Vec::new();
         };
 

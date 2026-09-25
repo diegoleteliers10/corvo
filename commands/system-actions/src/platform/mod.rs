@@ -17,6 +17,7 @@ pub struct SystemSettingDef {
     pub id: &'static str,
     pub title: &'static str,
     pub keywords: &'static str,
+    pub icon: &'static str,
     pub execution: ActionExecution,
 }
 

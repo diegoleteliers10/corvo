@@ -13,6 +13,13 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("assets/corvoIcon.ico");
+        let _ = res.compile();
+    }
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let commands_dir = manifest_dir.join("commands");
     println!("cargo:rerun-if-changed={}", commands_dir.display());

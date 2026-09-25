@@ -1,11 +1,9 @@
-//! System power actions, desktop control, and OS System Settings panes.
-
-mod platform;
-use platform::{get_system_actions, get_system_settings, ActionExecution};
+pub mod platform;
+pub use platform::{get_system_actions, get_system_settings, ActionExecution, SystemActionDef, SystemSettingDef};
 
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult,
+    SearchContext, SearchResult, search_match_score,
 };
 
 #[derive(Default)]
@@ -40,41 +38,86 @@ impl Command for SystemActionsCommand {
 
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         let q = query.trim().to_lowercase();
+        let settings = corvo_config::Settings::load();
         let mut results = Vec::new();
 
-        // System Actions (score: 90.0 on empty query)
-        for action in get_system_actions() {
-            if q.is_empty()
-                || action.title.to_lowercase().contains(&q)
-                || action.keywords.contains(&q)
-            {
-                results.push(SearchResult {
-                    id: format!("system-actions:action:{}", action.id),
-                    title: action.title.into(),
-                    subtitle: Some("System Action".into()),
-                    icon: Icon::Svg(action.icon),
-                    score: if q.is_empty() { 90.0 } else { 88.0 },
-                    accessory: Some("System Action".into()),
-                });
+        // System Actions
+        if settings.system_actions.enabled {
+            for action in get_system_actions() {
+                let item_config = settings
+                    .system_actions
+                    .items
+                    .get(action.id)
+                    .or_else(|| settings.system_actions.items.get(action.title));
+
+                if item_config.map_or(false, |c| c.hidden) {
+                    continue;
+                }
+
+                let alias = item_config.and_then(|config| config.alias.as_deref());
+                let mut fields = vec![action.title];
+                if let Some(alias) = alias {
+                    fields.push(alias);
+                }
+                fields.push(action.keywords);
+                let score = if q.is_empty() {
+                    Some(90.0)
+                } else {
+                    search_match_score(&q, &fields)
+                };
+
+                if let Some(score) = score {
+                    results.push(SearchResult {
+                        id: format!("system-actions:action:{}", action.id),
+                        title: action.title.into(),
+                        subtitle: Some("System Action".into()),
+                        icon: Icon::Svg(action.icon),
+                        score,
+                        accessory: Some("System Action".into()),
+                    });
+                }
             }
         }
 
-        // System Settings (score: 85.0 on empty query)
-        for setting in get_system_settings() {
-            if q.is_empty()
-                || setting.title.to_lowercase().contains(&q)
-                || setting.keywords.contains(&q)
-            {
-                results.push(SearchResult {
-                    id: format!("system-actions:setting:{}", setting.id),
-                    title: setting.title.into(),
-                    subtitle: Some("System Settings".into()),
-                    icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::GEAR),
-                    score: if q.is_empty() { 85.0 } else { 85.0 },
-                    accessory: Some("System Setting".into()),
-                });
+        // System Settings
+        if settings.system_settings.enabled {
+            for setting in get_system_settings() {
+                let item_config = settings
+                    .system_settings
+                    .items
+                    .get(setting.id)
+                    .or_else(|| settings.system_settings.items.get(setting.title));
+
+                if item_config.map_or(false, |c| c.hidden) {
+                    continue;
+                }
+
+                let alias = item_config.and_then(|config| config.alias.as_deref());
+                let mut fields = vec![setting.title];
+                if let Some(alias) = alias {
+                    fields.push(alias);
+                }
+                fields.push(setting.keywords);
+                let score = if q.is_empty() {
+                    Some(85.0)
+                } else {
+                    search_match_score(&q, &fields)
+                };
+
+                if let Some(score) = score {
+                    results.push(SearchResult {
+                        id: format!("system-actions:setting:{}", setting.id),
+                        title: setting.title.into(),
+                        subtitle: Some("System Settings".into()),
+                        icon: Icon::Svg(setting.icon),
+                        score,
+                        accessory: Some("System Setting".into()),
+                    });
+                }
             }
         }
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         if !q.is_empty() {
             results.truncate(ctx.max_results);

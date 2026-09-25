@@ -26,28 +26,7 @@ impl Command for WebSearchFallbackCommand {
     }
 
     async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Vec::new();
-        }
-        vec![
-            SearchResult {
-                id: format!("web-search-fallback:google:{q}"),
-                title: format!("Search Google for \"{q}\""),
-                subtitle: Some("Google".into()),
-                icon: Icon::Web,
-                score: 0.02,
-                accessory: None,
-            },
-            SearchResult {
-                id: format!("web-search-fallback:duckduckgo:{q}"),
-                title: format!("Search DuckDuckGo for \"{q}\""),
-                subtitle: Some("DuckDuckGo".into()),
-                icon: Icon::Web,
-                score: 0.01,
-                accessory: None,
-            },
-        ]
+        search_results(query)
     }
 
     async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
@@ -91,6 +70,31 @@ impl Command for WebSearchFallbackCommand {
             },
         ]
     }
+}
+
+pub fn search_results(query: &str) -> Vec<SearchResult> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        SearchResult {
+            id: format!("web-search-fallback:google:{q}"),
+            title: format!("Search Google for \"{q}\""),
+            subtitle: Some("Google".into()),
+            icon: Icon::Web,
+            score: 0.02,
+            accessory: None,
+        },
+        SearchResult {
+            id: format!("web-search-fallback:duckduckgo:{q}"),
+            title: format!("Search DuckDuckGo for \"{q}\""),
+            subtitle: Some("DuckDuckGo".into()),
+            icon: Icon::Web,
+            score: 0.01,
+            accessory: None,
+        },
+    ]
 }
 
 fn percent_encode(input: &str) -> String {

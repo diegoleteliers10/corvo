@@ -1,13 +1,22 @@
+use std::hash::{Hash, Hasher};
 use std::sync::{OnceLock, RwLock};
 
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult, Snippet,
+    SearchContext, SearchResult, Snippet, search_match_score,
 };
 
 fn cached_snippets() -> &'static RwLock<Vec<Snippet>> {
     static CACHE: OnceLock<RwLock<Vec<Snippet>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+fn snippet_key(snippet: &Snippet) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snippet.name.hash(&mut hasher);
+    snippet.keyword.hash(&mut hasher);
+    snippet.body.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[derive(Default)]
@@ -34,24 +43,31 @@ impl Command for SnippetsCommand {
         if let Ok(mut cache) = cached_snippets().write() {
             *cache = snippets.clone();
         }
-        snippets
+        let mut results: Vec<SearchResult> = snippets
             .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                q.is_empty()
-                    || s.name.to_lowercase().contains(&q)
-                    || s.keyword.as_deref().is_some_and(|k| k.to_lowercase().contains(&q))
+            .filter_map(|s| {
+                let score = if q.is_empty() {
+                    75.0
+                } else {
+                    search_match_score(
+                        &q,
+                        &[s.name.as_str(), s.keyword.as_deref().unwrap_or(""), s.body.as_str()],
+                    )?
+                };
+                Some((s, score))
             })
-            .take(ctx.max_results)
-            .map(|(index, s)| SearchResult {
-                id: format!("snippets:{index}"),
+            .map(|(s, score)| SearchResult {
+                id: format!("snippets:{}", snippet_key(s)),
                 title: s.name.clone(),
                 subtitle: Some(s.body.clone()),
                 icon: Icon::Snippet,
-                score: if q.is_empty() { 75.0 } else { 80.0 },
+                score,
                 accessory: s.keyword.clone(),
             })
-            .collect()
+            .collect();
+        results.sort_by(|left, right| right.score.total_cmp(&left.score));
+        results.truncate(ctx.max_results);
+        results
     }
 
     async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError> {
@@ -61,27 +77,21 @@ impl Command for SnippetsCommand {
         let Some(store) = ctx.store.as_ref() else {
             return Err(CommandError::NotFound);
         };
-        let Ok(index) = index.parse::<usize>() else {
-            return Err(CommandError::NotFound);
-        };
         let snippets = store.snippets();
-        let Some(snippet) = snippets.get(index) else {
+        let Some(snippet) = snippets.iter().find(|snippet| snippet_key(snippet) == index) else {
             return Err(CommandError::NotFound);
         };
-        Ok(Action::Copy(snippet.body.clone()))
+        Ok(Action::PasteText(snippet.body.clone()))
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
         let Some(index) = result_id.strip_prefix("snippets:") else {
             return Vec::new();
         };
-        let Ok(index) = index.parse::<usize>() else {
-            return Vec::new();
-        };
         let Ok(cache) = cached_snippets().read() else {
             return Vec::new();
         };
-        let Some(snippet) = cache.get(index) else {
+        let Some(snippet) = cache.iter().find(|snippet| snippet_key(snippet) == index) else {
             return Vec::new();
         };
 
@@ -89,7 +99,7 @@ impl Command for SnippetsCommand {
             CommandAction {
                 id: "snippets-action:paste".into(),
                 label: "Paste to Active App".into(),
-                action: Action::Copy(snippet.body.clone()),
+                action: Action::PasteText(snippet.body.clone()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Primary,
                 hotkey: Some("↵"),

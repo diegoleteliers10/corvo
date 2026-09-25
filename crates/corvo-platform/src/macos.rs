@@ -3,16 +3,20 @@
 
 use std::path::{Path, PathBuf};
 
+use objc2::AnyThread;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeString,
-    NSRunningApplication, NSWindowAnimationBehavior, NSWorkspace,
+    NSBitmapImageFileType, NSBitmapImageRep, NSCompositingOperation, NSGraphicsContext,
+    NSImageInterpolation, NSPasteboard, NSPasteboardTypeString, NSRunningApplication,
+    NSWindowAnimationBehavior, NSWorkspace,
 };
-use objc2_foundation::{NSDictionary, MainThreadMarker, NSData, NSNumber, NSString, NSURL};
+use objc2_foundation::{
+    MainThreadMarker, NSData, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 
 use super::{AppEntry, PlatformError, PlatformOps, PlatformResult, WindowHandle};
 
-// CoreGraphics FFI for synthetic paste keystrokes
+// CoreGraphics and CoreFoundation FFI
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventSourceCreate(state_id: i32) -> *mut std::ffi::c_void;
@@ -24,6 +28,7 @@ extern "C" {
     fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *const std::ffi::c_void);
+    fn CFEqual(cf1: *const std::ffi::c_void, cf2: *const std::ffi::c_void) -> bool;
     fn CGMainDisplayID() -> u32;
     fn CGEventCreate(source: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
@@ -33,6 +38,19 @@ extern "C" {
         displays: *mut u32,
         matching_display_count: *mut u32,
     ) -> i32;
+    fn CGGetActiveDisplayList(
+        max_displays: u32,
+        active_displays: *mut u32,
+        display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGDisplayIsMain(display: u32) -> bool;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    pub static kCFBooleanTrue: *const std::ffi::c_void;
+    pub static kCFBooleanFalse: *const std::ffi::c_void;
 }
 
 // ApplicationServices FFI for Accessibility trust check and AXUIElement window manipulation
@@ -50,21 +68,37 @@ extern "C" {
         attribute: *const std::ffi::c_void,
         value: *const std::ffi::c_void,
     ) -> i32;
+    fn AXUIElementSetMessagingTimeout(
+        element: *mut std::ffi::c_void,
+        timeout_in_seconds: f32,
+    ) -> i32;
     fn AXValueCreate(value_type: u32, value_ptr: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn AXValueGetValue(
+        value: *const std::ffi::c_void,
+        value_type: u32,
+        value_ptr: *mut std::ffi::c_void,
+    ) -> bool;
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct CGPoint {
-    x: f64,
-    y: f64,
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct CGSize {
-    width: f64,
-    height: f64,
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CGSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CGRect {
+    pub origin: CGPoint,
+    pub size: CGSize,
 }
 
 const K_AX_VALUE_CGPOINT_TYPE: u32 = 1;
@@ -119,56 +153,20 @@ impl PlatformOps for MacPlatform {
     }
 
     fn list_apps(&self) -> PlatformResult<Vec<AppEntry>> {
-        // Search order is priority: a name found in an earlier root wins,
-        // so /Applications beats the system copies.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let mut roots: Vec<PathBuf> = vec![
-            PathBuf::from("/Applications"),
-            PathBuf::from("/System/Applications"),
+        let default_scopes = vec![
+            "/Applications".into(),
+            "/Applications/Utilities".into(),
+            "/System/Applications".into(),
+            "/System/Applications/Utilities".into(),
+            "/System/Library/CoreServices/Applications".into(),
+            "/System/Volumes/Preboot/Cryptexes/App/System/Applications".into(),
+            "/System/Library/CoreServices/Finder.app".into(),
+            "~/Applications".into(),
         ];
-        if let Some(home) = home {
-            roots.push(home.join("Applications"));
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        let mut apps = Vec::new();
-        for root in roots {
-            let Ok(entries) = std::fs::read_dir(&root) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = bundle_app_name(&path) {
-                    if seen.insert(name.clone()) {
-                        let icon_png = extract_app_icon(&path);
-                        apps.push(AppEntry { name, path, icon_png });
-                    }
-                } else if path.is_dir() {
-                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !file_name.starts_with('.') && !file_name.ends_with(".app") {
-                        if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                            for sub in sub_entries.flatten() {
-                                let sub_path = sub.path();
-                                if let Some(name) = bundle_app_name(&sub_path) {
-                                    if seen.insert(name.clone()) {
-                                        let icon_png = extract_app_icon(&sub_path);
-                                        apps.push(AppEntry {
-                                            name,
-                                            path: sub_path,
-                                            icon_png,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        apps.sort_by_key(|app| app.name.to_lowercase());
-        Ok(apps)
+        list_apps_in_scopes(&default_scopes)
     }
 
     fn open_path(&self, path: &Path) -> PlatformResult<()> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let ns_path = NSString::from_str(&path.to_string_lossy());
         let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
         if NSWorkspace::sharedWorkspace().openURL(&url) {
@@ -296,6 +294,72 @@ pub fn clipboard_is_concealed() -> bool {
     false
 }
 
+/// Lists installed applications within custom search scopes.
+pub fn list_apps_in_scopes(scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut seen = std::collections::HashSet::new();
+    let mut apps = Vec::new();
+
+    for scope in scopes {
+        let path = if let Some(stripped) = scope.strip_prefix("~/") {
+            if let Some(ref h) = home {
+                h.join(stripped)
+            } else {
+                PathBuf::from(scope)
+            }
+        } else {
+            PathBuf::from(scope)
+        };
+
+        if !path.exists() {
+            continue;
+        }
+
+        // Check if scope itself is an app bundle (like Finder.app)
+        if let Some(name) = bundle_app_name(&path) {
+            if seen.insert(name.clone()) {
+                let icon_png = extract_app_icon(&path);
+                apps.push(AppEntry { name, path, icon_png });
+            }
+            continue;
+        }
+
+        // If it's a directory, scan for .app bundles (1 level deep or direct)
+        let Ok(entries) = std::fs::read_dir(&path) else { continue };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if let Some(name) = bundle_app_name(&entry_path) {
+                if seen.insert(name.clone()) {
+                    let icon_png = extract_app_icon(&entry_path);
+                    apps.push(AppEntry { name, path: entry_path, icon_png });
+                }
+            } else if entry_path.is_dir() {
+                let file_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !file_name.starts_with('.') && !file_name.ends_with(".app") {
+                    if let Ok(sub_entries) = std::fs::read_dir(&entry_path) {
+                        for sub in sub_entries.flatten() {
+                            let sub_path = sub.path();
+                            if let Some(name) = bundle_app_name(&sub_path) {
+                                if seen.insert(name.clone()) {
+                                    let icon_png = extract_app_icon(&sub_path);
+                                    apps.push(AppEntry {
+                                        name,
+                                        path: sub_path,
+                                        icon_png,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    apps.sort_by_key(|app| app.name.to_lowercase());
+    Ok(apps)
+}
+
 /// The display name of an `.app` bundle. The bundle directory name is a
 /// stable stand-in for `CFBundleName`; localization lands with phase 3
 /// config work if it is ever missed.
@@ -305,50 +369,135 @@ fn bundle_app_name(path: &Path) -> Option<String> {
     if stem.is_empty() { None } else { Some(stem.to_string()) }
 }
 
-/// Renders the bundle's `.icns` icon to a cached PNG through `sips`.
-/// Returns `None` when the bundle carries no icon or `sips` refuses.
-/// The cache lives in the temp directory for phase 1; `corvo-config`
-/// owns real paths from phase 3 (SPEC §7).
+/// Extracts a high-definition 256x256 PNG icon directly via AppKit.
+/// This queries LaunchServices via NSWorkspace, which has direct access to
+/// the system master icon catalog (including system apps where .icns is only a 16px stub).
+fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
+    let ns_path = NSString::from_str(bundle.to_str()?);
+    let ws = NSWorkspace::sharedWorkspace();
+    let image = ws.iconForFile(&ns_path);
+    image.setSize(NSSize::new(256.0, 256.0));
+
+    unsafe {
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            256,
+            256,
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSCalibratedRGBColorSpace,
+            0,
+            0,
+        )?;
+
+        NSGraphicsContext::saveGraphicsState_class();
+        let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        NSGraphicsContext::setCurrentContext(Some(&ctx));
+        ctx.setImageInterpolation(NSImageInterpolation::High);
+
+        let target_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(256.0, 256.0));
+        image.drawInRect_fromRect_operation_fraction(
+            target_rect,
+            target_rect,
+            NSCompositingOperation::Copy,
+            1.0,
+        );
+
+        NSGraphicsContext::restoreGraphicsState_class();
+
+        let empty_props = NSDictionary::new();
+        let png_data = rep.representationUsingType_properties(
+            NSBitmapImageFileType::PNG,
+            &empty_props,
+        )?;
+
+        std::fs::write(png_path, png_data.to_vec()).ok()?;
+    }
+
+    Some(())
+}
+
+/// Renders the bundle's icon to a cached HD 256x256 PNG.
+/// First attempts native NSWorkspace extraction (high-res, handles Assets.car & system apps).
+/// Falls back to `sips` on the bundle's `.icns` file if AppKit extraction fails.
 fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
     let stem = bundle_app_name(bundle)?;
-    let cache_dir = std::env::temp_dir().join("corvo-icons");
+    let cache_dir = std::env::temp_dir().join("corvo-icons-v3");
     let png = cache_dir.join(format!("{stem}.png"));
     if png.exists() {
         return Some(png);
     }
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    // Primary path: AppKit native icon extraction at 256x256 Retina resolution.
+    if extract_app_icon_appkit(bundle, &png).is_some() && png.exists() {
+        return Some(png);
+    }
+
+    // Fallback path: sips extraction from .icns.
     let resources = bundle.join("Contents/Resources");
-    if let Some(icns) = icns_in(&resources, &stem) {
-        let png_clone = png.clone();
-        let cache_dir_clone = cache_dir.clone();
-        std::thread::spawn(move || {
-            let _ = std::fs::create_dir_all(&cache_dir_clone);
-            let _ = std::process::Command::new("/usr/bin/sips")
-                .args(["-Z", "64", "-s", "format", "png"])
-                .arg(&icns)
-                .arg("--out")
-                .arg(&png_clone)
-                .output();
-        });
+    if let Some(icns) = icns_in(bundle, &resources, &stem) {
+        let res = std::process::Command::new("/usr/bin/sips")
+            .args(["-Z", "256", "-s", "format", "png"])
+            .arg(&icns)
+            .arg("--out")
+            .arg(&png)
+            .output();
+        if res.is_ok() && png.exists() {
+            return Some(png);
+        }
     }
     None
 }
 
-/// Picks the bundle's icon file: the conventional names first, then the
-/// alphabetically first `.icns` in Resources.
-fn icns_in(resources: &Path, stem: &str) -> Option<PathBuf> {
-    for candidate in ["AppIcon.icns", &format!("{stem}.icns")] {
+/// Picks the bundle's highest-resolution icon file: CFBundleIconFile in Info.plist first,
+/// then conventional names, and finally the largest .icns in Resources.
+fn icns_in(bundle: &Path, resources: &Path, stem: &str) -> Option<PathBuf> {
+    let plist_path = bundle.join("Contents/Info.plist");
+    if let Ok(plist_content) = std::fs::read_to_string(&plist_path) {
+        if let Some(pos) = plist_content.find("<key>CFBundleIconFile</key>") {
+            let rest = &plist_content[pos + 27..];
+            if let Some(start_str) = rest.find("<string>") {
+                let val_start = start_str + 8;
+                if let Some(end_str) = rest[val_start..].find("</string>") {
+                    let icon_name = rest[val_start..val_start + end_str].trim();
+                    let with_ext = if icon_name.ends_with(".icns") {
+                        icon_name.to_string()
+                    } else {
+                        format!("{icon_name}.icns")
+                    };
+                    let candidate = resources.join(&with_ext);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    for candidate in [
+        "AppIcon.icns",
+        "AppIconUpdated.icns",
+        "appicon.icns",
+        "icon.icns",
+        &format!("{stem}.icns"),
+    ] {
         let path = resources.join(candidate);
         if path.is_file() {
             return Some(path);
         }
     }
+
     let mut icns: Vec<PathBuf> = std::fs::read_dir(resources)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "icns"))
         .collect();
-    icns.sort();
+    icns.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
     icns.into_iter().next()
 }
 
@@ -454,6 +603,57 @@ pub fn is_accessibility_trusted(prompt: bool) -> bool {
     }
 }
 
+/// Queries whether the process is authorized to access macOS Calendars.
+pub fn is_calendar_access_granted() -> bool {
+    unsafe {
+        let path = std::ffi::CString::new("/System/Library/Frameworks/EventKit.framework/EventKit").ok();
+        let Some(path) = path else { return false };
+        let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
+        if handle.is_null() {
+            return false;
+        }
+
+        extern "C" {
+            fn objc_getClass(name: *const libc::c_char) -> *const std::ffi::c_void;
+            fn sel_registerName(name: *const libc::c_char) -> *const std::ffi::c_void;
+        }
+
+        let cls_name = std::ffi::CString::new("EKEventStore").ok();
+        let sel_name = std::ffi::CString::new("authorizationStatusForEntityType:").ok();
+        let (Some(cls_name), Some(sel_name)) = (cls_name, sel_name) else { return false };
+
+        let cls = objc_getClass(cls_name.as_ptr());
+        let sel = sel_registerName(sel_name.as_ptr());
+        if cls.is_null() || sel.is_null() {
+            return false;
+        }
+
+        type MsgSendFn = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize) -> isize;
+        let msg_send: MsgSendFn = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, b"objc_msgSend\0".as_ptr() as _));
+        let status = msg_send(cls, sel, 0); // 0 = EKEntityTypeEvent
+
+        // 3 = EKAuthorizationStatusFullAccess / Authorized, 4 = EKAuthorizationStatusWriteOnly
+        status == 3 || status == 4
+    }
+}
+
+/// Queries whether the process is authorized for screen capture/recording without prompting.
+pub fn is_screen_recording_granted() -> bool {
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Triggers the system screen recording permission dialog if untrusted.
+pub fn request_screen_recording() -> bool {
+    extern "C" {
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+
 /// Synthesizes and posts a Cmd+V keystroke into the session event tap.
 pub fn post_paste_keystroke() -> PlatformResult<()> {
     unsafe {
@@ -549,6 +749,27 @@ fn find_panel(width: f64, height: f64) -> Option<objc2::rc::Retained<objc2_app_k
         })
 }
 
+/// Orders an application window matching the given dimensions front, regardless of app focus.
+pub fn order_window_front(width: f64, height: f64) {
+    let Some(marker) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(marker);
+    let windows = app.windows();
+    for index in 0..windows.len() {
+        let window = windows.objectAtIndex(index);
+        let frame = window.frame();
+        if (frame.size.width - width).abs() <= 1.5 && (frame.size.height - height).abs() <= 1.5 {
+            use objc2_app_kit::NSWindowCollectionBehavior;
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+            window.orderFrontRegardless();
+            window.makeKeyWindow();
+            break;
+        }
+    }
+}
+
 type DisplayServicesGetBrightnessFn = unsafe extern "C" fn(u32, *mut f32) -> i32;
 type DisplayServicesSetBrightnessFn = unsafe extern "C" fn(u32, f32) -> i32;
 
@@ -586,9 +807,128 @@ pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+static SCREENS_CACHE: std::sync::RwLock<Option<Vec<ScreenRect>>> = std::sync::RwLock::new(None);
+static RESTORE_CACHE: std::sync::Mutex<Option<(i32, ScreenRect)>> = std::sync::Mutex::new(None);
+
+/// Updates the cached screen dimensions from AppKit NSScreen on the main thread.
+pub fn update_screens_cache() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        let screens = objc2_app_kit::NSScreen::screens(mtm);
+        let primary_height = if screens.count() > 0 {
+            screens.objectAtIndex(0).frame().size.height
+        } else {
+            0.0
+        };
+        let mut list = Vec::with_capacity(screens.count());
+        for i in 0..screens.count() {
+            let scr = screens.objectAtIndex(i);
+            let visible = scr.visibleFrame();
+            let ax_x = visible.origin.x;
+            let ax_y = primary_height - (visible.origin.y + visible.size.height);
+            let ax_w = visible.size.width;
+            let ax_h = visible.size.height;
+            list.push(ScreenRect {
+                x: ax_x,
+                y: ax_y,
+                width: ax_w,
+                height: ax_h,
+            });
+        }
+        if let Ok(mut cache) = SCREENS_CACHE.write() {
+            *cache = Some(list);
+        }
+    }
+}
+
+fn get_all_screens() -> Vec<ScreenRect> {
+    if let Ok(cache) = SCREENS_CACHE.read() {
+        if let Some(ref screens) = *cache {
+            if !screens.is_empty() {
+                return screens.clone();
+            }
+        }
+    }
+    if let Some(mtm) = MainThreadMarker::new() {
+        let screens = objc2_app_kit::NSScreen::screens(mtm);
+        let primary_height = if screens.count() > 0 {
+            screens.objectAtIndex(0).frame().size.height
+        } else {
+            0.0
+        };
+        let mut list = Vec::with_capacity(screens.count());
+        for i in 0..screens.count() {
+            let scr = screens.objectAtIndex(i);
+            let visible = scr.visibleFrame();
+            let ax_x = visible.origin.x;
+            let ax_y = primary_height - (visible.origin.y + visible.size.height);
+            list.push(ScreenRect {
+                x: ax_x,
+                y: ax_y,
+                width: visible.size.width,
+                height: visible.size.height,
+            });
+        }
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    get_cg_screens()
+}
+
+fn get_cg_screens() -> Vec<ScreenRect> {
+    unsafe {
+        let mut displays = [0u32; 16];
+        let mut count = 0u32;
+        let err = CGGetActiveDisplayList(16, displays.as_mut_ptr(), &mut count);
+        if err != 0 || count == 0 {
+            return vec![ScreenRect {
+                x: 0.0,
+                y: 25.0,
+                width: 1440.0,
+                height: 875.0,
+            }];
+        }
+        let mut list = Vec::with_capacity(count as usize);
+        for &d in &displays[..count as usize] {
+            let bounds = CGDisplayBounds(d);
+            let is_main = CGDisplayIsMain(d);
+            let y_offset = if is_main { 25.0 } else { 0.0 };
+            let h = (bounds.size.height - y_offset).max(100.0);
+            list.push(ScreenRect {
+                x: bounds.origin.x,
+                y: bounds.origin.y + y_offset,
+                width: bounds.size.width,
+                height: h,
+            });
+        }
+        list
+    }
+}
+
+fn intersection_area(r1: ScreenRect, r2: ScreenRect) -> f64 {
+    let left = r1.x.max(r2.x);
+    let right = (r1.x + r1.width).min(r2.x + r2.width);
+    let top = r1.y.max(r2.y);
+    let bottom = (r1.y + r1.height).min(r2.y + r2.height);
+    if right > left && bottom > top {
+        (right - left) * (bottom - top)
+    } else {
+        0.0
+    }
+}
+
 /// Tiles and arranges the target application's window using native AXUIElement.
 pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> {
     if !is_accessibility_trusted(true) {
+        let _ = super::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
         return Err(PlatformError::Os(
             "Accessibility permission required for window management. Please enable Corvo in System Settings -> Privacy & Security -> Accessibility.".into(),
         ));
@@ -606,6 +946,26 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         let app_ref = AXUIElementCreateApplication(pid as libc::pid_t);
         if app_ref.is_null() {
             return Err(PlatformError::Os("failed to create AXUIElement for process".into()));
+        }
+
+        // Set 50ms messaging timeout to prevent hung apps from blocking the UI thread
+        AXUIElementSetMessagingTimeout(app_ref, 0.05);
+
+        // Suppress Chromium/Electron AXEnhancedUserInterface stall during resize
+        let attr_enhanced = NSString::from_str("AXEnhancedUserInterface");
+        let mut original_enhanced: *const std::ffi::c_void = std::ptr::null();
+        let had_enhanced = AXUIElementCopyAttributeValue(
+            app_ref,
+            &*attr_enhanced as *const _ as *const std::ffi::c_void,
+            &mut original_enhanced,
+        ) == 0 && !original_enhanced.is_null();
+
+        if had_enhanced && CFEqual(original_enhanced, kCFBooleanTrue) {
+            AXUIElementSetAttributeValue(
+                app_ref,
+                &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                kCFBooleanFalse,
+            );
         }
 
         let attr_focused = NSString::from_str("AXFocusedWindow");
@@ -643,84 +1003,266 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
             }
         }
 
-        CFRelease(app_ref as *const std::ffi::c_void);
-
         if window_ref.is_null() {
+            if had_enhanced {
+                AXUIElementSetAttributeValue(
+                    app_ref,
+                    &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                    original_enhanced,
+                );
+                CFRelease(original_enhanced);
+            }
+            CFRelease(app_ref as *const std::ffi::c_void);
             return Err(PlatformError::Os("no accessible window found for application".into()));
         }
 
-        let (screen_x, screen_y, screen_w, screen_h) = get_screen_visible_bounds();
+        AXUIElementSetMessagingTimeout(window_ref as *mut _, 0.05);
 
-        let (target_x, target_y, target_w, target_h) = match action {
-            "left-half" => (screen_x, screen_y, screen_w / 2.0, screen_h),
-            "right-half" => (screen_x + screen_w / 2.0, screen_y, screen_w / 2.0, screen_h),
-            "top-half" => (screen_x, screen_y, screen_w, screen_h / 2.0),
-            "bottom-half" => (screen_x, screen_y + screen_h / 2.0, screen_w, screen_h / 2.0),
-            "maximize" => (screen_x, screen_y, screen_w, screen_h),
-            "center" => {
-                let w = screen_w * 0.7;
-                let h = screen_h * 0.8;
-                let x = screen_x + (screen_w - w) / 2.0;
-                let y = screen_y + (screen_h - h) / 2.0;
-                (x, y, w, h)
+        // Read current window position and size
+        let attr_pos = NSString::from_str("AXPosition");
+        let attr_size = NSString::from_str("AXSize");
+
+        let mut cur_pos_val: *const std::ffi::c_void = std::ptr::null();
+        let mut cur_size_val: *const std::ffi::c_void = std::ptr::null();
+        let mut cur_pos = CGPoint { x: 0.0, y: 0.0 };
+        let mut cur_size = CGSize { width: 0.0, height: 0.0 };
+
+        if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, &mut cur_pos_val) == 0 && !cur_pos_val.is_null() {
+            AXValueGetValue(cur_pos_val, K_AX_VALUE_CGPOINT_TYPE, &mut cur_pos as *mut _ as *mut _);
+            CFRelease(cur_pos_val);
+        }
+        if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut cur_size_val) == 0 && !cur_size_val.is_null() {
+            AXValueGetValue(cur_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut cur_size as *mut _ as *mut _);
+            CFRelease(cur_size_val);
+        }
+
+        let cur_window_rect = ScreenRect {
+            x: cur_pos.x,
+            y: cur_pos.y,
+            width: cur_size.width,
+            height: cur_size.height,
+        };
+
+        // Multi-display detection via maximum intersection area
+        let screens = get_all_screens();
+        let (current_screen_idx, current_screen) = screens
+            .iter()
+            .enumerate()
+            .max_by(|(_, s1), (_, s2)| {
+                let a1 = intersection_area(cur_window_rect, **s1);
+                let a2 = intersection_area(cur_window_rect, **s2);
+                a1.total_cmp(&a2)
+            })
+            .map(|(idx, &s)| (idx, s))
+            .unwrap_or((0, ScreenRect { x: 0.0, y: 25.0, width: 1440.0, height: 875.0 }));
+
+        // Handle restore action or store current frame for future restore
+        if action == "restore" {
+            let restored = {
+                let mut guard = RESTORE_CACHE.lock().unwrap();
+                match *guard {
+                    Some((saved_pid, rect)) if saved_pid == pid => {
+                        *guard = None;
+                        Some(rect)
+                    }
+                    _ => None,
+                }
+            };
+
+            let Some(target) = restored else {
+                if had_enhanced {
+                    AXUIElementSetAttributeValue(
+                        app_ref,
+                        &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                        original_enhanced,
+                    );
+                    CFRelease(original_enhanced);
+                }
+                CFRelease(app_ref as *const std::ffi::c_void);
+                CFRelease(window_ref);
+                return Ok(());
+            };
+
+            apply_window_frame(window_ref, target);
+
+            if had_enhanced {
+                AXUIElementSetAttributeValue(
+                    app_ref,
+                    &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                    original_enhanced,
+                );
+                CFRelease(original_enhanced);
             }
+            CFRelease(app_ref as *const std::ffi::c_void);
+            CFRelease(window_ref);
+            return Ok(());
+        }
+
+        // Cache the pre-tile frame if not already cached for this PID
+        {
+            let mut guard = RESTORE_CACHE.lock().unwrap();
+            let should_cache = match *guard {
+                Some((saved_pid, _)) => saved_pid != pid,
+                None => true,
+            };
+            if should_cache && cur_window_rect.width > 50.0 && cur_window_rect.height > 50.0 {
+                *guard = Some((pid, cur_window_rect));
+            }
+        }
+
+        let sx = current_screen.x;
+        let sy = current_screen.y;
+        let sw = current_screen.width;
+        let sh = current_screen.height;
+
+        let target_rect = match action {
+            // Halves
+            "left-half" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh },
+            "right-half" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh },
+            "top-half" => ScreenRect { x: sx, y: sy, width: sw, height: sh / 2.0 },
+            "bottom-half" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw, height: sh / 2.0 },
+
+            // Thirds
+            "first-third" => ScreenRect { x: sx, y: sy, width: sw / 3.0, height: sh },
+            "center-third" => ScreenRect { x: sx + sw / 3.0, y: sy, width: sw / 3.0, height: sh },
+            "last-third" => ScreenRect { x: sx + 2.0 * sw / 3.0, y: sy, width: sw / 3.0, height: sh },
+            "first-two-thirds" => ScreenRect { x: sx, y: sy, width: 2.0 * sw / 3.0, height: sh },
+            "last-two-thirds" => ScreenRect { x: sx + sw / 3.0, y: sy, width: 2.0 * sw / 3.0, height: sh },
+
+            // Quarters
+            "top-left" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh / 2.0 },
+            "top-right" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh / 2.0 },
+            "bottom-left" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
+            "bottom-right" => ScreenRect { x: sx + sw / 2.0, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
+
+            // Whole Screen / Centering
+            "maximize" => ScreenRect { x: sx, y: sy, width: sw, height: sh },
             "almost-maximize" => {
-                let w = screen_w * 0.9;
-                let h = screen_h * 0.9;
-                let x = screen_x + (screen_w - w) / 2.0;
-                let y = screen_y + (screen_h - h) / 2.0;
-                (x, y, w, h)
+                let w = sw * 0.9;
+                let h = sh * 0.9;
+                ScreenRect {
+                    x: sx + (sw - w) / 2.0,
+                    y: sy + (sh - h) / 2.0,
+                    width: w,
+                    height: h,
+                }
             }
+            "center" => {
+                let w = sw * 0.7;
+                let h = sh * 0.8;
+                ScreenRect {
+                    x: sx + (sw - sw * 0.7) / 2.0,
+                    y: sy + (sh - sh * 0.8) / 2.0,
+                    width: w,
+                    height: h,
+                }
+            }
+
+            // Multi-Display Movement
+            "next-display" | "prev-display" => {
+                if screens.len() <= 1 {
+                    cur_window_rect
+                } else {
+                    let next_idx = if action == "next-display" {
+                        (current_screen_idx + 1) % screens.len()
+                    } else {
+                        (current_screen_idx + screens.len() - 1) % screens.len()
+                    };
+                    let next_s = screens[next_idx];
+                    let rel_x = (cur_window_rect.x - sx) / sw.max(1.0);
+                    let rel_y = (cur_window_rect.y - sy) / sh.max(1.0);
+                    let rel_w = cur_window_rect.width / sw.max(1.0);
+                    let rel_h = cur_window_rect.height / sh.max(1.0);
+                    ScreenRect {
+                        x: next_s.x + rel_x * next_s.width,
+                        y: next_s.y + rel_y * next_s.height,
+                        width: (rel_w * next_s.width).min(next_s.width),
+                        height: (rel_h * next_s.height).min(next_s.height),
+                    }
+                }
+            }
+
             _ => {
+                if had_enhanced {
+                    AXUIElementSetAttributeValue(
+                        app_ref,
+                        &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                        original_enhanced,
+                    );
+                    CFRelease(original_enhanced);
+                }
+                CFRelease(app_ref as *const std::ffi::c_void);
                 CFRelease(window_ref);
                 return Err(PlatformError::Os(format!("unknown window action: {action}")));
             }
         };
 
-        let pt = CGPoint { x: target_x, y: target_y };
-        let sz = CGSize { width: target_w, height: target_h };
+        apply_window_frame(window_ref, target_rect);
 
-        let pos_val = AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &pt as *const _ as *const std::ffi::c_void);
-        let size_val = AXValueCreate(K_AX_VALUE_CGSIZE_TYPE, &sz as *const _ as *const std::ffi::c_void);
-
-        let attr_pos = NSString::from_str("AXPosition");
-        let attr_size = NSString::from_str("AXSize");
-
-        AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const std::ffi::c_void, pos_val as *const std::ffi::c_void);
-        AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const std::ffi::c_void, size_val as *const std::ffi::c_void);
-        AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const std::ffi::c_void, pos_val as *const std::ffi::c_void);
-
-        if !pos_val.is_null() {
-            CFRelease(pos_val as *const std::ffi::c_void);
+        // Right-edge compensation if target was right-aligned and actual width exceeded target_rect.width
+        let is_right_aligned = matches!(
+            action,
+            "right-half" | "last-third" | "last-two-thirds" | "top-right" | "bottom-right"
+        );
+        if is_right_aligned {
+            let mut final_size_val: *const std::ffi::c_void = std::ptr::null();
+            let mut final_size = CGSize { width: target_rect.width, height: target_rect.height };
+            if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut final_size_val) == 0 && !final_size_val.is_null() {
+                AXValueGetValue(final_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut final_size as *mut _ as *mut _);
+                CFRelease(final_size_val);
+            }
+            if final_size.width > target_rect.width {
+                let adjusted_x = (target_rect.x + target_rect.width) - final_size.width;
+                let adj_pt = CGPoint { x: adjusted_x, y: target_rect.y };
+                let adj_val = AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &adj_pt as *const _ as *const _);
+                if !adj_val.is_null() {
+                    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, adj_val);
+                    CFRelease(adj_val);
+                }
+            }
         }
-        if !size_val.is_null() {
-            CFRelease(size_val as *const std::ffi::c_void);
+
+        // Restore Chromium Enhanced UI if it was temporarily disabled
+        if had_enhanced {
+            AXUIElementSetAttributeValue(
+                app_ref,
+                &*attr_enhanced as *const _ as *const std::ffi::c_void,
+                original_enhanced,
+            );
+            CFRelease(original_enhanced);
         }
+
+        CFRelease(app_ref as *const std::ffi::c_void);
         CFRelease(window_ref);
 
         Ok(())
     }
 }
 
-fn get_screen_visible_bounds() -> (f64, f64, f64, f64) {
-    if let Some(mtm) = MainThreadMarker::new() {
-        if let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) {
-            let frame = screen.frame();
-            let visible = screen.visibleFrame();
-            let screens = objc2_app_kit::NSScreen::screens(mtm);
-            let primary_height = if screens.count() > 0 {
-                screens.objectAtIndex(0).frame().size.height
-            } else {
-                frame.size.height
-            };
-            let ax_x = visible.origin.x;
-            let ax_y = primary_height - (visible.origin.y + visible.size.height);
-            let ax_w = visible.size.width;
-            let ax_h = visible.size.height;
-            return (ax_x, ax_y, ax_w, ax_h);
-        }
+/// Helper that sets window geometry using the robust size -> position -> size sequence.
+unsafe fn apply_window_frame(window_ref: *const std::ffi::c_void, rect: ScreenRect) {
+    let pt = CGPoint { x: rect.x, y: rect.y };
+    let sz = CGSize { width: rect.width, height: rect.height };
+
+    let pos_val = AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &pt as *const _ as *const std::ffi::c_void);
+    let size_val = AXValueCreate(K_AX_VALUE_CGSIZE_TYPE, &sz as *const _ as *const std::ffi::c_void);
+
+    let attr_pos = NSString::from_str("AXPosition");
+    let attr_size = NSString::from_str("AXSize");
+
+    // Sequence: size -> position -> size
+    // macOS clamps size to current display bounds before moving across displays;
+    // setting size first shrinks it, position moves it, second size applies target dimensions.
+    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const std::ffi::c_void, size_val as *const std::ffi::c_void);
+    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const std::ffi::c_void, pos_val as *const std::ffi::c_void);
+    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const std::ffi::c_void, size_val as *const std::ffi::c_void);
+
+    if !pos_val.is_null() {
+        CFRelease(pos_val as *const std::ffi::c_void);
     }
-    (0.0, 25.0, 1440.0, 900.0)
+    if !size_val.is_null() {
+        CFRelease(size_val as *const std::ffi::c_void);
+    }
 }
 
 fn unimplemented_os(what: &str) -> PlatformError {
@@ -757,5 +1299,19 @@ mod tests {
 
         sample.truncate(20);
         assert_eq!(super::parse_png_dimensions(&sample), None);
+    }
+
+    #[test]
+    fn extracts_high_res_app_icon() {
+        let books = std::path::Path::new("/System/Applications/Books.app");
+        if books.exists() {
+            let icon_path = super::extract_app_icon(books).expect("extracts Books icon");
+            assert!(icon_path.exists());
+            let bytes = std::fs::read(&icon_path).expect("reads icon bytes");
+            let dims = super::parse_png_dimensions(&bytes).expect("parses dimensions");
+            assert_eq!(dims, (256, 256));
+            // High-res icon should be richly detailed (> 15KB), not a 1.8KB blurry stub
+            assert!(bytes.len() > 15_000, "expected >15KB high res icon, got {}", bytes.len());
+        }
     }
 }

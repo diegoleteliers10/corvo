@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult,
+    search_match_score, SearchContext, SearchResult,
 };
-use corvo_platform::{platform_ops, AppEntry};
+use corvo_platform::AppEntry;
 
 #[derive(Default)]
 pub struct AppLauncherCommand;
@@ -31,8 +31,28 @@ impl Command for AppLauncherCommand {
     }
 
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
+        let settings = corvo_config::Settings::load();
+        if !settings.applications.enabled {
+            return Vec::new();
+        }
+
         ensure_corpus();
-        let apps = corpus_apps();
+        let all_apps = corpus_apps();
+        if all_apps.is_empty() {
+            return Vec::new();
+        }
+
+        let app_configs = &settings.applications.app_configs;
+        let apps: Vec<AppEntry> = all_apps
+            .into_iter()
+            .filter(|app| {
+                let hidden = app_configs
+                    .get(&app.name)
+                    .or_else(|| app_configs.get(&app.path.display().to_string()))
+                    .map_or(false, |cfg| cfg.hidden);
+                !hidden
+            })
+            .collect();
         if apps.is_empty() {
             return Vec::new();
         }
@@ -41,7 +61,7 @@ impl Command for AppLauncherCommand {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_seed_frequencies(&mut frequencies);
-        let ranked = rank(&apps, query, &frequencies);
+        let ranked = rank(&apps, query, &frequencies, app_configs);
 
         if query.is_empty() {
             let mut results = Vec::new();
@@ -85,6 +105,14 @@ impl Command for AppLauncherCommand {
                 .map(|entry| {
                     let key = entry.path.display().to_string();
                     let is_recent = frequencies.get(&key).map_or(false, |f| f.0 > 0);
+                    let alias = app_configs
+                        .get(&entry.name)
+                        .or_else(|| app_configs.get(&key))
+                        .and_then(|config| config.alias.as_deref())
+                        .unwrap_or("");
+                    let score = search_match_score(query, &[alias, entry.name.as_str()])
+                        .unwrap_or(70.0)
+                        + if is_recent { 2.0 } else { 0.0 };
                     SearchResult {
                         id: format!("app-launcher:{}", entry.path.display()),
                         title: entry.name.clone(),
@@ -94,7 +122,7 @@ impl Command for AppLauncherCommand {
                             .clone()
                             .map(Icon::Image)
                             .unwrap_or(Icon::App),
-                        score: if is_recent { 105.0 } else { 100.0 },
+                        score,
                         accessory: Some("Application".into()),
                     }
                 })
@@ -119,16 +147,12 @@ impl Command for AppLauncherCommand {
         else {
             return Vec::new();
         };
-        let parent = path
-            .parent()
-            .map(|dir| dir.to_path_buf())
-            .unwrap_or_else(|| path.clone());
-        vec![
+        let mut actions = vec![
             CommandAction {
                 id: "app-launcher-action:open".into(),
                 label: "Open Application".into(),
                 action: Action::Open(path.clone()),
-                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_UP_RIGHT),
+                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::APP_WINDOW),
                 group: ActionGroup::Primary,
                 hotkey: Some("↵"),
             },
@@ -140,35 +164,50 @@ impl Command for AppLauncherCommand {
                 group: ActionGroup::Standard,
                 hotkey: Some("⌘↵"),
             },
-            CommandAction {
-                id: "app-launcher-action:terminal".into(),
-                label: "Open in Terminal".into(),
-                action: Action::RunShell(format!("open -a Terminal \"{}\"", parent.to_string_lossy())),
-                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TERMINAL_WINDOW),
-                group: ActionGroup::Standard,
-                hotkey: Some("⌃↵"),
-            },
-            CommandAction {
-                id: "app-launcher-action:copy-path".into(),
-                label: "Copy Path".into(),
-                action: Action::Copy(path.to_string_lossy().to_string()),
-                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
-                group: ActionGroup::Standard,
-                hotkey: Some("⌥⌘C"),
-            },
-        ]
+        ];
+        if corvo_platform::supports_app_uninstall()
+            && path.extension().is_some_and(|extension| extension == "app")
+            && !path.starts_with("/System/")
+        {
+            actions.push(CommandAction {
+                id: "app-launcher-action:uninstall".into(),
+                label: "Uninstall application".into(),
+                action: Action::OpenAppUninstaller {
+                    name: app_name_for_path(&path),
+                    path,
+                },
+                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TRASH),
+                group: ActionGroup::Destructive,
+                hotkey: None,
+            });
+        }
+        actions
     }
+}
+
+fn app_name_for_path(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Application")
+        .to_string()
 }
 
 /// Shared corpus state. A background scan fills the list once; searches
 /// read whatever is present and never block.
 fn corpus() -> &'static RwLock<CorpusState> {
     static CORPUS: OnceLock<RwLock<CorpusState>> = OnceLock::new();
-    CORPUS.get_or_init(|| RwLock::new(CorpusState { apps: Vec::new(), scanning: false }))
+    CORPUS.get_or_init(|| RwLock::new(CorpusState {
+        apps: Vec::new(),
+        scopes: Vec::new(),
+        scanned_at: None,
+        scanning: false,
+    }))
 }
 
 struct CorpusState {
     apps: Vec<AppEntry>,
+    scopes: Vec<String>,
+    scanned_at: Option<Instant>,
     scanning: bool,
 }
 
@@ -178,10 +217,25 @@ pub fn warmup() {
 
 fn ensure_corpus() {
     let mut state = corpus().write().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !state.apps.is_empty() {
+    let settings = corvo_config::Settings::load();
+    let scan_is_fresh = state
+        .scanned_at
+        .is_some_and(|scanned_at| scanned_at.elapsed().as_secs() < 30);
+    if scan_is_fresh && state.scopes == settings.applications.search_scopes {
         return;
     }
-    state.apps = platform_ops().list_apps().unwrap_or_default();
+    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes).unwrap_or_default();
+    state.scopes = settings.applications.search_scopes;
+    state.scanned_at = Some(Instant::now());
+    state.scanning = false;
+}
+
+pub fn reload_corpus() {
+    let mut state = corpus().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let settings = corvo_config::Settings::load();
+    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes).unwrap_or_default();
+    state.scopes = settings.applications.search_scopes;
+    state.scanned_at = Some(Instant::now());
     state.scanning = false;
 }
 
@@ -236,6 +290,7 @@ fn rank<'a>(
     apps: &'a [AppEntry],
     query: &str,
     frequencies: &HashMap<String, (u64, u64)>,
+    app_configs: &HashMap<String, corvo_config::AppConfig>,
 ) -> Vec<&'a AppEntry> {
     if query.is_empty() {
         let mut ranked: Vec<(&AppEntry, (u64, u64))> = apps
@@ -253,14 +308,58 @@ fn rank<'a>(
         return ranked.into_iter().map(|(entry, _)| entry).collect();
     }
 
-    let names: Vec<&str> = apps.iter().map(|entry| entry.name.as_str()).collect();
+    let query_lower = query.to_lowercase();
+    let mut alias_matches: Vec<&'a AppEntry> = Vec::new();
+    let mut other_apps: Vec<&'a AppEntry> = Vec::new();
+
+    for entry in apps {
+        let has_alias = app_configs
+            .get(&entry.name)
+            .or_else(|| app_configs.get(&entry.path.display().to_string()))
+            .and_then(|cfg| cfg.alias.as_deref())
+            .map_or(false, |a| a.to_lowercase() == query_lower);
+
+        if has_alias {
+            alias_matches.push(entry);
+        } else {
+            other_apps.push(entry);
+        }
+    }
+
+    let names: Vec<&str> = other_apps.iter().map(|entry| entry.name.as_str()).collect();
     let mut matcher = frizbee::Matcher::new(query, &frizbee::Config::default());
     let mut matches: Vec<frizbee::Match> = matcher.match_list(&names).to_vec();
     matches.sort();
-    matches
+
+    let mut result = alias_matches;
+    let mut word_matches: Vec<(usize, f32)> = other_apps
         .iter()
-        .filter_map(|matched| apps.get(matched.index as usize))
-        .collect()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let alias = app_configs
+                .get(&entry.name)
+                .or_else(|| app_configs.get(&entry.path.display().to_string()))
+                .and_then(|config| config.alias.as_deref())
+                .unwrap_or("");
+            search_match_score(query, &[entry.name.as_str(), alias]).map(|score| (index, score))
+        })
+        .collect();
+    word_matches.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let mut matched_indices = vec![false; other_apps.len()];
+    for (index, _) in word_matches {
+        matched_indices[index] = true;
+        result.push(other_apps[index]);
+    }
+    result.extend(matches.iter().filter_map(|matched| {
+        let index = matched.index as usize;
+        if matched_indices.get(index).copied().unwrap_or(true) {
+            None
+        } else {
+            matched_indices[index] = true;
+            other_apps.get(index).copied()
+        }
+    }));
+    result
 }
 
 #[cfg(test)]
@@ -278,7 +377,7 @@ mod tests {
         frequencies.insert("/B".to_string(), (3, 100));
         frequencies.insert("/A".to_string(), (1, 200));
 
-        let ranked = rank(&apps, "", &frequencies);
+        let ranked = rank(&apps, "", &frequencies, &HashMap::new());
         let names: Vec<&str> = ranked.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["B", "A", "C"]);
     }
@@ -287,14 +386,31 @@ mod tests {
     fn query_matches_names_fuzzily() {
         let apps = vec![app("Safari", "/Safari"), app("Notes", "/Notes")];
 
-        let ranked = rank(&apps, "safr", &HashMap::new());
+        let ranked = rank(&apps, "safr", &HashMap::new(), &HashMap::new());
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].name, "Safari");
     }
 
     #[test]
+    fn query_matches_alias_first() {
+        let apps = vec![app("Google Chrome", "/Chrome"), app("Calculator", "/Calc")];
+        let mut app_configs = HashMap::new();
+        app_configs.insert(
+            "Calculator".to_string(),
+            corvo_config::AppConfig {
+                alias: Some("c".into()),
+                hotkey: None,
+                hidden: false,
+            },
+        );
+
+        let ranked = rank(&apps, "c", &HashMap::new(), &app_configs);
+        assert_eq!(ranked[0].name, "Calculator");
+    }
+
+    #[test]
     fn query_with_no_match_is_empty() {
         let apps = vec![app("Safari", "/Safari")];
-        assert!(rank(&apps, "zzz", &HashMap::new()).is_empty());
+        assert!(rank(&apps, "zzz", &HashMap::new(), &HashMap::new()).is_empty());
     }
 }

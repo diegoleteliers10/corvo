@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Corvo
+GenericName=Application Launcher
+Comment=Lightweight native application launcher built with Rust & GPUI
+Exec=corvo %U
+Icon=corvo
+Terminal=false
+Categories=Utility;System;
+Keywords=launcher;raycast;spotlight;alfred;command;search;app;
+StartupWMClass=corvo
