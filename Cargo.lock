@@ -1122,11 +1122,11 @@ name = "corvo-clipboard-manager"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "corvo-core",
  "corvo-platform",
  "directories",
  "frizbee",
- "libc",
  "serde",
  "serde_json",
  "smol",

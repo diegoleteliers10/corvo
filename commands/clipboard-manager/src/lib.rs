@@ -4,6 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
+use chrono::{DateTime, Local};
+
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
     search_match_score, Icon, SearchContext, SearchResult,
@@ -251,51 +253,27 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
 }
 
 fn format_time_and_section(now_secs: u64, entry_secs: u64) -> (String, String) {
-    unsafe {
-        let entry_time = entry_secs as libc::time_t;
-        let mut entry_tm = std::mem::zeroed();
-        libc::localtime_r(&entry_time, &mut entry_tm);
+    let to_local = |secs: u64| {
+        i64::try_from(secs)
+            .ok()
+            .and_then(|s| DateTime::from_timestamp(s, 0))
+            .map(|dt| dt.with_timezone(&Local))
+    };
 
-        let now_time = now_secs as libc::time_t;
-        let mut now_tm = std::mem::zeroed();
-        libc::localtime_r(&now_time, &mut now_tm);
+    let (Some(now_dt), Some(entry_dt)) = (to_local(now_secs), to_local(entry_secs)) else {
+        return ("Previous at --:--:--".to_string(), "Older".to_string());
+    };
 
-        let hour_24 = entry_tm.tm_hour;
-        let is_pm = hour_24 >= 12;
-        let hour_12 = match hour_24 % 12 {
-            0 => 12,
-            h => h,
-        };
-        let am_pm = if is_pm { "PM" } else { "AM" };
-        let time_str = format!(
-            "{}:{:02}:{:02} {}",
-            hour_12, entry_tm.tm_min, entry_tm.tm_sec, am_pm
-        );
+    let time_str = entry_dt.format("%-I:%M:%S %p").to_string();
+    let day_diff = (now_dt.date_naive() - entry_dt.date_naive()).num_days();
 
-        let is_same_year = entry_tm.tm_year == now_tm.tm_year;
-        let day_diff = if is_same_year {
-            now_tm.tm_yday - entry_tm.tm_yday
-        } else if now_tm.tm_year == entry_tm.tm_year + 1 && now_tm.tm_yday == 0 {
-            let year = entry_tm.tm_year + 1900;
-            let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-            let last_yday = if is_leap { 365 } else { 364 };
-            if entry_tm.tm_yday == last_yday {
-                1
-            } else {
-                999
-            }
-        } else {
-            999
-        };
+    let (section, copied_at_str) = match day_diff {
+        d if d <= 0 => ("Today".to_string(), format!("Today at {time_str}")),
+        1 => ("Yesterday".to_string(), format!("Yesterday at {time_str}")),
+        _ => ("Older".to_string(), format!("Previous at {time_str}")),
+    };
 
-        let (section, copied_at_str) = match day_diff {
-            0 => ("Today".to_string(), format!("Today at {time_str}")),
-            1 => ("Yesterday".to_string(), format!("Yesterday at {time_str}")),
-            _ => ("Older".to_string(), format!("Previous at {time_str}")),
-        };
-
-        (copied_at_str, section)
-    }
+    (copied_at_str, section)
 }
 
 fn create_entry(text: String, source_app: String) -> ClipboardEntry {
@@ -936,10 +914,20 @@ mod tests {
         assert_eq!(section, "Today");
         assert!(copied.starts_with("Today at"));
 
+        let future = now + 10;
+        let (copied_future, section_future) = format_time_and_section(now, future);
+        assert_eq!(section_future, "Today");
+        assert!(copied_future.starts_with("Today at"));
+
         let yesterday = now - 86400;
         let (copied_yesterday, section_yesterday) = format_time_and_section(now, yesterday);
         assert_eq!(section_yesterday, "Yesterday");
         assert!(copied_yesterday.starts_with("Yesterday at"));
+
+        let older = now - 86400 * 5;
+        let (copied_older, section_older) = format_time_and_section(now, older);
+        assert_eq!(section_older, "Older");
+        assert!(copied_older.starts_with("Previous at"));
     }
 
     #[test]

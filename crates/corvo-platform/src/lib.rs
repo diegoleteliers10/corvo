@@ -100,23 +100,23 @@ pub fn run_as_agent() {
 
 /// Strips the show/hide animation from the launcher panel and gives it
 /// the popup level. No-op where the platform draws no window animation.
-pub fn make_panel_instant(width: f64, height: f64) {
+pub fn make_panel_instant(_width: f64, _height: f64) {
     #[cfg(target_os = "macos")]
-    macos::make_panel_instant(width, height);
+    macos::make_panel_instant(_width, _height);
 }
 
 /// Orders the launcher panel front and makes it key, synchronously.
 /// No-op outside macOS.
-pub fn order_panel_front(width: f64, height: f64) {
+pub fn order_panel_front(_width: f64, _height: f64) {
     #[cfg(target_os = "macos")]
-    macos::order_panel_front(width, height);
+    macos::order_panel_front(_width, _height);
 }
 
 /// Orders a window matching dimensions front and makes it key, synchronously.
 /// No-op outside macOS.
-pub fn order_window_front(width: f64, height: f64) {
+pub fn order_window_front(_width: f64, _height: f64) {
     #[cfg(target_os = "macos")]
-    macos::order_window_front(width, height);
+    macos::order_window_front(_width, _height);
 }
 
 /// The pid of the frontmost app, unless it is this process. No-op
@@ -161,9 +161,9 @@ pub fn clipboard_is_concealed() -> bool {
 }
 
 /// Hands activation to another app by pid. No-op outside macOS.
-pub fn activate_app(pid: i32) {
+pub fn activate_app(_pid: i32) {
     #[cfg(target_os = "macos")]
-    macos::activate_app(pid);
+    macos::activate_app(_pid);
 }
 
 /// Reads image bytes (PNG) from the system clipboard.
@@ -175,31 +175,31 @@ pub fn read_clipboard_image() -> Option<Vec<u8>> {
 }
 
 /// Writes PNG image bytes to the system clipboard.
-pub fn copy_image_to_pasteboard(png_bytes: &[u8]) {
+pub fn copy_image_to_pasteboard(_png_bytes: &[u8]) {
     #[cfg(target_os = "macos")]
-    macos::copy_image_to_pasteboard(png_bytes);
+    macos::copy_image_to_pasteboard(_png_bytes);
 }
 
 /// Parses width and height from PNG bytes.
-pub fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+pub fn parse_png_dimensions(_bytes: &[u8]) -> Option<(u32, u32)> {
     #[cfg(target_os = "macos")]
-    return macos::parse_png_dimensions(bytes);
+    return macos::parse_png_dimensions(_bytes);
     #[cfg(not(target_os = "macos"))]
     return None;
 }
 
 /// Automatically copies image, reactivates previous app, and synthesizes Cmd+V.
-pub async fn auto_paste_image(target_pid: i32, png_bytes: &[u8]) -> PlatformResult<()> {
+pub async fn auto_paste_image(_target_pid: i32, _png_bytes: &[u8]) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
-    return macos::auto_paste_image(target_pid, png_bytes).await;
+    return macos::auto_paste_image(_target_pid, _png_bytes).await;
     #[cfg(not(target_os = "macos"))]
     return Err(PlatformError::Unsupported("auto_paste_image".into()));
 }
 
 /// Automatically copies text, reactivates the previous app, and synthesizes Cmd+V.
-pub async fn auto_paste(target_pid: i32, text: &str) -> PlatformResult<()> {
+pub async fn auto_paste(_target_pid: i32, text: &str) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
-    return macos::auto_paste(target_pid, text).await;
+    return macos::auto_paste(_target_pid, text).await;
     #[cfg(not(target_os = "macos"))]
     {
         let ops = platform_ops();
@@ -208,9 +208,9 @@ pub async fn auto_paste(target_pid: i32, text: &str) -> PlatformResult<()> {
 }
 
 /// Queries whether the process has macOS Accessibility permissions.
-pub fn is_accessibility_trusted(prompt: bool) -> bool {
+pub fn is_accessibility_trusted(_prompt: bool) -> bool {
     #[cfg(target_os = "macos")]
-    return macos::is_accessibility_trusted(prompt);
+    return macos::is_accessibility_trusted(_prompt);
     #[cfg(not(target_os = "macos"))]
     true
 }
@@ -242,25 +242,25 @@ pub fn active_display_id() -> Option<u32> {
 }
 
 /// Lists installed applications within custom search scopes.
-pub fn list_apps_in_scopes(scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
+pub fn list_apps_in_scopes(_scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
     #[cfg(target_os = "macos")]
-    return macos::list_apps_in_scopes(scopes);
+    return macos::list_apps_in_scopes(_scopes);
     #[cfg(not(target_os = "macos"))]
     platform_ops().list_apps()
 }
 
 /// Finds an app bundle and data named with its bundle identifier.
-pub fn associated_app_files(app_path: &std::path::Path) -> PlatformResult<AppFileScan> {
+pub fn associated_app_files(_app_path: &std::path::Path) -> PlatformResult<AppFileScan> {
     #[cfg(target_os = "macos")]
-    return app_uninstall::associated_app_files(app_path);
+    return app_uninstall::associated_app_files(_app_path);
     #[cfg(not(target_os = "macos"))]
     Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
 }
 
 /// Moves selected app files to the system Trash after a fresh safety check.
-pub fn move_app_files_to_trash(app_path: &std::path::Path, paths: &[PathBuf]) -> PlatformResult<()> {
+pub fn move_app_files_to_trash(_app_path: &std::path::Path, _paths: &[PathBuf]) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
-    return app_uninstall::move_app_files_to_trash(app_path, paths);
+    return app_uninstall::move_app_files_to_trash(_app_path, _paths);
     #[cfg(not(target_os = "macos"))]
     Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
 }

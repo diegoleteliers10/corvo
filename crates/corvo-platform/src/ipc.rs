@@ -1,10 +1,13 @@
 //! Single-instance IPC (SPEC §6). Unix domain socket on Linux and macOS.
 //! Named pipe on Windows, phase 4.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 const TOGGLE: &[u8] = b"toggle\n";
 
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
