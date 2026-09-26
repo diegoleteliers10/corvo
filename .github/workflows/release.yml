@@ -282,13 +282,6 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f -exec cp {} release-assets/ \;
-          cd release-assets
-          for f in *; do
-            if [ -f "$f" ]; then
-              sha256sum "$f" > "${f}.sha256"
-            fi
-          done
-          cd ..
           ls -la release-assets/
 
       - name: Create GitHub Release and Upload Assets
