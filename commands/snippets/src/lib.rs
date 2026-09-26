@@ -47,7 +47,7 @@ impl Command for SnippetsCommand {
             .iter()
             .filter_map(|s| {
                 let score = if q.is_empty() {
-                    75.0
+                    750
                 } else {
                     search_match_score(
                         &q,
@@ -65,7 +65,7 @@ impl Command for SnippetsCommand {
                 accessory: s.keyword.clone(),
             })
             .collect();
-        results.sort_by(|left, right| right.score.total_cmp(&left.score));
+        results.sort_by(|left, right| right.score.cmp(&left.score));
         results.truncate(ctx.max_results);
         results
     }

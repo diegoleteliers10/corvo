@@ -8,3 +8,4 @@ publish = false
 async-trait = { workspace = true }
 inventory = "0.3"
 phosphor-svgs = { workspace = true }
+unicode-normalization = "0.1"

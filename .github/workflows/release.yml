@@ -161,6 +161,10 @@ jobs:
               <true/>
               <key>NSHighResolutionCapable</key>
               <true/>
+              <key>NSCalendarsFullAccessUsageDescription</key>
+              <string>Corvo reads your calendar to show upcoming meetings and quick join links.</string>
+              <key>NSCalendarsUsageDescription</key>
+              <string>Corvo reads your calendar to show upcoming meetings and quick join links.</string>
           </dict>
           </plist>
           EOF
@@ -169,6 +173,7 @@ jobs:
 
           cd dist
           tar -czf ../${{ matrix.artifact_name }} Corvo.app
+          ditto -c -k --keepParent Corvo.app ../corvo-${{ matrix.target }}.zip
           cd ..
 
       # DMG installer (with Applications symlink)
@@ -228,6 +233,14 @@ jobs:
           path: ${{ matrix.dmg_name }}
           retention-days: 1
 
+      - name: Upload macOS Zip Bundle
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-zip
+          path: corvo-${{ matrix.target }}.zip
+          retention-days: 1
+
       - name: Upload MSI Artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
@@ -269,6 +282,13 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f -exec cp {} release-assets/ \;
+          cd release-assets
+          for f in *; do
+            if [ -f "$f" ]; then
+              sha256sum "$f" > "${f}.sha256"
+            fi
+          done
+          cd ..
           ls -la release-assets/
 
       - name: Create GitHub Release and Upload Assets

@@ -26,6 +26,12 @@ pub(super) fn associated_app_files(app_path: &Path) -> PlatformResult<AppFileSca
         return Err(PlatformError::Os("app bundle id is invalid".into()));
     }
 
+    let app_name = app_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_string();
+
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| PlatformError::Os("home folder was not found".into()))?;
@@ -35,6 +41,7 @@ pub(super) fn associated_app_files(app_path: &Path) -> PlatformResult<AppFileSca
         location: display_location(app_path.parent().unwrap_or(&app_path), &home),
         path: app_path.clone(),
         is_application: true,
+        matched_by_name: false,
     }];
     let mut seen = HashSet::from([app_path]);
     let mut reached_scan_limit = false;
@@ -82,7 +89,12 @@ pub(super) fn associated_app_files(app_path: &Path) -> PlatformResult<AppFileSca
                 let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                     continue;
                 };
-                if matches_app_data(file_name, &bundle_id) {
+                let is_bundle_match = matches_app_data(file_name, &bundle_id);
+                let is_name_match = !is_bundle_match
+                    && !app_name.is_empty()
+                    && matches_app_name(file_name, &app_name);
+
+                if is_bundle_match || is_name_match {
                     let Ok(path) = path.canonicalize() else {
                         continue;
                     };
@@ -92,6 +104,7 @@ pub(super) fn associated_app_files(app_path: &Path) -> PlatformResult<AppFileSca
                             location: display_location(path.parent().unwrap_or(&root), &home),
                             path,
                             is_application: false,
+                            matched_by_name: is_name_match,
                         });
                     }
                 } else if metadata.is_dir() && depth < 2 {
@@ -170,7 +183,7 @@ fn safe_app_path(app_path: &Path) -> PlatformResult<PathBuf> {
         .map_err(|error| PlatformError::Os(format!("could not access app: {error}")))?;
     if canonical
         .extension()
-        .map_or(true, |extension| extension != "app")
+        .is_none_or(|extension| extension != "app")
         || canonical.starts_with("/System")
         || canonical.starts_with("/Library/Apple")
     {
@@ -204,6 +217,19 @@ fn matches_app_data(name: &str, bundle_id: &str) -> bool {
         || name
             .strip_prefix("group.")
             .is_some_and(|group| group == bundle_id)
+}
+
+fn matches_app_name(name: &str, app_name: &str) -> bool {
+    let name = name.to_lowercase();
+    let app_name = app_name.to_lowercase();
+    let without_plist = name.strip_suffix(".plist").unwrap_or(&name);
+    let without_saved_state = without_plist
+        .strip_suffix(".savedstate")
+        .unwrap_or(without_plist);
+    without_plist == app_name
+        || without_saved_state == app_name
+        || name.starts_with(&format!("{}.", app_name))
+        || name.starts_with(&format!("{}-", app_name))
 }
 
 fn path_size(path: &Path) -> u64 {

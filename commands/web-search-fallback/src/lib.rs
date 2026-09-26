@@ -83,7 +83,7 @@ pub fn search_results(query: &str) -> Vec<SearchResult> {
             title: format!("Search Google for \"{q}\""),
             subtitle: Some("Google".into()),
             icon: Icon::Web,
-            score: 0.02,
+            score: 2,
             accessory: None,
         },
         SearchResult {
@@ -91,7 +91,7 @@ pub fn search_results(query: &str) -> Vec<SearchResult> {
             title: format!("Search DuckDuckGo for \"{q}\""),
             subtitle: Some("DuckDuckGo".into()),
             icon: Icon::Web,
-            score: 0.01,
+            score: 1,
             accessory: None,
         },
     ]

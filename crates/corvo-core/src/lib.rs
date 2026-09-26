@@ -12,58 +12,8 @@ use std::sync::Arc;
 /// Upper bound handed to commands so no command can flood the result list.
 pub const DEFAULT_MAX_RESULTS: usize = 20;
 
-/// Scores a query against ordered text fields. Every query word must match.
-/// Earlier fields rank above later fields, so callers can pass title first.
-pub fn search_match_score(query: &str, fields: &[&str]) -> Option<f32> {
-    let query_words: Vec<String> = search_words(query);
-    if query_words.is_empty() {
-        return None;
-    }
-
-    let field_words: Vec<Vec<String>> = fields.iter().map(|field| search_words(field)).collect();
-    let mut total = 0.0;
-
-    for query_word in &query_words {
-        let best_match = field_words
-            .iter()
-            .enumerate()
-            .flat_map(|(field_index, words)| {
-                words.iter().filter_map(move |word| {
-                    let score = if word.as_str() == query_word.as_str() {
-                        100.0
-                    } else if word.starts_with(query_word.as_str()) {
-                        88.0
-                    } else if word.contains(query_word.as_str()) {
-                        74.0
-                    } else {
-                        return None;
-                    };
-                    Some(score - (field_index as f32 * 4.0))
-                })
-            })
-            .max_by(f32::total_cmp)?;
-        total += best_match;
-    }
-
-    let phrase_bonus = field_words
-        .iter()
-        .any(|words| {
-            words
-                .windows(query_words.len())
-                .any(|window| window.iter().map(String::as_str).eq(query_words.iter().map(String::as_str)))
-        }) as u8 as f32
-        * 8.0;
-
-    Some(total / query_words.len() as f32 + phrase_bonus)
-}
-
-fn search_words(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
+pub mod search;
+pub use search::search_match_score;
 
 pub use phosphor_svgs;
 
@@ -95,7 +45,7 @@ pub struct SearchResult {
     pub title: String,
     pub subtitle: Option<String>,
     pub icon: Icon,
-    pub score: f32,
+    pub score: i32,
     /// Right-aligned hint, for example a hotkey or a unit.
     pub accessory: Option<String>,
 }
@@ -193,6 +143,25 @@ pub trait DataStore: Send + Sync {
     fn replace_interface_appearance(&self, size_option: usize, transparency_level: usize);
     fn compact_mode(&self) -> bool;
     fn replace_compact_mode(&self, enabled: bool);
+    fn update_settings(&self) -> UpdateSettings;
+    fn replace_update_settings(&self, settings: UpdateSettings);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateSettings {
+    pub check_updates: bool,
+    pub channel: String,
+    pub auto_download: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_updates: true,
+            channel: "stable".to_string(),
+            auto_download: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

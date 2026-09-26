@@ -7,7 +7,6 @@ publish = false
 [dependencies]
 async-trait = { workspace = true }
 corvo-core = { workspace = true }
-frizbee = { workspace = true }
 
 [dev-dependencies]
 smol = { workspace = true }

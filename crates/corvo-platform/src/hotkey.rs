@@ -267,19 +267,18 @@ impl HotkeyManager {
             let mut new_registered: Vec<HotKey> = Vec::new();
 
             // 2. Register main launcher toggle hotkey
-            let (launch_mod, launch_code) = parse_hotkey_string(launcher_hotkey_str)
-                .unwrap_or_else(|| {
-                    #[cfg(target_os = "macos")]
-                    return (Modifiers::SUPER, Code::Space);
-                    #[cfg(target_os = "windows")]
-                    return (Modifiers::ALT, Code::Space);
-                });
-            let launch_hk = HotKey::new(Some(launch_mod), launch_code);
-            if let Err(err) = manager.register(launch_hk) {
-                eprintln!("corvo: cannot register main launcher hotkey: {err}");
-            } else {
-                new_id_map.insert(launch_hk.id(), HotkeyIntent::ToggleLauncher);
-                new_registered.push(launch_hk);
+            if !launcher_hotkey_str.trim().is_empty() {
+                if let Some((launch_mod, launch_code)) = parse_hotkey_string(launcher_hotkey_str) {
+                    let launch_hk = HotKey::new(Some(launch_mod), launch_code);
+                    if let Err(err) = manager.register(launch_hk) {
+                        eprintln!("corvo: cannot register main launcher hotkey: {err}");
+                    } else {
+                        new_id_map.insert(launch_hk.id(), HotkeyIntent::ToggleLauncher);
+                        new_registered.push(launch_hk);
+                    }
+                } else {
+                    eprintln!("corvo: cannot parse main launcher hotkey: '{launcher_hotkey_str}'");
+                }
             }
 
             // 3. Register custom bindings

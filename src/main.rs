@@ -20,6 +20,7 @@ fn main() {
         return;
     }
 
+    corvo_platform::cleanup_old_installations();
     corvo_app_launcher::warmup();
     corvo_emoji_picker::warmup();
     let config = corvo_config::ConfigService::load();

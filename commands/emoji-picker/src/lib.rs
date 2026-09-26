@@ -1127,7 +1127,7 @@ impl Command for EmojiPickerCommand {
                 title: "Search Emoji & Symbols".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
-                score: 100.0,
+                score: 1000,
                 accessory: Some("⌃⌘Space".into()),
             }];
         }
@@ -1142,7 +1142,7 @@ impl Command for EmojiPickerCommand {
                 title: "Search Emoji & Symbols".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
-                score: score + 12.0,
+                score: score + 120,
                 accessory: Some("⌃⌘Space".into()),
             });
         }
@@ -1157,7 +1157,7 @@ impl Command for EmojiPickerCommand {
             return Err(CommandError::NotFound);
         };
         if EMOJI.iter().any(|(known, _)| *known == glyph) {
-            Ok(Action::Copy(glyph.to_owned()))
+            Ok(Action::PasteText(glyph.to_owned()))
         } else {
             Err(CommandError::NotFound)
         }
@@ -1186,7 +1186,7 @@ impl Command for EmojiPickerCommand {
             CommandAction {
                 id: "emoji-picker-action:paste".into(),
                 label: "Paste to Active App".into(),
-                action: Action::Copy(glyph.to_owned()),
+                action: Action::PasteText(glyph.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Primary,
                 hotkey: Some("↵"),
@@ -1228,7 +1228,7 @@ fn display_name(keywords: &str) -> String {
 }
 
 static ALL_EMOJIS: std::sync::OnceLock<Vec<SearchResult>> = std::sync::OnceLock::new();
-static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+static EMOJI_TEXTS: std::sync::OnceLock<Vec<corvo_core::search::SearchText>> = std::sync::OnceLock::new();
 
 pub fn warmup() {
     let _ = all_emojis();
@@ -1248,7 +1248,7 @@ pub fn all_emojis() -> Vec<SearchResult> {
                         title: display_name(keywords),
                         subtitle: Some(category.to_string()),
                         icon: Icon::Glyph(glyph),
-                        score: 50.0,
+                        score: 500,
                         accessory: Some(category.into()),
                     }
                 })
@@ -1257,29 +1257,51 @@ pub fn all_emojis() -> Vec<SearchResult> {
         .clone()
 }
 
-/// Fuzzy search across all emojis in the corpus.
+/// Fuzzy search across all emojis in the corpus using precomputed SearchText and quality/DP alignment.
 pub fn search_emojis(query: &str, max_results: usize) -> Vec<SearchResult> {
-    let q = query.trim().to_lowercase();
-    let names = NAMES.get_or_init(|| EMOJI.iter().map(|(_, keywords)| *keywords).collect());
-    let mut matcher = frizbee::Matcher::new(&q, &frizbee::Config::default());
-    let mut matches: Vec<frizbee::Match> = matcher.match_list(names).to_vec();
-    matches.sort();
-    matches
-        .iter()
-        .filter_map(|matched| {
-            let idx = matched.index as usize;
-            let &(glyph, keywords) = EMOJI.get(idx)?;
-            let category = category_for_index(idx);
-            Some((glyph, keywords, category))
-        })
+    let q = query.trim();
+    if q.is_empty() {
+        return all_emojis().into_iter().take(max_results).collect();
+    }
+
+    let q_text = corvo_core::search::SearchText::new(q);
+    let texts = EMOJI_TEXTS.get_or_init(|| {
+        EMOJI
+            .iter()
+            .map(|(_, keywords)| corvo_core::search::SearchText::new(keywords))
+            .collect()
+    });
+
+    let mut scored: Vec<(usize, i32)> = Vec::new();
+    for (idx, kw_text) in texts.iter().enumerate() {
+        let fields = [(corvo_core::search::FieldRole::Name, kw_text)];
+        if let Some(quality) = corvo_core::search::quality(&q_text, &fields) {
+            scored.push((idx, quality));
+        } else if let Some(dp) = corvo_core::search::match_launcher_dp(
+            &q_text,
+            kw_text,
+            corvo_core::search::SearchSensitivity::Medium,
+        ) {
+            scored.push((idx, 500 + dp));
+        }
+    }
+
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    scored
+        .into_iter()
         .take(max_results)
-        .map(|(glyph, keywords, category)| SearchResult {
-            id: format!("emoji-picker:{glyph}"),
-            title: display_name(keywords),
-            subtitle: Some(category.to_string()),
-            icon: Icon::Glyph(glyph),
-            score: 50.0,
-            accessory: Some(category.into()),
+        .map(|(idx, score)| {
+            let &(glyph, keywords) = &EMOJI[idx];
+            let category = category_for_index(idx);
+            SearchResult {
+                id: format!("emoji-picker:{glyph}"),
+                title: display_name(keywords),
+                subtitle: Some(category.to_string()),
+                icon: Icon::Glyph(glyph),
+                score,
+                accessory: Some(category.into()),
+            }
         })
         .collect()
 }
@@ -1312,7 +1334,7 @@ mod tests {
         let command = EmojiPickerCommand;
         let ctx = ExecutionContext::default();
         let action = smol::block_on(command.execute("emoji-picker:🚀", &ctx));
-        assert_eq!(action, Ok(Action::Copy("🚀".into())));
+        assert_eq!(action, Ok(Action::PasteText("🚀".into())));
         assert!("🚀".as_bytes() == [0xF0, 0x9F, 0x9A, 0x80]);
     }
 

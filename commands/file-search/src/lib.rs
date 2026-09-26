@@ -125,7 +125,7 @@ fn search_files(
         });
     }
 
-    results.sort_by(|left, right| right.score.total_cmp(&left.score));
+    results.sort_by(|left, right| right.score.cmp(&left.score));
     results.truncate(max_results);
     results
 }

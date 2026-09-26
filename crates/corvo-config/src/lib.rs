@@ -6,7 +6,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use corvo_core::{CommandAvailability, DataStore, FileSearchOptions, Quicklink, Snippet};
+use corvo_core::{
+    CommandAvailability, DataStore, FileSearchOptions, Quicklink, Snippet,
+    UpdateSettings as CoreUpdateSettings,
+};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +25,7 @@ pub struct ConfigService {
     escape_closes_window: RwLock<bool>,
     interface_appearance: RwLock<(usize, usize)>,
     compact_mode: RwLock<bool>,
+    updates: RwLock<CoreUpdateSettings>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,7 +58,39 @@ pub struct Settings {
     pub navigation: NavigationSettings,
     pub calendar: CalendarSettings,
     pub emojis: EmojisSettings,
+    /// 0 = Low, 1 = Medium (default), 2 = High
+    pub search_sensitivity: usize,
+    pub updates: UpdateSettings,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    pub check_updates: bool,
+    pub channel: String,
+    pub auto_download: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_updates: true,
+            channel: "stable".to_string(),
+            auto_download: false,
+        }
+    }
+}
+
+pub fn update_settings(settings: &UpdateSettings) -> CoreUpdateSettings {
+    CoreUpdateSettings {
+        check_updates: settings.check_updates,
+        channel: settings.channel.clone(),
+        auto_download: settings.auto_download,
+    }
+}
+
+pub mod ranking;
+pub use ranking::{FrecencyStore, LearnedTerm};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -158,6 +194,8 @@ impl Default for Settings {
             navigation: NavigationSettings::default(),
             calendar: CalendarSettings::default(),
             emojis: EmojisSettings::default(),
+            search_sensitivity: 1,
+            updates: UpdateSettings::default(),
         }
     }
 }
@@ -181,14 +219,14 @@ impl Settings {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
         let path = dirs.config_dir().join("settings.toml");
         let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, toml_str)
     }
 
-    pub fn result_item<'a>(&self, result_id: &'a str, title: &str) -> Option<&AppConfig> {
+    pub fn result_item(&self, result_id: &str, title: &str) -> Option<&AppConfig> {
         let (items, key) = self.result_items_and_key(result_id)?;
         items.get(key).or_else(|| items.get(title))
     }
@@ -284,7 +322,7 @@ impl Settings {
     }
 }
 
-fn result_section_and_key<'a>(result_id: &'a str) -> Option<(&'a str, &'a str)> {
+fn result_section_and_key(result_id: &str) -> Option<(&str, &str)> {
     let (section, suffix) = result_id.split_once(':')?;
     let key = if section == "app-launcher" {
         suffix.strip_prefix("recent:").unwrap_or(suffix)
@@ -589,7 +627,7 @@ impl SnippetsFile {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
         let path = dirs.config_dir().join("snippets.toml");
         let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -597,7 +635,7 @@ impl SnippetsFile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QuicklinkEntry {
     pub name: String,
     pub url: String,
@@ -607,18 +645,6 @@ pub struct QuicklinkEntry {
     pub hotkey: Option<String>,
     #[serde(default)]
     pub hidden: bool,
-}
-
-impl Default for QuicklinkEntry {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            url: String::new(),
-            alias: None,
-            hotkey: None,
-            hidden: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -665,7 +691,7 @@ impl QuicklinksFile {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
         let path = dirs.config_dir().join("quicklinks.toml");
         let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -688,6 +714,7 @@ impl ConfigService {
         let escape_closes_window = settings.escape_behavior_option == 1;
         let interface_appearance = (settings.interface_size_option, settings.transparency_level);
         let compact_mode = settings.compact_mode;
+        let updates = update_settings(&settings.updates);
         Self {
             dirs,
             settings,
@@ -700,6 +727,7 @@ impl ConfigService {
             escape_closes_window: RwLock::new(escape_closes_window),
             interface_appearance: RwLock::new(interface_appearance),
             compact_mode: RwLock::new(compact_mode),
+            updates: RwLock::new(updates),
         }
     }
 
@@ -713,6 +741,7 @@ impl ConfigService {
         self.replace_escape_behavior(settings.escape_behavior_option == 1);
         self.replace_interface_appearance(settings.interface_size_option, settings.transparency_level);
         self.replace_compact_mode(settings.compact_mode);
+        self.replace_update_settings(update_settings(&settings.updates));
         Ok(())
     }
 
@@ -942,6 +971,16 @@ impl DataStore for ConfigService {
     fn replace_compact_mode(&self, enabled: bool) {
         if let Ok(mut current) = self.compact_mode.write() {
             *current = enabled;
+        }
+    }
+
+    fn update_settings(&self) -> CoreUpdateSettings {
+        self.updates.read().map(|u| u.clone()).unwrap_or_default()
+    }
+
+    fn replace_update_settings(&self, settings: CoreUpdateSettings) {
+        if let Ok(mut current) = self.updates.write() {
+            *current = settings;
         }
     }
 }

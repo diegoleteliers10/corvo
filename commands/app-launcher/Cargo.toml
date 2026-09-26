@@ -9,5 +9,4 @@ async-trait = { workspace = true }
 corvo-config = { workspace = true }
 corvo-core = { workspace = true }
 corvo-platform = { workspace = true }
-frizbee = { workspace = true }
 smol = { workspace = true }

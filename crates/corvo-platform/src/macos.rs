@@ -2,6 +2,7 @@
 //! app-launcher inputs and the agent policy are live in phase 1.
 
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 
 use objc2::AnyThread;
 use objc2_app_kit::{
@@ -15,6 +16,10 @@ use objc2_foundation::{
 };
 
 use super::{AppEntry, PlatformError, PlatformOps, PlatformResult, WindowHandle};
+
+thread_local! {
+    static LAUNCHER_PANEL: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>> = const { RefCell::new(None) };
+}
 
 // CoreGraphics and CoreFoundation FFI
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -254,7 +259,7 @@ pub fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 {
         return None;
     }
-    if &bytes[0..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+    if bytes[0..8] != PNG_SIGNATURE || bytes[12..16] != *b"IHDR" {
         return None;
     }
 
@@ -423,7 +428,7 @@ fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
 /// Renders the bundle's icon to a cached HD 256x256 PNG.
 /// First attempts native NSWorkspace extraction (high-res, handles Assets.car & system apps).
 /// Falls back to `sips` on the bundle's `.icns` file if AppKit extraction fails.
-fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
+pub(crate) fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
     let stem = bundle_app_name(bundle)?;
     let cache_dir = std::env::temp_dir().join("corvo-icons-v3");
     let png = cache_dir.join(format!("{stem}.png"));
@@ -565,13 +570,38 @@ pub fn run_as_agent() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
+fn hide_traffic_lights(panel: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::NSWindowButton;
+    for btn in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(button) = panel.standardWindowButton(btn) {
+            button.setHidden(true);
+            button.setAlphaValue(0.0);
+            button.setFrame(objc2_foundation::NSRect {
+                origin: objc2_foundation::NSPoint { x: -1000.0, y: -1000.0 },
+                size: objc2_foundation::NSSize { width: 0.0, height: 0.0 },
+            });
+        }
+    }
+}
+
 /// Makes the launcher panel appear with no fade. GPUI marks `PopUp`
 /// panels as utility windows, which AppKit fades; this runs on the
 /// `Floating` panel instead, sets the popup level, all-spaces behavior,
 /// and turns off window animation.
 pub fn make_panel_instant(width: f64, height: f64) {
-    use objc2_app_kit::{NSColor, NSWindowCollectionBehavior};
-    let Some(panel) = find_panel(width, height) else { return };
+    use objc2_app_kit::{
+        NSColor, NSWindowCollectionBehavior, NSWindowTitleVisibility,
+    };
+    let Some(panel) = find_new_panel(width, height) else {
+        eprintln!("corvo: launcher panel not found before show");
+        return;
+    };
+    LAUNCHER_PANEL.with(|current| *current.borrow_mut() = Some(panel.clone()));
+    panel.setTitle(&objc2_foundation::NSString::from_str("corvo_launcher_panel"));
     panel.setLevel(101); // NSPopUpWindowLevel
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -580,6 +610,9 @@ pub fn make_panel_instant(width: f64, height: f64) {
     panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    panel.setTitlebarAppearsTransparent(true);
+    hide_traffic_lights(&panel);
 }
 
 /// Queries whether the process is trusted for macOS Accessibility.
@@ -603,14 +636,18 @@ pub fn is_accessibility_trusted(prompt: bool) -> bool {
     }
 }
 
-/// Queries whether the process is authorized to access macOS Calendars.
+/// Queries whether the process is authorized to access macOS Calendars with full access.
 pub fn is_calendar_access_granted() -> bool {
+    calendar_authorization_status() == 3
+}
+
+/// Returns the raw EventKit authorization status for events:
+/// 0 = NotDetermined, 1 = Restricted, 2 = Denied, 3 = FullAccess / Authorized, 4 = WriteOnly.
+pub fn calendar_authorization_status() -> isize {
     unsafe {
-        let path = std::ffi::CString::new("/System/Library/Frameworks/EventKit.framework/EventKit").ok();
-        let Some(path) = path else { return false };
-        let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
+        let handle = libc::dlopen(c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(), libc::RTLD_NOW);
         if handle.is_null() {
-            return false;
+            return 0;
         }
 
         extern "C" {
@@ -618,22 +655,112 @@ pub fn is_calendar_access_granted() -> bool {
             fn sel_registerName(name: *const libc::c_char) -> *const std::ffi::c_void;
         }
 
-        let cls_name = std::ffi::CString::new("EKEventStore").ok();
-        let sel_name = std::ffi::CString::new("authorizationStatusForEntityType:").ok();
-        let (Some(cls_name), Some(sel_name)) = (cls_name, sel_name) else { return false };
-
-        let cls = objc_getClass(cls_name.as_ptr());
-        let sel = sel_registerName(sel_name.as_ptr());
+        let cls = objc_getClass(c"EKEventStore".as_ptr());
+        let sel = sel_registerName(c"authorizationStatusForEntityType:".as_ptr());
         if cls.is_null() || sel.is_null() {
-            return false;
+            return 0;
         }
 
         type MsgSendFn = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize) -> isize;
-        let msg_send: MsgSendFn = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, b"objc_msgSend\0".as_ptr() as _));
-        let status = msg_send(cls, sel, 0); // 0 = EKEntityTypeEvent
+        let msg_send: MsgSendFn = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        msg_send(cls, sel, 0) // 0 = EKEntityTypeEvent
+    }
+}
 
-        // 3 = EKAuthorizationStatusFullAccess / Authorized, 4 = EKAuthorizationStatusWriteOnly
-        status == 3 || status == 4
+/// Requests full access to macOS Calendars using EventKit.
+/// On macOS 14+ (Sonoma, Sequoia), calls `requestFullAccessToEventsWithCompletion:`.
+/// On earlier macOS versions, calls `requestAccessToEntityType:completion:`.
+pub fn request_calendar_access() {
+    unsafe {
+        let handle = libc::dlopen(c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(), libc::RTLD_NOW);
+        if handle.is_null() {
+            return;
+        }
+
+        extern "C" {
+            fn objc_getClass(name: *const libc::c_char) -> *const std::ffi::c_void;
+            fn sel_registerName(name: *const libc::c_char) -> *const std::ffi::c_void;
+        }
+
+        let cls = objc_getClass(c"EKEventStore".as_ptr());
+        if cls.is_null() {
+            return;
+        }
+
+        let sel_alloc = sel_registerName(c"alloc".as_ptr());
+        let sel_init = sel_registerName(c"init".as_ptr());
+        let sel_responds = sel_registerName(c"respondsToSelector:".as_ptr());
+        let sel_full = sel_registerName(c"requestFullAccessToEventsWithCompletion:".as_ptr());
+        let sel_legacy = sel_registerName(c"requestAccessToEntityType:completion:".as_ptr());
+
+        type MsgSend = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *const std::ffi::c_void;
+        type MsgSendBool = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, *const std::ffi::c_void) -> bool;
+
+        let msg_send: MsgSend = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        let msg_send_bool: MsgSendBool = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+
+        let store_alloc = msg_send(cls, sel_alloc);
+        if store_alloc.is_null() {
+            return;
+        }
+        let store = msg_send(store_alloc, sel_init);
+        if store.is_null() {
+            return;
+        }
+
+        #[repr(C)]
+        struct BlockDescriptor {
+            reserved: libc::c_ulong,
+            size: libc::c_ulong,
+        }
+
+        static BLOCK_DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+            reserved: 0,
+            size: std::mem::size_of::<BlockLiteral>() as libc::c_ulong,
+        };
+
+        #[repr(C)]
+        struct BlockLiteral {
+            isa: *const std::ffi::c_void,
+            flags: libc::c_int,
+            reserved: libc::c_int,
+            invoke: unsafe extern "C" fn(*mut BlockLiteral, bool, *mut std::ffi::c_void),
+            descriptor: *const BlockDescriptor,
+        }
+
+        unsafe impl Send for BlockLiteral {}
+        unsafe impl Sync for BlockLiteral {}
+
+        unsafe extern "C" fn dummy_completion(
+            _block: *mut BlockLiteral,
+            _granted: bool,
+            _err: *mut std::ffi::c_void,
+        ) {}
+
+        extern "C" {
+            static _NSConcreteGlobalBlock: [u8; 0];
+        }
+
+        static BLOCK: std::sync::OnceLock<BlockLiteral> = std::sync::OnceLock::new();
+        let block = BLOCK.get_or_init(|| BlockLiteral {
+            isa: _NSConcreteGlobalBlock.as_ptr() as *const std::ffi::c_void,
+            flags: 1 << 29, // BLOCK_IS_GLOBAL
+            reserved: 0,
+            invoke: dummy_completion,
+            descriptor: &BLOCK_DESCRIPTOR,
+        });
+        let block_ptr: *const std::ffi::c_void = block as *const _ as *const std::ffi::c_void;
+
+        let has_full = msg_send_bool(store, sel_responds, sel_full as *const _);
+        if has_full {
+            type MsgSendFull = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, *const std::ffi::c_void);
+            let msg_send_full: MsgSendFull = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            msg_send_full(store, sel_full, block_ptr);
+        } else {
+            type MsgSendLegacy = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize, *const std::ffi::c_void);
+            let msg_send_legacy: MsgSendLegacy = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            msg_send_legacy(store, sel_legacy, 0, block_ptr);
+        }
     }
 }
 
@@ -726,27 +853,131 @@ pub async fn auto_paste_image(target_pid: i32, png_bytes: &[u8]) -> PlatformResu
 }
 
 /// Orders the launcher panel front and makes it key, synchronously.
-pub fn order_panel_front(width: f64, height: f64) {
+pub fn order_panel_front(_width: f64, _height: f64) {
     use objc2::runtime::AnyObject;
-    let Some(panel) = find_panel(width, height) else { return };
+    let Some(panel) = find_launcher_panel() else { return };
     panel.orderFront(None::<&AnyObject>);
     panel.makeKeyWindow();
 }
 
-/// Our `Floating` panel, matched by its point size.
-fn find_panel(width: f64, height: f64) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+/// Finds the launcher floating panel.
+pub fn find_launcher_panel() -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    MainThreadMarker::new()?;
+    LAUNCHER_PANEL.with(|current| current.borrow().clone())
+}
+
+pub fn forget_launcher_panel() {
+    LAUNCHER_PANEL.with(|current| *current.borrow_mut() = None);
+}
+
+/// Find the new GPUI panel before it gets its launcher title.
+fn find_new_panel(width: f64, height: f64) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
     let marker = MainThreadMarker::new()?;
-    let app = NSApplication::sharedApplication(marker);
-    let windows = app.windows();
+    let windows = NSApplication::sharedApplication(marker).windows();
     (0..windows.len())
         .map(|index| windows.objectAtIndex(index))
         .find(|window| {
-            if window.class().name().to_string_lossy() != "GPUIPanel" {
-                return false;
-            }
-            let frame = window.frame();
-            (frame.size.width - width).abs() <= 0.5 && (frame.size.height - height).abs() <= 0.5
+            let content = window.contentRectForFrameRect(window.frame()).size;
+            window.class().name().to_string_lossy() == "GPUIPanel"
+                && window.title().to_string() != "corvo_launcher_panel"
+                && (content.width - width).abs() <= 1.5
+                && (content.height - height).abs() <= 1.5
         })
+}
+
+/// Resizes the launcher panel to the target dimensions while keeping its top edge anchored.
+///
+/// All Cocoa calls are wrapped in a CATransaction with `disableActions: YES` so Core Animation
+/// never interpolates between the old and the new frame. The `display` flag is `false` so
+/// AppKit does not composite the stale Metal texture during the resize; GPUI will present its
+/// own frame once the render pass completes.
+pub fn resize_launcher_panel(target_width: f64, target_height: f64) -> bool {
+    let Some(panel) = find_launcher_panel() else {
+        return false;
+    };
+    hide_traffic_lights(&panel);
+    let current_frame = panel.frame();
+    let current_content = panel.contentRectForFrameRect(current_frame).size;
+    if (current_content.height - target_height).abs() < 1.0
+        && (current_content.width - target_width).abs() < 1.0
+    {
+        return true;
+    }
+    // Anchor top edge: top_y in Cocoa coordinates is origin.y + frame.size.height.
+    // The top edge is preserved so the search bar stays pixel-stable while the window grows downwards.
+    let top_y = current_frame.origin.y + current_frame.size.height;
+    let target_content = objc2_foundation::NSRect {
+        origin: current_frame.origin,
+        size: objc2_foundation::NSSize { width: target_width, height: target_height },
+    };
+    let target_frame_size = panel.frameRectForContentRect(target_content).size;
+    let new_origin = objc2_foundation::NSPoint {
+        x: current_frame.origin.x,
+        y: top_y - target_frame_size.height,
+    };
+    let new_frame = objc2_foundation::NSRect {
+        origin: new_origin,
+        size: target_frame_size,
+    };
+
+    // Disable implicit Core Animation animations for this resize so the compositor
+    // never stretches the previous texture while transitioning to the new size.
+    unsafe {
+        extern "C" {
+            fn objc_getClass(name: *const libc::c_char) -> *const std::ffi::c_void;
+            fn sel_registerName(name: *const libc::c_char) -> *const std::ffi::c_void;
+        }
+        type MsgSend0 = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void);
+        type MsgSendBool =
+            unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, bool);
+        let msg_send0: MsgSend0 =
+            std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        let msg_send_bool: MsgSendBool =
+            std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        let cls = objc_getClass(c"CATransaction".as_ptr());
+        let sel_begin = sel_registerName(c"begin".as_ptr());
+        let sel_disable = sel_registerName(c"setDisableActions:".as_ptr());
+        let sel_commit = sel_registerName(c"commit".as_ptr());
+        msg_send0(cls, sel_begin);
+        msg_send_bool(cls, sel_disable, true);
+        panel.setFrame_display(new_frame, false);
+        msg_send0(cls, sel_commit);
+    }
+
+    let actual_content = panel.contentRectForFrameRect(panel.frame()).size;
+    if (actual_content.height - target_height).abs() >= 1.0
+        || (actual_content.width - target_width).abs() >= 1.0
+    {
+        unsafe {
+            extern "C" {
+                fn objc_getClass(name: *const libc::c_char) -> *const std::ffi::c_void;
+                fn sel_registerName(name: *const libc::c_char) -> *const std::ffi::c_void;
+            }
+            type MsgSend0 = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void);
+            type MsgSendBool =
+                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, bool);
+            let msg_send0: MsgSend0 =
+                std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            let msg_send_bool: MsgSendBool =
+                std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            let cls = objc_getClass(c"CATransaction".as_ptr());
+            let sel_begin = sel_registerName(c"begin".as_ptr());
+            let sel_disable = sel_registerName(c"setDisableActions:".as_ptr());
+            let sel_commit = sel_registerName(c"commit".as_ptr());
+            msg_send0(cls, sel_begin);
+            msg_send_bool(cls, sel_disable, true);
+            panel.setContentSize(target_content.size);
+            panel.setFrameTopLeftPoint(objc2_foundation::NSPoint {
+                x: current_frame.origin.x,
+                y: top_y,
+            });
+            msg_send0(cls, sel_commit);
+        }
+    }
+    hide_traffic_lights(&panel);
+    let actual_content = panel.contentRectForFrameRect(panel.frame()).size;
+    (actual_content.height - target_height).abs() < 1.0
+        && (actual_content.width - target_width).abs() < 1.0
 }
 
 /// Orders an application window matching the given dimensions front, regardless of app focus.

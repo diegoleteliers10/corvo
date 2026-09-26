@@ -209,7 +209,7 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
 
             if let Some(png_bytes) = current_clipboard_image() {
                 let hash = simple_hash(&png_bytes);
-                let already_latest = history.entries.first().map_or(false, |first| {
+                let already_latest = history.entries.first().is_some_and(|first| {
                     first.image_hash == Some(hash)
                 });
                 if !already_latest {
@@ -236,7 +236,7 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                     let already_latest = history
                         .entries
                         .first()
-                        .map_or(false, |first| first.text == text && !first.is_image());
+                        .is_some_and(|first| first.text == text && !first.is_image());
                     if !already_latest {
                         let entry = create_entry(text, source);
                         history.entries.insert(0, entry);
@@ -276,6 +276,8 @@ fn format_time_and_section(now_secs: u64, entry_secs: u64) -> (String, String) {
     (copied_at_str, section)
 }
 
+static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn create_entry(text: String, source_app: String) -> ClipboardEntry {
     let char_count = text.chars().count();
     let word_count = text.split_whitespace().count();
@@ -283,7 +285,8 @@ fn create_entry(text: String, source_app: String) -> ClipboardEntry {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let timestamp_secs = now.as_secs();
-    let id = format!("{}", now.as_millis());
+    let seq = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = format!("{}_{}", now.as_millis(), seq);
     let (copied_at_str, section) = format_time_and_section(timestamp_secs, timestamp_secs);
 
     ClipboardEntry {
@@ -312,7 +315,8 @@ fn create_image_entry(png_bytes: Vec<u8>, source_app: String) -> Option<Clipboar
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let timestamp_secs = now.as_secs();
-    let id = format!("{}", now.as_millis());
+    let seq = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = format!("{}_{}", now.as_millis(), seq);
     let filename = format!("{}.png", id);
 
     let img_dir = images_dir_path();
@@ -383,7 +387,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
     // 1. Check for image content first
     if let Some(png_bytes) = current_clipboard_image() {
         let hash = simple_hash(&png_bytes);
-        let already_latest = history.entries.first().map_or(false, |first| {
+        let already_latest = history.entries.first().is_some_and(|first| {
             first.image_hash == Some(hash)
         });
         if !already_latest {
@@ -676,23 +680,32 @@ impl Command for ClipboardManagerCommand {
                             title: single_line_preview(&entry.text),
                             subtitle: Some(entry.section),
                             icon,
-                            score: 50.0,
+                            score: 50,
                             accessory: Some(accessory),
                         }
                     })
                     .collect();
             }
 
-            let texts: Vec<String> = entries.iter().map(|e| e.text.clone()).collect();
-            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let mut matcher = frizbee::Matcher::new(sub, &frizbee::Config::default());
-            let mut matches: Vec<frizbee::Match> = matcher.match_list(&text_refs).to_vec();
-            matches.sort();
-            return matches
-                .iter()
-                .filter_map(|m| entries.get(m.index as usize))
+            let q_text = corvo_core::search::SearchText::new(sub);
+            let mut scored: Vec<(&ClipboardEntry, i32)> = Vec::new();
+            for entry in &entries {
+                let t_text = corvo_core::search::SearchText::new(&entry.text);
+                let app_text = corvo_core::search::SearchText::new(&entry.source_app);
+                let fields = [
+                    (corvo_core::search::FieldRole::Name, &t_text),
+                    (corvo_core::search::FieldRole::Subtitle, &app_text),
+                ];
+                if let Some(quality) = corvo_core::search::quality(&q_text, &fields) {
+                    scored.push((entry, quality));
+                }
+            }
+            scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+
+            return scored
+                .into_iter()
                 .take(ctx.max_results)
-                .map(|entry| {
+                .map(|(entry, score)| {
                     let icon = if let Some(path) = entry.image_path() {
                         Icon::Image(path)
                     } else if is_url(&entry.text) {
@@ -718,7 +731,7 @@ impl Command for ClipboardManagerCommand {
                         title: single_line_preview(&entry.text),
                         subtitle: Some(entry.section.clone()),
                         icon,
-                        score: 50.0,
+                        score,
                         accessory: Some(accessory),
                     }
                 })
@@ -731,7 +744,7 @@ impl Command for ClipboardManagerCommand {
                 title: "Clipboard History".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Clipboard,
-                score: 99.0,
+                score: 990,
                 accessory: Some("⌥⌘C".into()),
             }];
         }
@@ -746,31 +759,23 @@ impl Command for ClipboardManagerCommand {
                 title: "Clipboard History".into(),
                 subtitle: Some("Commands".into()),
                 icon: Icon::Clipboard,
-                score: score + 12.0,
+                score,
                 accessory: Some("⌥⌘C".into()),
             });
         }
         results
     }
 
-    async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
         if result_id == "clipboard-manager:open" {
             return Ok(Action::ShowToast("Clipboard History".into()));
         }
         if let Some(id) = result_id.strip_prefix("clipboard-manager:entry:") {
             if let Some(entry) = get_entry(id) {
                 if let Some(path) = entry.image_path() {
-                    return Ok(if ctx.store.as_ref().is_some_and(|store| store.clipboard_auto_paste()) {
-                        Action::PasteImage(path)
-                    } else {
-                        Action::CopyImage(path)
-                    });
+                    return Ok(Action::PasteImage(path));
                 } else {
-                    return Ok(if ctx.store.as_ref().is_some_and(|store| store.clipboard_auto_paste()) {
-                        Action::PasteText(entry.text)
-                    } else {
-                        Action::Copy(entry.text)
-                    });
+                    return Ok(Action::PasteText(entry.text));
                 }
             }
         }
@@ -843,7 +848,7 @@ impl Command for ClipboardManagerCommand {
                 CommandAction {
                     id: "clipboard-manager-action:paste".into(),
                     label: "Paste to Active App".into(),
-                    action: Action::Copy(entry.text.clone()),
+                    action: Action::PasteText(entry.text.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                     group: ActionGroup::Primary,
                     hotkey: Some("↵"),
@@ -851,7 +856,7 @@ impl Command for ClipboardManagerCommand {
                 CommandAction {
                     id: "clipboard-manager-action:copy".into(),
                     label: "Copy to Clipboard".into(),
-                    action: Action::ShowToast(format!("copy:{}", entry.text)),
+                    action: Action::Copy(entry.text.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                     group: ActionGroup::Standard,
                     hotkey: Some("⌘↵"),
@@ -991,5 +996,29 @@ mod tests {
 
         delete_entry(&entry.id);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_text_entry_creation_and_actions() {
+        let entry = create_entry("Hello World".into(), "TextEdit".into());
+        {
+            let s = store();
+            let mut h = s.write().unwrap();
+            h.entries.insert(0, entry.clone());
+        }
+
+        let cmd = ClipboardManagerCommand;
+        let actions = cmd.actions(&format!("clipboard-manager:entry:{}", entry.id));
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0].label, "Paste to Active App");
+        assert_eq!(actions[0].action, Action::PasteText("Hello World".into()));
+        assert_eq!(actions[1].label, "Copy to Clipboard");
+        assert_eq!(actions[1].action, Action::Copy("Hello World".into()));
+
+        let ctx = ExecutionContext::default();
+        let exec_action = smol::block_on(cmd.execute(&format!("clipboard-manager:entry:{}", entry.id), &ctx));
+        assert_eq!(exec_action, Ok(Action::PasteText("Hello World".into())));
+
+        delete_entry(&entry.id);
     }
 }

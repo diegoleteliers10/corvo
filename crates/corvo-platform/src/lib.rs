@@ -9,8 +9,13 @@ use std::sync::Arc;
 pub mod hotkey;
 pub mod ipc;
 pub mod permissions;
+pub mod updates;
 pub use hotkey::HotkeyIntent;
 pub use permissions::PermissionKind;
+pub use updates::{
+    check_for_updates, cleanup_old_installations, dismiss_version, download_and_verify,
+    install_and_restart, is_version_dismissed, UpdateChannel, UpdateError, UpdateRelease,
+};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -46,6 +51,7 @@ pub struct AppFileEntry {
     pub location: String,
     pub size_bytes: u64,
     pub is_application: bool,
+    pub matched_by_name: bool,
 }
 
 /// Results from a bounded scan of common app-data locations.
@@ -110,6 +116,19 @@ pub fn make_panel_instant(_width: f64, _height: f64) {
 pub fn order_panel_front(_width: f64, _height: f64) {
     #[cfg(target_os = "macos")]
     macos::order_panel_front(_width, _height);
+}
+
+/// Resizes the launcher panel to the specified dimensions keeping the top edge anchored.
+pub fn resize_launcher_panel(_width: f64, _height: f64) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::resize_launcher_panel(_width, _height);
+    #[cfg(not(target_os = "macos"))]
+    return false;
+}
+
+pub fn forget_launcher_panel() {
+    #[cfg(target_os = "macos")]
+    macos::forget_launcher_panel();
 }
 
 /// Orders a window matching dimensions front and makes it key, synchronously.
@@ -233,6 +252,12 @@ pub fn is_calendar_access_granted() -> bool {
     true
 }
 
+/// Requests full access to macOS Calendars.
+pub fn request_calendar_access() {
+    #[cfg(target_os = "macos")]
+    macos::request_calendar_access();
+}
+
 /// Returns the display ID of the display containing the cursor, or primary display.
 pub fn active_display_id() -> Option<u32> {
     #[cfg(target_os = "macos")]
@@ -268,6 +293,14 @@ pub fn move_app_files_to_trash(_app_path: &std::path::Path, _paths: &[PathBuf]) 
 /// Whether this host can show the app uninstall action.
 pub const fn supports_app_uninstall() -> bool {
     cfg!(target_os = "macos")
+}
+
+/// Renders the app bundle's icon to a cached PNG.
+pub fn extract_app_icon(_bundle: &std::path::Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return macos::extract_app_icon(_bundle);
+    #[cfg(not(target_os = "macos"))]
+    return None;
 }
 
 /// Executes a shell command on the host platform.
@@ -367,4 +400,3 @@ pub fn update_screens_cache() {
     #[cfg(target_os = "macos")]
     macos::update_screens_cache();
 }
-

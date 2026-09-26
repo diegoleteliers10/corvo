@@ -50,7 +50,7 @@ impl Command for SystemActionsCommand {
                     .get(action.id)
                     .or_else(|| settings.system_actions.items.get(action.title));
 
-                if item_config.map_or(false, |c| c.hidden) {
+                if item_config.is_some_and(|c| c.hidden) {
                     continue;
                 }
 
@@ -61,7 +61,7 @@ impl Command for SystemActionsCommand {
                 }
                 fields.push(action.keywords);
                 let score = if q.is_empty() {
-                    Some(90.0)
+                    Some(900)
                 } else {
                     search_match_score(&q, &fields)
                 };
@@ -88,7 +88,7 @@ impl Command for SystemActionsCommand {
                     .get(setting.id)
                     .or_else(|| settings.system_settings.items.get(setting.title));
 
-                if item_config.map_or(false, |c| c.hidden) {
+                if item_config.is_some_and(|c| c.hidden) {
                     continue;
                 }
 
@@ -99,7 +99,7 @@ impl Command for SystemActionsCommand {
                 }
                 fields.push(setting.keywords);
                 let score = if q.is_empty() {
-                    Some(85.0)
+                    Some(850)
                 } else {
                     search_match_score(&q, &fields)
                 };
@@ -117,7 +117,7 @@ impl Command for SystemActionsCommand {
             }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by_key(|a| std::cmp::Reverse(a.score));
 
         if !q.is_empty() {
             results.truncate(ctx.max_results);

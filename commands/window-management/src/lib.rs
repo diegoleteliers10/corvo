@@ -180,7 +180,7 @@ impl Command for WindowManagementCommand {
         let mut results = Vec::new();
         for action in WINDOW_ACTIONS {
             let score = if q.is_empty() {
-                Some(80.0)
+                Some(800)
             } else {
                 search_match_score(&q, &[action.title, action.keywords])
             };
@@ -196,7 +196,7 @@ impl Command for WindowManagementCommand {
             }
         }
         if !q.is_empty() {
-            results.sort_by(|left, right| right.score.total_cmp(&left.score));
+            results.sort_by(|left, right| right.score.cmp(&left.score));
             results.truncate(ctx.max_results);
         }
         results

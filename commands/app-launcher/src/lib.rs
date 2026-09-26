@@ -49,7 +49,7 @@ impl Command for AppLauncherCommand {
                 let hidden = app_configs
                     .get(&app.name)
                     .or_else(|| app_configs.get(&app.path.display().to_string()))
-                    .map_or(false, |cfg| cfg.hidden);
+                    .is_some_and(|cfg| cfg.hidden);
                 !hidden
             })
             .collect();
@@ -68,7 +68,7 @@ impl Command for AppLauncherCommand {
             let recent_limit = 5.min(ranked.len());
             for (idx, entry) in ranked.iter().enumerate() {
                 let key = entry.path.display().to_string();
-                let has_freq = frequencies.get(&key).map_or(false, |f| f.0 > 0);
+                let has_freq = frequencies.get(&key).is_some_and(|f| f.0 > 0);
                 if idx < recent_limit && has_freq {
                     results.push(SearchResult {
                         id: format!("app-launcher:recent:{}", entry.path.display()),
@@ -79,7 +79,7 @@ impl Command for AppLauncherCommand {
                             .clone()
                             .map(Icon::Image)
                             .unwrap_or(Icon::App),
-                        score: 120.0,
+                        score: 1200,
                         accessory: Some("Recent".into()),
                     });
                 } else {
@@ -92,7 +92,7 @@ impl Command for AppLauncherCommand {
                             .clone()
                             .map(Icon::Image)
                             .unwrap_or(Icon::App),
-                        score: 110.0,
+                        score: 1100,
                         accessory: Some("Application".into()),
                     });
                 }
@@ -104,15 +104,19 @@ impl Command for AppLauncherCommand {
                 .take(ctx.max_results)
                 .map(|entry| {
                     let key = entry.path.display().to_string();
-                    let is_recent = frequencies.get(&key).map_or(false, |f| f.0 > 0);
+                    let is_recent = frequencies.get(&key).is_some_and(|f| f.0 > 0);
                     let alias = app_configs
                         .get(&entry.name)
                         .or_else(|| app_configs.get(&key))
                         .and_then(|config| config.alias.as_deref())
                         .unwrap_or("");
-                    let score = search_match_score(query, &[alias, entry.name.as_str()])
-                        .unwrap_or(70.0)
-                        + if is_recent { 2.0 } else { 0.0 };
+                    let score = if alias.is_empty() {
+                        search_match_score(query, &[entry.name.as_str()])
+                    } else {
+                        search_match_score(query, &[entry.name.as_str(), alias])
+                    }
+                    .unwrap_or(700)
+                        + if is_recent { 20 } else { 0 };
                     SearchResult {
                         id: format!("app-launcher:{}", entry.path.display()),
                         title: entry.name.clone(),
@@ -303,63 +307,45 @@ fn rank<'a>(
         ranked.sort_by(|a, b| {
             b.1 .0.cmp(&a.1 .0)
                 .then_with(|| b.1 .1.cmp(&a.1 .1))
-                .then_with(|| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase()))
+                .then_with(|| corvo_core::search::natural_cmp(&a.0.name, &b.0.name))
         });
         return ranked.into_iter().map(|(entry, _)| entry).collect();
     }
 
-    let query_lower = query.to_lowercase();
-    let mut alias_matches: Vec<&'a AppEntry> = Vec::new();
-    let mut other_apps: Vec<&'a AppEntry> = Vec::new();
+    let q_text = corvo_core::search::SearchText::new(query);
+    let mut scored: Vec<(&'a AppEntry, i32)> = Vec::new();
 
     for entry in apps {
-        let has_alias = app_configs
+        let alias = app_configs
             .get(&entry.name)
             .or_else(|| app_configs.get(&entry.path.display().to_string()))
             .and_then(|cfg| cfg.alias.as_deref())
-            .map_or(false, |a| a.to_lowercase() == query_lower);
+            .unwrap_or("");
 
-        if has_alias {
-            alias_matches.push(entry);
-        } else {
-            other_apps.push(entry);
+        let name_text = corvo_core::search::SearchText::new(&entry.name);
+        let alias_text = corvo_core::search::SearchText::new(alias);
+        let mut fields = vec![(corvo_core::search::FieldRole::Name, &name_text)];
+        if !alias.is_empty() {
+            fields.push((corvo_core::search::FieldRole::Alias, &alias_text));
+        }
+
+        if let Some(quality) = corvo_core::search::quality(&q_text, &fields) {
+            scored.push((entry, quality));
+        } else if let Some(dp_score) = corvo_core::search::match_launcher_dp(
+            &q_text,
+            &name_text,
+            corvo_core::search::SearchSensitivity::Medium,
+        ) {
+            scored.push((entry, 1000 + dp_score));
         }
     }
 
-    let names: Vec<&str> = other_apps.iter().map(|entry| entry.name.as_str()).collect();
-    let mut matcher = frizbee::Matcher::new(query, &frizbee::Config::default());
-    let mut matches: Vec<frizbee::Match> = matcher.match_list(&names).to_vec();
-    matches.sort();
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| corvo_core::search::natural_cmp(&a.0.name, &b.0.name))
+    });
 
-    let mut result = alias_matches;
-    let mut word_matches: Vec<(usize, f32)> = other_apps
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| {
-            let alias = app_configs
-                .get(&entry.name)
-                .or_else(|| app_configs.get(&entry.path.display().to_string()))
-                .and_then(|config| config.alias.as_deref())
-                .unwrap_or("");
-            search_match_score(query, &[entry.name.as_str(), alias]).map(|score| (index, score))
-        })
-        .collect();
-    word_matches.sort_by(|left, right| right.1.total_cmp(&left.1));
-    let mut matched_indices = vec![false; other_apps.len()];
-    for (index, _) in word_matches {
-        matched_indices[index] = true;
-        result.push(other_apps[index]);
-    }
-    result.extend(matches.iter().filter_map(|matched| {
-        let index = matched.index as usize;
-        if matched_indices.get(index).copied().unwrap_or(true) {
-            None
-        } else {
-            matched_indices[index] = true;
-            other_apps.get(index).copied()
-        }
-    }));
-    result
+    scored.into_iter().map(|(entry, _)| entry).collect()
 }
 
 #[cfg(test)]

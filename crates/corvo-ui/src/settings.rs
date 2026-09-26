@@ -21,6 +21,7 @@ const COLOR_TOGGLE_OFF: u32 = 0x32353b;
 const COLOR_CONTROL_BG: u32 = 0x222428;
 const COLOR_CONTROL_HOVER: u32 = 0x2c2f35;
 const COLOR_CONTROL_BORDER: u32 = 0x33363c;
+const COLOR_DESTRUCTIVE: u32 = 0xef4444;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -175,6 +176,18 @@ pub enum ActiveDropdown {
     CalendarUpcomingMeetings,
     CalendarJoinCard,
     CalendarBrowser,
+    UpdateChannel,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateStatusUI {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(Box<corvo_platform::UpdateRelease>),
+    Downloading { downloaded: u64, total: u64, percent: f32 },
+    ReadyToInstall(Box<corvo_platform::UpdateRelease>, std::path::PathBuf),
+    Error(String),
 }
 
 pub struct SettingsView {
@@ -217,6 +230,8 @@ pub struct SettingsView {
     save_error: Option<String>,
     content_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
+    pub update_status: UpdateStatusUI,
+    cancel_update_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn format_hotkey_keycaps(hotkey: &str) -> Vec<String> {
@@ -306,6 +321,8 @@ impl SettingsView {
             save_error: None,
             content_scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
+            update_status: UpdateStatusUI::Idle,
+            cancel_update_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -388,6 +405,8 @@ impl SettingsView {
                     self.settings.transparency_level,
                 );
                 self.store.replace_compact_mode(self.settings.compact_mode);
+                self.store
+                    .replace_update_settings(corvo_config::update_settings(&self.settings.updates));
                 corvo_platform::hotkey::notify_hotkeys_changed();
             }
             Err(error) => self.save_error = Some(format!("Could not save Settings: {error}")),
@@ -970,7 +989,17 @@ impl SettingsView {
             // Global Shortcuts
             .child(self.section_group(
                 "Global Shortcuts",
-                vec![self.shortcut_row("App Launcher", &self.settings.hotkey.to_uppercase())],
+                vec![self.hotkey_setting_row(
+                    "App Launcher",
+                    SettingsTab::General,
+                    "launcher",
+                    if self.settings.hotkey.trim().is_empty() {
+                        None
+                    } else {
+                        Some(&self.settings.hotkey)
+                    },
+                    cx,
+                )],
             ))
             // General
             .child(self.section_group(
@@ -1059,6 +1088,7 @@ impl SettingsView {
                         cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.settings.compact_mode = !this.settings.compact_mode;
                             this.save_settings_file();
+                            super::sync_launcher_preferences(cx);
                             cx.notify();
                         }),
                     ),
@@ -1352,6 +1382,10 @@ impl SettingsView {
             }
             if keystroke.key == "backspace" || keystroke.key == "delete" {
                 match tab {
+                    SettingsTab::General => {
+                        self.settings.hotkey.clear();
+                        self.save_settings_file();
+                    }
                     SettingsTab::Applications => {
                         let entry = self
                             .settings
@@ -1500,6 +1534,10 @@ impl SettingsView {
             let hotkey_str = parts.join("+");
 
             match tab {
+                SettingsTab::General => {
+                    self.settings.hotkey = hotkey_str;
+                    self.save_settings_file();
+                }
                 SettingsTab::Applications => {
                     let entry = self
                         .settings
@@ -2735,6 +2773,10 @@ impl SettingsView {
     fn clear_item_hotkey(&mut self, tab: SettingsTab, key: &str, cx: &mut Context<Self>) {
         let key_str = key.to_string();
         match tab {
+            SettingsTab::General => {
+                self.settings.hotkey.clear();
+                self.save_settings_file();
+            }
             SettingsTab::Applications => {
                 let entry = self
                     .settings
@@ -6938,6 +6980,7 @@ impl SettingsView {
                             .child("A lightweight native launcher."),
                     ),
             )
+            .child(self.render_software_update_section(cx))
             .child(
                 div()
                     .flex()
@@ -7058,6 +7101,472 @@ impl SettingsView {
             )
     }
 
+    pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_status,
+            UpdateStatusUI::Checking | UpdateStatusUI::Downloading { .. }
+        ) {
+            return;
+        }
+        self.update_status = UpdateStatusUI::Checking;
+        cx.notify();
+
+        let channel = corvo_platform::UpdateChannel::parse(&self.settings.updates.channel);
+        cx.spawn(async move |this, cx| {
+            let res = smol::unblock(move || corvo_platform::check_for_updates(channel, true)).await;
+
+            let _ = this.update(cx, |view, cx| {
+                match res {
+                    Ok(Some(release)) => {
+                        view.update_status = UpdateStatusUI::Available(Box::new(release));
+                    }
+                    Ok(None) => {
+                        view.update_status = UpdateStatusUI::UpToDate;
+                    }
+                    Err(e) => {
+                        view.update_status = UpdateStatusUI::Error(e.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn start_download(
+        &mut self,
+        release: corvo_platform::UpdateRelease,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.update_status, UpdateStatusUI::Downloading { .. }) {
+            return;
+        }
+        self.cancel_update_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let cancel_flag = self.cancel_update_flag.clone();
+        self.update_status = UpdateStatusUI::Downloading {
+            downloaded: 0,
+            total: release.asset.size,
+            percent: 0.0,
+        };
+        cx.notify();
+
+        let rel = release.clone();
+        cx.spawn(async move |this, cx| {
+            let (progress_tx, progress_rx) = smol::channel::unbounded::<(u64, u64)>();
+            let cancel_for_thread = cancel_flag.clone();
+            let rel_for_thread = rel.clone();
+            let dl_task = smol::spawn(smol::unblock(move || {
+                corvo_platform::download_and_verify(
+                    &rel_for_thread,
+                    &cancel_for_thread,
+                    Some(&move |downloaded, total| {
+                        let _ = progress_tx.try_send((downloaded, total));
+                    }),
+                )
+            }));
+
+            loop {
+                smol::future::yield_now().await;
+                if let Ok((downloaded, total)) = progress_rx.try_recv() {
+                    let percent = if total > 0 {
+                        (downloaded as f32 / total as f32) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let _ = this.update(cx, |view, cx| {
+                        if matches!(view.update_status, UpdateStatusUI::Downloading { .. }) {
+                            view.update_status = UpdateStatusUI::Downloading {
+                                downloaded,
+                                total,
+                                percent,
+                            };
+                            cx.notify();
+                        }
+                    });
+                }
+                if dl_task.is_finished() {
+                    break;
+                }
+                smol::Timer::after(std::time::Duration::from_millis(50)).await;
+            }
+
+            let res = dl_task.await;
+            let _ = this.update(cx, |view, cx| {
+                match res {
+                    Ok(path) => {
+                        view.update_status = UpdateStatusUI::ReadyToInstall(Box::new(rel), path);
+                    }
+                    Err(corvo_platform::UpdateError::Cancelled) => {
+                        view.update_status = UpdateStatusUI::Idle;
+                    }
+                    Err(e) => {
+                        view.update_status = UpdateStatusUI::Error(e.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_software_update_action_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        match &self.update_status {
+            UpdateStatusUI::Idle => Some(
+                div()
+                    .id("btn-check-updates")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_ACCENT))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _window, cx| {
+                        this.check_for_updates(cx);
+                    }))
+                    .child("Check for Updates")
+                    .into_any_element(),
+            ),
+            UpdateStatusUI::Checking => Some(
+                div()
+                    .id("btn-checking")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT_DIM))
+                    .child("Checking...")
+                    .into_any_element(),
+            ),
+            UpdateStatusUI::UpToDate => Some(
+                div()
+                    .id("btn-check-again")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _window, cx| {
+                        this.check_for_updates(cx);
+                    }))
+                    .child("Check Again")
+                    .into_any_element(),
+            ),
+            UpdateStatusUI::Available(rel) => {
+                let rel_clone = (**rel).clone();
+                Some(
+                    div()
+                        .id("btn-download-update")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(rgb(COLOR_ACCENT))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                            this.start_download(rel_clone.clone(), cx);
+                        }))
+                        .child("Download & Install")
+                        .into_any_element(),
+                )
+            }
+            UpdateStatusUI::Downloading { .. } => Some(
+                div()
+                    .id("btn-cancel-download")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _window, cx| {
+                        this.cancel_update_flag
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        this.update_status = UpdateStatusUI::Idle;
+                        cx.notify();
+                    }))
+                    .child("Cancel")
+                    .into_any_element(),
+            ),
+            UpdateStatusUI::ReadyToInstall(_rel, staged) => {
+                let staged_clone = staged.clone();
+                Some(
+                    div()
+                        .id("btn-relaunch-corvo")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(rgb(COLOR_ACCENT))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(cx.listener(move |_this: &mut Self, _: &ClickEvent, _window, _cx| {
+                            let _ = corvo_platform::install_and_restart(&staged_clone);
+                        }))
+                        .child("Relaunch Corvo")
+                        .into_any_element(),
+                )
+            }
+            UpdateStatusUI::Error(_) => Some(
+                div()
+                    .id("btn-retry-check")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _window, cx| {
+                        this.check_for_updates(cx);
+                    }))
+                    .child("Retry")
+                    .into_any_element(),
+            ),
+        }
+    }
+
+    fn render_software_update_section(&self, cx: &mut Context<Self>) -> Div {
+        let channel_str = match self.settings.updates.channel.to_lowercase().as_str() {
+            "beta" => "Beta",
+            _ => "Stable",
+        };
+
+        let (icon, title, subtitle, status_color) = match &self.update_status {
+            UpdateStatusUI::Idle => (
+                phosphor_svgs::style::regular::ARROW_CIRCLE_DOWN,
+                format!("Corvo v{}", env!("CARGO_PKG_VERSION")),
+                "Automatic updates are enabled.".to_string(),
+                rgb(COLOR_TEXT_MUTED),
+            ),
+            UpdateStatusUI::Checking => (
+                phosphor_svgs::style::regular::SPINNER,
+                "Checking for updates...".to_string(),
+                "Querying GitHub Releases feed...".to_string(),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::UpToDate => (
+                phosphor_svgs::style::regular::CHECK_CIRCLE,
+                "Corvo is up to date".to_string(),
+                format!(
+                    "Version {} ({}) is the latest available.",
+                    env!("CARGO_PKG_VERSION"),
+                    channel_str
+                ),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::Available(rel) => (
+                phosphor_svgs::style::regular::SPARKLE,
+                format!("Update available: {}", rel.tag_name),
+                format!("Release: {}", rel.title),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::Downloading {
+                downloaded,
+                total,
+                percent,
+            } => (
+                phosphor_svgs::style::regular::DOWNLOAD_SIMPLE,
+                format!("Downloading update ({:.0}%)...", percent),
+                format!(
+                    "{:.1} MB of {:.1} MB",
+                    *downloaded as f64 / 1_000_000.0,
+                    *total as f64 / 1_000_000.0
+                ),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::ReadyToInstall(rel, _) => (
+                phosphor_svgs::style::regular::CHECK_CIRCLE,
+                format!("Ready to install {}", rel.tag_name),
+                "Click Relaunch to apply the update immediately.".to_string(),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::Error(err) => (
+                phosphor_svgs::style::regular::WARNING_CIRCLE,
+                "Check failed".to_string(),
+                err.clone(),
+                rgb(COLOR_DESTRUCTIVE),
+            ),
+        };
+
+        let notes_view = if let UpdateStatusUI::Available(rel) = &self.update_status {
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(COLOR_TEXT))
+                            .child("Release Notes"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(rel.release_notes.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id("btn-skip-version")
+                                    .cursor_pointer()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(COLOR_TEXT_MUTED))
+                                    .hover(|s| s.text_color(rgb(COLOR_TEXT)))
+                                    .on_click({
+                                        let tag = rel.tag_name.clone();
+                                        cx.listener(move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                                            corvo_platform::dismiss_version(&tag);
+                                            this.update_status = UpdateStatusUI::Idle;
+                                            cx.notify();
+                                        })
+                                    })
+                                    .child("Skip this version (Later)"),
+                            ),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(COLOR_TEXT))
+                    .child("Software Update"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .rounded_xl()
+                    .bg(rgb(COLOR_CARD_BG))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(crate::icons::render_phosphor_svg(
+                                        icon,
+                                        status_color,
+                                        20.0,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_size(px(14.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(COLOR_TEXT))
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                                    .child(subtitle),
+                                            ),
+                                    ),
+                            )
+                            .children(self.render_software_update_action_button(cx)),
+                    )
+                    .children(notes_view),
+            )
+            .child(self.section_group(
+                "Update Settings",
+                vec![
+                    self.toggle_row(
+                        "toggle-check-updates",
+                        "Automatically check for updates",
+                        Some("Checks once per day in the background."),
+                        self.settings.updates.check_updates,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.settings.updates.check_updates =
+                                !this.settings.updates.check_updates;
+                            this.save_settings_file();
+                            cx.notify();
+                        }),
+                    ),
+                    self.toggle_row(
+                        "toggle-auto-download",
+                        "Automatically download updates",
+                        Some("Downloads updates in the background when available."),
+                        self.settings.updates.auto_download,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.settings.updates.auto_download =
+                                !this.settings.updates.auto_download;
+                            this.save_settings_file();
+                            cx.notify();
+                        }),
+                    ),
+                    self.interactive_dropdown_trigger(
+                        "update-channel",
+                        "Update Channel",
+                        Some("Stable releases or early Beta prereleases."),
+                        ActiveDropdown::UpdateChannel,
+                        if self.settings.updates.channel.to_lowercase() == "beta" {
+                            1
+                        } else {
+                            0
+                        },
+                        &["Stable", "Beta (Prereleases)"],
+                        cx,
+                    ),
+                ],
+            ))
+    }
+
     fn render_placeholder_pane(&self, tab: SettingsTab) -> Div {
         div()
             .flex()
@@ -7123,8 +7632,27 @@ impl SettingsView {
             )
     }
 
-    fn shortcut_row(&self, title: &str, shortcut: &str) -> Div {
-        let keycaps = format_hotkey_keycaps(shortcut);
+    fn hotkey_setting_row(
+        &self,
+        title: &str,
+        tab: SettingsTab,
+        key: &str,
+        hotkey: Option<&String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let is_recording = self
+            .recording_hotkey_item
+            .as_ref()
+            .is_some_and(|(t, k)| *t == tab && k == key);
+        let control = self.render_hotkey_control(
+            tab,
+            key,
+            hotkey,
+            is_recording,
+            &format!("general-{key}"),
+            cx,
+        );
+
         div()
             .h(px(44.0))
             .flex()
@@ -7136,35 +7664,7 @@ impl SettingsView {
                     .text_color(rgb(COLOR_TEXT))
                     .child(title.to_string()),
             )
-            .child(
-                div()
-                    .h(px(26.0))
-                    .px(px(6.0))
-                    .rounded_md()
-                    .bg(rgb(COLOR_CONTROL_BG))
-                    .border_1()
-                    .border_color(rgb(COLOR_CONTROL_BORDER))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .children(keycaps.into_iter().map(|cap| {
-                        div()
-                            .h(px(18.0))
-                            .px(px(5.0))
-                            .rounded_sm()
-                            .bg(rgb(0x32353c))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(0xd1d5db))
-                                    .child(cap),
-                            )
-                    })),
-            )
+            .child(control)
     }
 
     fn toggle_row(
@@ -7378,6 +7878,12 @@ impl SettingsView {
                 &["Default Browser", "Google Chrome", "Safari", "Arc"],
                 "calendar-browser",
             ),
+            ActiveDropdown::UpdateChannel => (
+                420.0,
+                if self.settings.updates.channel.to_lowercase() == "beta" { 1 } else { 0 },
+                &["Stable", "Beta (Prereleases)"],
+                "update-channel",
+            ),
         };
 
         let menu_items: Vec<_> = options
@@ -7434,6 +7940,12 @@ impl SettingsView {
                             }
                             ActiveDropdown::CalendarBrowser => {
                                 this.settings.calendar.open_meeting_links_in = idx;
+                            }
+                            ActiveDropdown::UpdateChannel => {
+                                this.settings.updates.channel = match idx {
+                                    1 => "beta".to_string(),
+                                    _ => "stable".to_string(),
+                                };
                             }
                         }
                         this.save_settings_file();
@@ -7518,6 +8030,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_1()
                     .p(px(2.0))
                     .rounded_lg()
@@ -7533,13 +8046,22 @@ impl SettingsView {
                                 div()
                                     .id(SharedString::from(format!("segmented-size-{idx}")))
                                     .cursor_pointer()
-                                    .px_3()
-                                    .py_1()
+                                    .w(px(36.0))
+                                    .h(px(28.0))
                                     .rounded_md()
-                                    .when(active, |el| {
-                                        el.bg(rgb(COLOR_CONTROL_HOVER))
-                                            .border_1()
-                                            .border_color(rgb(COLOR_CONTROL_BORDER))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_1()
+                                    .border_color(if active {
+                                        rgb(COLOR_CONTROL_BORDER)
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
+                                    .bg(if active {
+                                        rgb(COLOR_CONTROL_HOVER)
+                                    } else {
+                                        rgba(0x00000000)
                                     })
                                     .text_size(sz)
                                     .text_color(if active {
@@ -7552,7 +8074,14 @@ impl SettingsView {
                                     } else {
                                         FontWeight::NORMAL
                                     })
-                                    .hover(|s| s.text_color(rgb(COLOR_TEXT)))
+                                    .hover(|s| {
+                                        if !active {
+                                            s.bg(rgb(COLOR_CONTROL_BG))
+                                                .text_color(rgb(COLOR_TEXT))
+                                        } else {
+                                            s
+                                        }
+                                    })
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, _window, cx| {
                                             this.settings.interface_size_option = idx;
@@ -7560,7 +8089,13 @@ impl SettingsView {
                                             cx.notify();
                                         },
                                     ))
-                                    .child(label)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(label),
+                                    )
                             }),
                     ),
             )
@@ -7744,6 +8279,65 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
             if tab != SettingsTab::General {
                 view.navigate_to_tab(tab, cx);
             }
+            view
+        })
+    });
+
+    if let Ok(handle) = opened {
+        cx.set_global(SettingsWindow(handle));
+        let _ = handle.update(cx, |_view, window, _cx| {
+            window.activate_window();
+        });
+        corvo_platform::activate_app(std::process::id() as i32);
+        corvo_platform::order_window_front(780.0, 540.0);
+    }
+}
+
+/// Opens the Settings and Preferences window to a specific tab and checks for updates immediately.
+pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |view, window, cx| {
+                view.navigate_to_tab(tab, cx);
+                view.check_for_updates(cx);
+                window.activate_window();
+            });
+            corvo_platform::activate_app(std::process::id() as i32);
+            corvo_platform::order_window_front(780.0, 540.0);
+            return;
+        }
+    }
+
+    let display_id = corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64));
+    let window_size = size(px(780.0), px(540.0));
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            display_id,
+            window_size,
+            cx,
+        ))),
+        display_id,
+        titlebar: Some(gpui::TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(14.0), px(14.0))),
+        }),
+        kind: WindowKind::Normal,
+        is_resizable: true,
+        is_movable: true,
+        focus: true,
+        show: true,
+        ..Default::default()
+    };
+
+    let store = cx.global::<crate::StoreGlobal>().0.clone();
+    let opened = cx.open_window(options, move |_window, cx| {
+        cx.new(|cx| {
+            let mut view = SettingsView::new(cx, store);
+            if tab != SettingsTab::General {
+                view.navigate_to_tab(tab, cx);
+            }
+            view.check_for_updates(cx);
             view
         })
     });

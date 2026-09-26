@@ -49,7 +49,7 @@ impl Command for QuicklinksCommand {
                     return None;
                 }
                 let score = if q.is_empty() {
-                    70.0
+                    700
                 } else {
                     search_match_score(
                         &q,
@@ -67,7 +67,7 @@ impl Command for QuicklinksCommand {
                 accessory: link.hotkey.clone(),
             })
             .collect();
-        results.sort_by(|left, right| right.score.total_cmp(&left.score));
+        results.sort_by(|left, right| right.score.cmp(&left.score));
         results.truncate(ctx.max_results);
         results
     }
