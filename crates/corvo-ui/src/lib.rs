@@ -392,46 +392,14 @@ pub struct Launcher {
     _activation_sub: Subscription,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResultSection {
-    Calculator,
-    Recent,
-    Applications,
-    SystemSettings,
-    SystemActions,
-    WindowManagement,
-    Commands,
-}
-
-impl ResultSection {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Calculator => "CALCULATOR",
-            Self::Recent => "RECENT",
-            Self::Applications => "APPLICATIONS",
-            Self::SystemSettings => "SYSTEM SETTINGS",
-            Self::SystemActions => "SYSTEM ACTIONS",
-            Self::WindowManagement => "WINDOW MANAGEMENT",
-            Self::Commands => "COMMANDS",
-        }
-    }
-
-    fn from_result(result: &SearchResult) -> Self {
-        if result.id.starts_with("calculator:") {
-            Self::Calculator
-        } else if result.accessory.as_deref() == Some("Recent") {
-            Self::Recent
-        } else if result.id.starts_with("app-launcher:") {
-            Self::Applications
-        } else if result.accessory.as_deref() == Some("System Setting") {
-            Self::SystemSettings
-        } else if result.accessory.as_deref() == Some("System Action") {
-            Self::SystemActions
-        } else if result.id.starts_with("window-management:") {
-            Self::WindowManagement
-        } else {
-            Self::Commands
-        }
+fn is_category_subtitle(result: &SearchResult) -> bool {
+    match (result.id.as_str(), result.subtitle.as_deref()) {
+        ("clipboard-manager:open" | "emoji-picker:open", Some("Commands")) => true,
+        (id, Some("System Action")) if id.starts_with("system-actions:action:") => true,
+        (id, Some("System Settings")) if id.starts_with("system-actions:setting:") => true,
+        (id, Some("Window Management")) if id.starts_with("window-management:") => true,
+        (id, Some("Window Layout")) if id.starts_with("window-management:layout:") => true,
+        _ => false,
     }
 }
 
@@ -1828,14 +1796,11 @@ impl Launcher {
         self.root_to_flat.clear();
         self.root_to_flat.resize(self.results.len(), 0);
 
-        let mut current_sec = None;
-        for (res_idx, res) in self.results.iter().enumerate() {
-            let sec = ResultSection::from_result(res);
-            if current_sec != Some(sec) {
-                current_sec = Some(sec);
-                self.root_flat_items
-                    .push(RootFlatItem::Header(sec.title().into()));
-            }
+        if !self.results.is_empty() {
+            self.root_flat_items
+                .push(RootFlatItem::Header("Results".into()));
+        }
+        for res_idx in 0..self.results.len() {
             self.root_to_flat[res_idx] = self.root_flat_items.len();
             self.root_flat_items.push(RootFlatItem::Row(res_idx));
         }
@@ -5045,6 +5010,11 @@ impl Launcher {
             return self.calculator_card(index, result, cx);
         }
         let selected = index == self.selected;
+        let subtitle = if is_category_subtitle(result) {
+            None
+        } else {
+            result.subtitle.clone()
+        };
         div()
             .id(SharedString::from(format!("result-{index}")))
             .w_full()
@@ -5086,7 +5056,7 @@ impl Launcher {
                             })
                             .child(result.title.clone()),
                     )
-                    .when_some(result.subtitle.clone(), |row, sub| {
+                    .when_some(subtitle, |row, sub| {
                         row.child(
                             div()
                                 .text_size(px(12.0))

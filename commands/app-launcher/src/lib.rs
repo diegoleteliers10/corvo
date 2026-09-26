@@ -64,40 +64,21 @@ impl Command for AppLauncherCommand {
         let ranked = rank(&apps, query, &frequencies, app_configs);
 
         if query.is_empty() {
-            let mut results = Vec::new();
-            let recent_limit = 5.min(ranked.len());
-            for (idx, entry) in ranked.iter().enumerate() {
-                let key = entry.path.display().to_string();
-                let has_freq = frequencies.get(&key).is_some_and(|f| f.0 > 0);
-                if idx < recent_limit && has_freq {
-                    results.push(SearchResult {
-                        id: format!("app-launcher:recent:{}", entry.path.display()),
-                        title: entry.name.clone(),
-                        subtitle: None,
-                        icon: entry
-                            .icon_png
-                            .clone()
-                            .map(Icon::Image)
-                            .unwrap_or(Icon::App),
-                        score: 1200,
-                        accessory: Some("Recent".into()),
-                    });
-                } else {
-                    results.push(SearchResult {
-                        id: format!("app-launcher:{}", entry.path.display()),
-                        title: entry.name.clone(),
-                        subtitle: None,
-                        icon: entry
-                            .icon_png
-                            .clone()
-                            .map(Icon::Image)
-                            .unwrap_or(Icon::App),
-                        score: 1100,
-                        accessory: Some("Application".into()),
-                    });
-                }
-            }
-            results
+            ranked
+                .into_iter()
+                .map(|entry| SearchResult {
+                    id: format!("app-launcher:{}", entry.path.display()),
+                    title: entry.name.clone(),
+                    subtitle: None,
+                    icon: entry
+                        .icon_png
+                        .clone()
+                        .map(Icon::Image)
+                        .unwrap_or(Icon::App),
+                    score: 1100,
+                    accessory: Some("Application".into()),
+                })
+                .collect()
         } else {
             ranked
                 .into_iter()

@@ -1,6 +1,6 @@
 //! Persistent frecency store with anchor decay math and learned query terms.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -80,6 +80,7 @@ impl FrecencyStore {
                 .terms
                 .retain(|term| now.saturating_sub(term.updated_at) < LEARNED_TERM_TTL_MILLIS);
         }
+        migrate_recent_app_entries(&mut data, now);
 
         Self { data, file_path }
     }
@@ -182,6 +183,38 @@ impl FrecencyStore {
     }
 }
 
+fn migrate_recent_app_entries(data: &mut FrecencyData, now: i64) {
+    let legacy_keys: Vec<String> = data
+        .entries
+        .keys()
+        .filter(|key| key.starts_with("app-launcher:recent:"))
+        .cloned()
+        .collect();
+
+    for legacy_key in legacy_keys {
+        let Some(recent) = data.entries.remove(&legacy_key) else {
+            continue;
+        };
+        let canonical_key = legacy_key.replacen("app-launcher:recent:", "app-launcher:", 1);
+        if let Some(current) = data.entries.get_mut(&canonical_key) {
+            let score = [current.anchor, recent.anchor]
+                .into_iter()
+                .map(|anchor| (DECAY_RATE * (anchor - now) as f64).min(EXP_MAX_CEILING).exp())
+                .sum::<f64>()
+                .max(1.0);
+            current.anchor = now + (score.ln() / DECAY_RATE).round() as i64;
+            current.opened_at = current.opened_at.max(recent.opened_at);
+            current.terms.extend(recent.terms);
+            current.terms.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            let mut seen = HashSet::new();
+            current.terms.retain(|term| seen.insert(term.query.clone()));
+            current.terms.truncate(3);
+        } else {
+            data.entries.insert(canonical_key, recent);
+        }
+    }
+}
+
 pub fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -234,5 +267,56 @@ mod tests {
         assert_eq!(terms[0], "term4");
         assert_eq!(terms[1], "term3");
         assert_eq!(terms[2], "term2");
+    }
+
+    #[test]
+    fn recent_app_history_moves_to_canonical_result() {
+        let now = 1_000_000_000_000i64;
+        let mut data = FrecencyData::default();
+        data.entries.insert(
+            "app-launcher:recent:/Safari".into(),
+            FrecencyEntry {
+                anchor: now + 1000,
+                opened_at: now,
+                terms: vec![LearnedTerm { query: "browser".into(), updated_at: now }],
+            },
+        );
+
+        migrate_recent_app_entries(&mut data, now);
+
+        assert!(!data.entries.contains_key("app-launcher:recent:/Safari"));
+        let entry = data.entries.get("app-launcher:/Safari");
+        assert_eq!(entry.map(|entry| entry.anchor), Some(now + 1000));
+        assert_eq!(entry.map(|entry| entry.terms[0].query.as_str()), Some("browser"));
+    }
+
+    #[test]
+    fn recent_app_history_merges_with_existing_history() {
+        let now = 1_000_000_000_000i64;
+        let mut data = FrecencyData::default();
+        data.entries.insert(
+            "app-launcher:recent:/Safari".into(),
+            FrecencyEntry {
+                anchor: now + 1000,
+                opened_at: now - 10,
+                terms: vec![LearnedTerm { query: "browser".into(), updated_at: now - 10 }],
+            },
+        );
+        data.entries.insert(
+            "app-launcher:/Safari".into(),
+            FrecencyEntry {
+                anchor: now + 2000,
+                opened_at: now,
+                terms: vec![LearnedTerm { query: "safari".into(), updated_at: now }],
+            },
+        );
+
+        migrate_recent_app_entries(&mut data, now);
+
+        assert!(!data.entries.contains_key("app-launcher:recent:/Safari"));
+        let entry = data.entries.get("app-launcher:/Safari");
+        assert!(entry.is_some_and(|entry| entry.anchor > now + 2000));
+        assert_eq!(entry.map(|entry| entry.opened_at), Some(now));
+        assert_eq!(entry.map(|entry| entry.terms.len()), Some(2));
     }
 }
