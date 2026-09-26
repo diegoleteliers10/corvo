@@ -407,6 +407,7 @@ impl SettingsView {
                 self.store.replace_compact_mode(self.settings.compact_mode);
                 self.store
                     .replace_update_settings(corvo_config::update_settings(&self.settings.updates));
+                corvo_platform::set_window_gap(self.settings.window_management.gap_between_windows);
                 corvo_platform::hotkey::notify_hotkeys_changed();
             }
             Err(error) => self.save_error = Some(format!("Could not save Settings: {error}")),
@@ -1472,14 +1473,27 @@ impl SettingsView {
                         self.save_settings_file();
                     }
                     SettingsTab::WindowManagement => {
-                        let entry = self
-                            .settings
-                            .window_management
-                            .command_items
-                            .entry(item_key)
-                            .or_default();
-                        entry.hotkey = None;
-                        self.save_settings_file();
+                        if let Some(layout_id) = item_key.strip_prefix("layout:") {
+                            if let Some(l) = self
+                                .settings
+                                .window_management
+                                .layouts
+                                .iter_mut()
+                                .find(|l| l.id == layout_id)
+                            {
+                                l.hotkey = None;
+                                self.save_settings_file();
+                            }
+                        } else {
+                            let entry = self
+                                .settings
+                                .window_management
+                                .command_items
+                                .entry(item_key)
+                                .or_default();
+                            entry.hotkey = Some(String::new());
+                            self.save_settings_file();
+                        }
                     }
                     SettingsTab::Navigation => {
                         let entry = self
@@ -1624,14 +1638,27 @@ impl SettingsView {
                     self.save_settings_file();
                 }
                 SettingsTab::WindowManagement => {
-                    let entry = self
-                        .settings
-                        .window_management
-                        .command_items
-                        .entry(item_key)
-                        .or_default();
-                    entry.hotkey = Some(hotkey_str);
-                    self.save_settings_file();
+                    if let Some(layout_id) = item_key.strip_prefix("layout:") {
+                        if let Some(l) = self
+                            .settings
+                            .window_management
+                            .layouts
+                            .iter_mut()
+                            .find(|l| l.id == layout_id)
+                        {
+                            l.hotkey = Some(hotkey_str);
+                            self.save_settings_file();
+                        }
+                    } else {
+                        let entry = self
+                            .settings
+                            .window_management
+                            .command_items
+                            .entry(item_key)
+                            .or_default();
+                        entry.hotkey = Some(hotkey_str);
+                        self.save_settings_file();
+                    }
                 }
                 SettingsTab::Navigation => {
                     let entry = self
@@ -2863,14 +2890,27 @@ impl SettingsView {
                 self.save_settings_file();
             }
             SettingsTab::WindowManagement => {
-                let entry = self
-                    .settings
-                    .window_management
-                    .command_items
-                    .entry(key_str)
-                    .or_default();
-                entry.hotkey = None;
-                self.save_settings_file();
+                if let Some(layout_id) = key.strip_prefix("layout:") {
+                    if let Some(l) = self
+                        .settings
+                        .window_management
+                        .layouts
+                        .iter_mut()
+                        .find(|l| l.id == layout_id)
+                    {
+                        l.hotkey = None;
+                        self.save_settings_file();
+                    }
+                } else {
+                    let entry = self
+                        .settings
+                        .window_management
+                        .command_items
+                        .entry(key_str)
+                        .or_default();
+                    entry.hotkey = Some(String::new());
+                    self.save_settings_file();
+                }
             }
             SettingsTab::Navigation => {
                 let entry = self
@@ -3115,13 +3155,37 @@ impl SettingsView {
                 .get(key)
                 .map(|c| (c.hidden, c.alias.clone(), c.hotkey.clone()))
                 .unwrap_or((false, None, None)),
-            SettingsTab::WindowManagement => self
-                .settings
-                .window_management
-                .command_items
-                .get(key)
-                .map(|c| (c.hidden, c.alias.clone(), c.hotkey.clone()))
-                .unwrap_or((false, None, None)),
+            SettingsTab::WindowManagement => {
+                if let Some(layout_id) = key.strip_prefix("layout:") {
+                    self.settings
+                        .window_management
+                        .layouts
+                        .iter()
+                        .find(|l| l.id == layout_id)
+                        .map(|l| (false, None, l.hotkey.clone()))
+                        .unwrap_or((false, None, None))
+                } else {
+                    let default_hk = corvo_window_management::WINDOW_ACTIONS
+                        .iter()
+                        .find(|a| a.id == key)
+                        .and_then(|a| a.hotkey)
+                        .map(|h| h.to_string());
+
+                    self.settings
+                        .window_management
+                        .command_items
+                        .get(key)
+                        .map(|c| {
+                            let hk = match &c.hotkey {
+                                Some(h) if h.is_empty() => None,
+                                Some(h) => Some(h.clone()),
+                                None => default_hk.clone(),
+                            };
+                            (c.hidden, c.alias.clone(), hk)
+                        })
+                        .unwrap_or((false, None, default_hk))
+                }
+            }
             SettingsTab::Navigation => self
                 .settings
                 .navigation
@@ -5490,6 +5554,87 @@ impl SettingsView {
             )
     }
 
+    fn create_empty_layout(&mut self, cx: &mut Context<Self>) {
+        let next_idx = self.settings.window_management.layouts.len() + 1;
+        let id = format!(
+            "layout-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        self.settings
+            .window_management
+            .layouts
+            .push(corvo_config::WindowLayoutTemplate {
+                id,
+                name: format!("Layout {next_idx}"),
+                hotkey: None,
+                placements: Vec::new(),
+            });
+        self.save_settings_file();
+        cx.notify();
+    }
+
+    fn create_layout_from_current_windows(&mut self, cx: &mut Context<Self>) {
+        let captured = corvo_platform::capture_current_window_layout();
+        let next_idx = self.settings.window_management.layouts.len() + 1;
+        let id = format!(
+            "layout-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let placements = captured
+            .into_iter()
+            .map(|(app, pos)| corvo_config::WindowPlacement {
+                app_name: app,
+                position: pos,
+            })
+            .collect();
+        self.settings
+            .window_management
+            .layouts
+            .push(corvo_config::WindowLayoutTemplate {
+                id,
+                name: format!("Layout {next_idx}"),
+                hotkey: None,
+                placements,
+            });
+        self.save_settings_file();
+        cx.notify();
+    }
+
+    fn delete_layout(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.settings
+            .window_management
+            .layouts
+            .retain(|l| l.id != id);
+        self.save_settings_file();
+        cx.notify();
+    }
+
+    fn apply_layout(&self, id: &str) {
+        if let Some(layout) = self
+            .settings
+            .window_management
+            .layouts
+            .iter()
+            .find(|l| l.id == id)
+        {
+            let placements: Vec<(String, String)> = layout
+                .placements
+                .iter()
+                .map(|p| (p.app_name.clone(), p.position.clone()))
+                .collect();
+            smol::spawn(async move {
+                let _ = corvo_platform::apply_window_layout(&placements);
+            })
+            .detach();
+        }
+    }
+
     fn render_window_management_pane(&self, cx: &mut Context<Self>) -> Div {
         let mut pane = div()
             .relative()
@@ -5655,35 +5800,38 @@ impl SettingsView {
                             .bg(rgb(COLOR_CARD_BG))
                             .border_1()
                             .border_color(rgb(COLOR_BORDER_SUBTLE))
-                            .px_4()
-                            .py_2()
                             .flex()
                             .flex_col()
                             .child(
-                                self.toggle_row(
-                                    "toggle-show-layouts",
-                                    "Show layouts in launcher",
-                                    None,
-                                    self.settings.window_management.show_layouts_in_launcher,
-                                    cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.settings.window_management.show_layouts_in_launcher = !this.settings.window_management.show_layouts_in_launcher;
-                                        this.save_settings_file();
-                                        cx.notify();
-                                    }),
+                                div().px_4().py_1().child(
+                                    self.toggle_row(
+                                        "toggle-show-layouts",
+                                        "Show layouts in launcher",
+                                        None,
+                                        self.settings.window_management.show_layouts_in_launcher,
+                                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                            this.settings.window_management.show_layouts_in_launcher =
+                                                !this.settings.window_management.show_layouts_in_launcher;
+                                            this.save_settings_file();
+                                            cx.notify();
+                                        }),
+                                    ),
                                 ),
                             )
                             .child(div().h(px(1.0)).bg(rgb(COLOR_BORDER_SUBTLE)))
                             .child(
                                 div()
-                                    .h(px(54.0))
+                                    .h(px(46.0))
+                                    .px_4()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_size(px(12.5))
-                                            .text_color(rgb(COLOR_TEXT_DIM))
-                                            .child("Save an arrangement, then restore it with one shortcut."),
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(COLOR_TEXT))
+                                            .child("Templates"),
                                     )
                                     .child(
                                         div()
@@ -5700,10 +5848,18 @@ impl SettingsView {
                                                     .bg(rgb(COLOR_CONTROL_BG))
                                                     .border_1()
                                                     .border_color(rgb(COLOR_CONTROL_BORDER))
-                                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                                    .hover(|s| {
+                                                        s.bg(rgb(COLOR_CONTROL_HOVER))
+                                                            .border_color(rgb(0x44474e))
+                                                    })
                                                     .text_size(px(12.0))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(rgb(COLOR_TEXT))
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.create_empty_layout(cx);
+                                                        },
+                                                    ))
                                                     .child("New Layout"),
                                             )
                                             .child(
@@ -5716,17 +5872,164 @@ impl SettingsView {
                                                     .bg(rgb(COLOR_CONTROL_BG))
                                                     .border_1()
                                                     .border_color(rgb(COLOR_CONTROL_BORDER))
-                                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                                    .hover(|s| {
+                                                        s.bg(rgb(COLOR_CONTROL_HOVER))
+                                                            .border_color(rgb(0x44474e))
+                                                    })
                                                     .text_size(px(12.0))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(rgb(COLOR_TEXT))
-                                                    .child("Create Layout from Current Windows"),
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.create_layout_from_current_windows(
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child("Create from Windows"),
                                             ),
                                     ),
+                            )
+                            .children(
+                                self.settings
+                                    .window_management
+                                    .layouts
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, layout)| {
+                                        let layout_id = layout.id.clone();
+                                        let layout_name = layout.name.clone();
+                                        let placements_len = layout.placements.len();
+                                        let hotkey_item_key = format!("layout:{}", layout.id);
+                                        let is_recording_hotkey = self
+                                            .recording_hotkey_item
+                                            .as_ref()
+                                            .map_or(false, |(t, k)| {
+                                                *t == SettingsTab::WindowManagement
+                                                    && k == &hotkey_item_key
+                                            });
+
+                                        div()
+                                            .border_t_1()
+                                            .border_color(rgb(COLOR_BORDER_SUBTLE))
+                                            .h(px(46.0))
+                                            .px_4()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2p5()
+                                                    .child(crate::icons::render_phosphor_svg(
+                                                        phosphor_svgs::style::regular::SQUARES_FOUR,
+                                                        rgb(COLOR_ACCENT),
+                                                        16.0,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_size(px(13.0))
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_color(rgb(COLOR_TEXT))
+                                                                    .child(layout_name),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(px(11.0))
+                                                                    .text_color(rgb(
+                                                                        COLOR_TEXT_DIM,
+                                                                    ))
+                                                                    .child(format!(
+                                                                        "{placements_len} windows"
+                                                                    )),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "apply-layout-btn-{idx}"
+                                                            )))
+                                                            .cursor_pointer()
+                                                            .px_2()
+                                                            .py_0p5()
+                                                            .rounded_md()
+                                                            .bg(rgb(COLOR_CONTROL_BG))
+                                                            .border_1()
+                                                            .border_color(rgb(
+                                                                COLOR_CONTROL_BORDER,
+                                                            ))
+                                                            .hover(|s| {
+                                                                s.bg(rgb(COLOR_CONTROL_HOVER))
+                                                            })
+                                                            .text_size(px(11.5))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(COLOR_TEXT))
+                                                            .on_click(cx.listener({
+                                                                let id = layout_id.clone();
+                                                                move |this,
+                                                                      _: &ClickEvent,
+                                                                      _window,
+                                                                      _cx| {
+                                                                    this.apply_layout(&id);
+                                                                }
+                                                            }))
+                                                            .child("Apply"),
+                                                    )
+                                                    .child(self.render_hotkey_control(
+                                                        SettingsTab::WindowManagement,
+                                                        &hotkey_item_key,
+                                                        layout.hotkey.as_ref(),
+                                                        is_recording_hotkey,
+                                                        &format!("layout-{idx}"),
+                                                        cx,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "delete-layout-btn-{idx}"
+                                                            )))
+                                                            .cursor_pointer()
+                                                            .size(px(24.0))
+                                                            .rounded_md()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .hover(|s| s.bg(rgb(0x3a1d1d)))
+                                                            .on_click(cx.listener({
+                                                                let id = layout_id.clone();
+                                                                move |this,
+                                                                      _: &ClickEvent,
+                                                                      _window,
+                                                                      cx| {
+                                                                    this.delete_layout(&id, cx);
+                                                                }
+                                                            }))
+                                                            .child(
+                                                                crate::icons::render_phosphor_svg(
+                                                                    phosphor_svgs::style::regular::TRASH,
+                                                                    rgb(0xe06c75),
+                                                                    14.0,
+                                                                ),
+                                                            ),
+                                                    ),
+                                            )
+                                    }),
                             ),
                     ),
             )
-            // Section 4: Layout Commands
+            // Section 4: Window Actions
             .child(
                 div()
                     .flex()
@@ -5737,7 +6040,7 @@ impl SettingsView {
                             .text_size(px(14.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(COLOR_TEXT))
-                            .child("Layout Commands"),
+                            .child("Window Actions"),
                     )
                     .child(
                         div()
@@ -5745,30 +6048,26 @@ impl SettingsView {
                             .bg(rgb(COLOR_CARD_BG))
                             .border_1()
                             .border_color(rgb(COLOR_BORDER_SUBTLE))
-                            .child(self.render_item_row(
-                                SettingsTab::WindowManagement,
-                                0,
-                                "Create Window Layout",
-                                "Create Window Layout",
-                                crate::icons::render_phosphor_svg(
-                                    phosphor_svgs::style::regular::SIDEBAR_SIMPLE,
-                                    rgb(COLOR_ACCENT),
-                                    16.0,
-                                ).into_any_element(),
-                                cx,
-                            ))
-                            .child(self.render_item_row(
-                                SettingsTab::WindowManagement,
-                                1,
-                                "Create Layout from Current Windows",
-                                "Create Layout from Current Windows",
-                                crate::icons::render_phosphor_svg(
-                                    phosphor_svgs::style::regular::SQUARES_FOUR,
-                                    rgb(COLOR_TEXT_DIM),
-                                    16.0,
-                                ).into_any_element(),
-                                cx,
-                            )),
+                            .children(
+                                corvo_window_management::WINDOW_ACTIONS
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, action)| {
+                                        self.render_item_row(
+                                            SettingsTab::WindowManagement,
+                                            idx,
+                                            action.id,
+                                            action.title,
+                                            crate::icons::render_phosphor_svg(
+                                                action.icon,
+                                                rgb(COLOR_TEXT_DIM),
+                                                16.0,
+                                            )
+                                            .into_any_element(),
+                                            cx,
+                                        )
+                                    }),
+                            ),
                     ),
             );
 

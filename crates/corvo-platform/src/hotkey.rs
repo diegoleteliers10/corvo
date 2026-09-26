@@ -88,13 +88,13 @@ pub fn parse_hotkey_string(hotkey: &str) -> Option<(Modifiers, Code)> {
             // Navigation and editing
             "space" | " " => target_code = Some(Code::Space),
             "↵" | "enter" | "return" => target_code = Some(Code::Enter),
-            "⌫" | "backspace" => target_code = Some(Code::Backspace),
+            "⌫" | "backspace" | "delete" => target_code = Some(Code::Backspace),
             "⎋" | "esc" | "escape" => target_code = Some(Code::Escape),
             "⇥" | "tab" => target_code = Some(Code::Tab),
-            "←" | "left" => target_code = Some(Code::ArrowLeft),
-            "→" | "right" => target_code = Some(Code::ArrowRight),
-            "↑" | "up" => target_code = Some(Code::ArrowUp),
-            "↓" | "down" => target_code = Some(Code::ArrowDown),
+            "←" | "left" | "arrowleft" | "arrow_left" => target_code = Some(Code::ArrowLeft),
+            "→" | "right" | "arrowright" | "arrow_right" => target_code = Some(Code::ArrowRight),
+            "↑" | "up" | "arrowup" | "arrow_up" => target_code = Some(Code::ArrowUp),
+            "↓" | "down" | "arrowdown" | "arrow_down" => target_code = Some(Code::ArrowDown),
 
             // Letters
             "a" => target_code = Some(Code::KeyA),

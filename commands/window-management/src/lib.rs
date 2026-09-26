@@ -5,15 +5,15 @@ use corvo_core::{
     SearchContext, SearchResult, search_match_score,
 };
 
-struct WindowActionDef {
-    id: &'static str,
-    title: &'static str,
-    keywords: &'static str,
-    icon: &'static str,
-    hotkey: Option<&'static str>,
+pub struct WindowActionDef {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub keywords: &'static str,
+    pub icon: &'static str,
+    pub hotkey: Option<&'static str>,
 }
 
-const WINDOW_ACTIONS: &[WindowActionDef] = &[
+pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
     WindowActionDef {
         id: "left-half",
         title: "Left Half",
@@ -177,7 +177,41 @@ impl Command for WindowManagementCommand {
 
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         let q = query.trim().to_lowercase();
+        let settings = corvo_config::Settings::load();
         let mut results = Vec::new();
+
+        // 1. Window Layouts (if enabled)
+        if settings.window_management.show_layouts_in_launcher {
+            for layout in &settings.window_management.layouts {
+                let score = if q.is_empty() {
+                    Some(850)
+                } else {
+                    search_match_score(&q, &[&layout.name, "layout", "window layout"])
+                };
+                if let Some(score) = score {
+                    let subtitle = if layout.placements.is_empty() {
+                        "Window Layout".to_string()
+                    } else {
+                        layout
+                            .placements
+                            .iter()
+                            .map(|p| format!("{}: {}", p.app_name, p.position))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    results.push(SearchResult {
+                        id: format!("window-management:layout:{}", layout.id),
+                        title: format!("Apply Layout: {}", layout.name),
+                        subtitle: Some(subtitle),
+                        icon: Icon::Svg(phosphor_svgs::style::regular::SQUARES_FOUR),
+                        score,
+                        accessory: layout.hotkey.clone(),
+                    });
+                }
+            }
+        }
+
+        // 2. Standard Window Actions
         for action in WINDOW_ACTIONS {
             let score = if q.is_empty() {
                 Some(800)
@@ -185,16 +219,24 @@ impl Command for WindowManagementCommand {
                 search_match_score(&q, &[action.title, action.keywords])
             };
             if let Some(score) = score {
+                let hotkey = settings
+                    .window_management
+                    .command_items
+                    .get(action.id)
+                    .and_then(|c| c.hotkey.as_deref())
+                    .or(action.hotkey);
+
                 results.push(SearchResult {
                     id: format!("window-management:{}", action.id),
                     title: action.title.into(),
                     subtitle: Some("Window Management".into()),
                     icon: Icon::Svg(action.icon),
                     score,
-                    accessory: Some(action.hotkey.unwrap_or("Window Action").into()),
+                    accessory: Some(hotkey.unwrap_or("Window Action").into()),
                 });
             }
         }
+
         if !q.is_empty() {
             results.sort_by(|left, right| right.score.cmp(&left.score));
             results.truncate(ctx.max_results);
@@ -203,21 +245,56 @@ impl Command for WindowManagementCommand {
     }
 
     async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
-        let Some(action_id) = result_id.strip_prefix("window-management:") else {
+        let Some(suffix) = result_id.strip_prefix("window-management:") else {
             return Err(CommandError::NotFound);
         };
-        if WINDOW_ACTIONS.iter().any(|a| a.id == action_id) {
-            Ok(Action::TileWindow(action_id.to_string()))
+        if let Some(layout_id) = suffix.strip_prefix("layout:") {
+            let settings = corvo_config::Settings::load();
+            if let Some(layout) = settings
+                .window_management
+                .layouts
+                .iter()
+                .find(|l| l.id == layout_id)
+            {
+                let placements: Vec<(String, String)> = layout
+                    .placements
+                    .iter()
+                    .map(|p| (p.app_name.clone(), p.position.clone()))
+                    .collect();
+                let _ = corvo_platform::apply_window_layout(&placements);
+                return Ok(Action::CloseWindow);
+            }
+        }
+        if WINDOW_ACTIONS.iter().any(|a| a.id == suffix) {
+            Ok(Action::TileWindow(suffix.to_string()))
         } else {
             Err(CommandError::NotFound)
         }
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
-        let Some(action_id) = result_id.strip_prefix("window-management:") else {
+        let Some(suffix) = result_id.strip_prefix("window-management:") else {
             return Vec::new();
         };
-        if let Some(action) = WINDOW_ACTIONS.iter().find(|a| a.id == action_id) {
+        if let Some(layout_id) = suffix.strip_prefix("layout:") {
+            let settings = corvo_config::Settings::load();
+            if let Some(layout) = settings
+                .window_management
+                .layouts
+                .iter()
+                .find(|l| l.id == layout_id)
+            {
+                return vec![CommandAction {
+                    id: "window-management:apply-layout".into(),
+                    label: format!("Apply {}", layout.name),
+                    action: Action::TileWindow(format!("layout:{}", layout.id)),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::SQUARES_FOUR),
+                    group: ActionGroup::Primary,
+                    hotkey: Some("↵"),
+                }];
+            }
+        }
+        if let Some(action) = WINDOW_ACTIONS.iter().find(|a| a.id == suffix) {
             vec![CommandAction {
                 id: "window-management:apply".into(),
                 label: format!("Apply {}", action.title),

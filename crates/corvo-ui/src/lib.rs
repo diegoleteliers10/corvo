@@ -5385,12 +5385,12 @@ pub fn collect_hotkey_bindings(
 
     // 1. Applications
     if settings.applications.enabled {
-        for (app_path, cfg) in &settings.applications.app_configs {
+        for (app_key, cfg) in &settings.applications.app_configs {
             if let Some(ref hk) = cfg.hotkey {
                 if !hk.is_empty() {
                     bindings.push((
                         hk.clone(),
-                        corvo_platform::HotkeyIntent::LaunchApp(std::path::PathBuf::from(app_path)),
+                        corvo_platform::HotkeyIntent::LaunchApp(std::path::PathBuf::from(app_key)),
                     ));
                 }
             }
@@ -5398,13 +5398,58 @@ pub fn collect_hotkey_bindings(
     }
 
     // 2. Window Management
-    for (action_id, cfg) in &settings.window_management.command_items {
-        if let Some(ref hk) = cfg.hotkey {
-            if !hk.is_empty() {
-                bindings.push((
-                    hk.clone(),
-                    corvo_platform::HotkeyIntent::TileWindow(action_id.clone()),
-                ));
+    if settings.window_management.enabled {
+        for action in corvo_window_management::WINDOW_ACTIONS {
+            let user_cfg = settings.window_management.command_items.get(action.id);
+            let is_hidden = user_cfg.map_or(false, |c| c.hidden);
+            if is_hidden {
+                continue;
+            }
+            let hotkey = match user_cfg.and_then(|c| c.hotkey.as_ref()) {
+                Some(h) if h.is_empty() => None,
+                Some(h) => Some(h.clone()),
+                None => action.hotkey.map(|h| h.to_string()),
+            };
+
+            if let Some(hk) = hotkey {
+                if !hk.is_empty() {
+                    bindings.push((
+                        hk,
+                        corvo_platform::HotkeyIntent::TileWindow(action.id.to_string()),
+                    ));
+                }
+            }
+        }
+        for (action_id, cfg) in &settings.window_management.command_items {
+            if corvo_window_management::WINDOW_ACTIONS.iter().any(|a| a.id == action_id) {
+                continue;
+            }
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    if action_id == "Create Window Layout"
+                        || action_id == "Create Layout from Current Windows"
+                    {
+                        bindings.push((
+                            hk.clone(),
+                            corvo_platform::HotkeyIntent::Command(action_id.clone()),
+                        ));
+                    } else {
+                        bindings.push((
+                            hk.clone(),
+                            corvo_platform::HotkeyIntent::TileWindow(action_id.clone()),
+                        ));
+                    }
+                }
+            }
+        }
+        for layout in &settings.window_management.layouts {
+            if let Some(ref hk) = layout.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::TileWindow(format!("layout:{}", layout.id)),
+                    ));
+                }
             }
         }
     }
@@ -5456,6 +5501,8 @@ pub fn collect_hotkey_bindings(
                 if !hk.is_empty() {
                     if item_name == "Clipboard History" {
                         bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
+                    } else {
+                        bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
                     }
                 }
             }
@@ -5468,12 +5515,36 @@ pub fn collect_hotkey_bindings(
             if !hk.is_empty() {
                 if item_name == "Search Emoji & Symbols" {
                     bindings.push((hk.clone(), corvo_platform::HotkeyIntent::EmojiPicker));
+                } else {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
                 }
             }
         }
     }
 
-    // 8. Quicklinks
+    // 8. Snippets
+    if settings.snippets.enabled {
+        for (item_name, cfg) in &settings.snippets.command_items {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                }
+            }
+        }
+    }
+
+    // 9. File Search
+    if settings.file_search.enabled {
+        for (item_name, cfg) in &settings.file_search.command_items {
+            if let Some(ref hk) = cfg.hotkey {
+                if !hk.is_empty() {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                }
+            }
+        }
+    }
+
+    // 10. Quicklinks
     let quicklinks_file = corvo_config::QuicklinksFile::load();
     for q in &quicklinks_file.quicklinks {
         if let Some(ref hk) = q.hotkey {
@@ -5528,6 +5599,7 @@ pub fn run(
         corvo_platform::hotkey::set_reload_sender(reload_tx);
 
         let initial_settings = corvo_config::Settings::load();
+        corvo_platform::set_window_gap(initial_settings.window_management.gap_between_windows);
         reload_active_hotkeys(&initial_settings, cx);
 
         // Listen for reload notifications when user updates hotkeys in settings
@@ -5535,6 +5607,7 @@ pub fn run(
             while reload_rx.recv().await.is_ok() {
                 let _ = cx.update(|cx| {
                     let settings = corvo_config::Settings::load();
+                    corvo_platform::set_window_gap(settings.window_management.gap_between_windows);
                     reload_active_hotkeys(&settings, cx);
                 });
             }
@@ -5587,16 +5660,36 @@ pub fn run(
                         cx.update(toggle);
                     }
                     corvo_platform::HotkeyIntent::TileWindow(action_id) => {
+                        if let Some(layout_id) = action_id.strip_prefix("layout:") {
+                            let settings = corvo_config::Settings::load();
+                            if let Some(layout) = settings.window_management.layouts.iter().find(|l| l.id == layout_id) {
+                                let placements: Vec<(String, String)> = layout
+                                    .placements
+                                    .iter()
+                                    .map(|p| (p.app_name.clone(), p.position.clone()))
+                                    .collect();
+                                smol::spawn(async move {
+                                    let _ = corvo_platform::apply_window_layout(&placements);
+                                })
+                                .detach();
+                            }
+                        } else {
+                            smol::spawn(async move {
+                                if let Err(err) = corvo_platform::tile_window(None, &action_id) {
+                                    eprintln!("corvo: headless tile window error: {err}");
+                                }
+                            })
+                            .detach();
+                        }
+                    }
+                    corvo_platform::HotkeyIntent::LaunchApp(path) => {
+                        let path_str = path.to_string_lossy().to_string();
                         smol::spawn(async move {
-                            if let Err(err) = corvo_platform::tile_window(None, &action_id) {
-                                eprintln!("corvo: headless tile window error: {err}");
+                            if let Err(err) = corvo_platform::open_app(&path_str) {
+                                eprintln!("corvo: open app error: {err}");
                             }
                         })
                         .detach();
-                    }
-                    corvo_platform::HotkeyIntent::LaunchApp(path) => {
-                        let ops = corvo_platform::platform_ops();
-                        let _ = ops.open_path(&path);
                     }
                     corvo_platform::HotkeyIntent::OpenUrl(url) => {
                         let _ = corvo_platform::open_url(&url);
@@ -5623,7 +5716,7 @@ pub fn run(
                     }
                     corvo_platform::HotkeyIntent::Command(cmd_id) => {
                         cx.update(|cx| {
-                            open_launcher_with_command_or_query(&cmd_id, cx);
+                            execute_command_intent(&cmd_id, cx);
                         });
                     }
                 }
@@ -5657,6 +5750,9 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
                 }
                 Action::Open(path) => {
                     let _ = corvo_platform::platform_ops().open_path(&path);
+                }
+                Action::AdjustBrightness(delta) => {
+                    let _ = corvo_platform::adjust_brightness(delta);
                 }
                 _ => {}
             }
@@ -5693,16 +5789,110 @@ fn execute_system_setting_intent(setting_id: &str, cx: &mut App) {
     }
 }
 
-fn open_launcher_with_command_or_query(cmd_id: &str, cx: &mut App) {
+fn execute_command_intent(cmd_id: &str, cx: &mut App) {
     match cmd_id {
+        "open-settings" | "Open Settings" => {
+            open_settings(cx);
+        }
+        "quit-corvo" | "Quit Corvo" => {
+            cx.quit();
+        }
+        "check-for-updates" | "Check for Updates" => {
+            open_settings_tab_with_update_check(SettingsTab::About, cx);
+        }
+        "about-corvo" | "About Corvo" => {
+            open_settings_tab(SettingsTab::About, cx);
+        }
+        "export-backup" | "Export Backup"
+        | "import-backup" | "Import Backup"
+        | "import-from-raycast" | "Import from Raycast" => {
+            open_settings_tab(SettingsTab::Backup, cx);
+        }
+        "Create Window Layout" | "create-window-layout" => {
+            open_settings_tab(SettingsTab::WindowManagement, cx);
+        }
+        "Create Layout from Current Windows" | "create-layout-from-current-windows" => {
+            let captured = corvo_platform::capture_current_window_layout();
+            if !captured.is_empty() {
+                let mut settings = corvo_config::Settings::load();
+                let next_idx = settings.window_management.layouts.len() + 1;
+                let new_layout = corvo_config::WindowLayoutTemplate {
+                    id: format!(
+                        "layout-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                    ),
+                    name: format!("Layout {next_idx}"),
+                    hotkey: None,
+                    placements: captured
+                        .into_iter()
+                        .map(|(app, pos)| corvo_config::WindowPlacement {
+                            app_name: app,
+                            position: pos,
+                        })
+                        .collect(),
+                };
+                settings.window_management.layouts.push(new_layout);
+                let _ = settings.save();
+                reload_active_hotkeys(&settings, cx);
+            }
+        }
+        "reload-applications" | "Reload Applications" => {
+            corvo_app_launcher::warmup();
+        }
+        "toggle-system-appearance" | "Toggle System Appearance" => {
+            let _ = corvo_platform::run_shell(
+                "osascript -e 'tell application \"System Events\" to tell appearance preferences to set dark mode to not dark mode'",
+            );
+        }
+        "open-camera" | "Open Camera" => {
+            let _ = corvo_platform::open_app("Photo Booth");
+        }
         "clipboard-history" | "Clipboard History" => {
             open_launcher_with_page(LauncherPage::Clipboard, cx);
         }
         "emojis" | "Search Emoji & Symbols" => {
             open_launcher_with_page(LauncherPage::Emoji, cx);
         }
-        query => {
-            open_launcher_with_query(query, cx);
+        "Search Snippets" | "search-snippets" => {
+            open_launcher_with_query("snippet:", cx);
+        }
+        "Create Snippet" | "create-snippet" => {
+            open_settings_tab(SettingsTab::Snippets, cx);
+        }
+        "Search Files" | "search-files" => {
+            open_launcher_with_query("", cx);
+        }
+        "define-word" | "Define Word" => {
+            open_launcher_with_query("define ", cx);
+        }
+        "calculator-history" | "Calculator History" => {
+            open_launcher_with_query("calculator", cx);
+        }
+        other => {
+            if let Some(layout_id) = other.strip_prefix("apply-layout:") {
+                let settings = corvo_config::Settings::load();
+                if let Some(layout) = settings
+                    .window_management
+                    .layouts
+                    .iter()
+                    .find(|l| l.id == layout_id)
+                {
+                    let placements: Vec<(String, String)> = layout
+                        .placements
+                        .iter()
+                        .map(|p| (p.app_name.clone(), p.position.clone()))
+                        .collect();
+                    smol::spawn(async move {
+                        let _ = corvo_platform::apply_window_layout(&placements);
+                    })
+                    .detach();
+                    return;
+                }
+            }
+            open_launcher_with_query(other, cx);
         }
     }
 }

@@ -1346,50 +1346,105 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         let sw = current_screen.width;
         let sh = current_screen.height;
 
+        let gap = super::get_window_gap() as f64;
+
+        let target_rect = if gap <= 0.0 {
+            match action {
+                // Halves
+                "left-half" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh },
+                "right-half" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh },
+                "top-half" => ScreenRect { x: sx, y: sy, width: sw, height: sh / 2.0 },
+                "bottom-half" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw, height: sh / 2.0 },
+
+                // Thirds
+                "first-third" => ScreenRect { x: sx, y: sy, width: sw / 3.0, height: sh },
+                "center-third" => ScreenRect { x: sx + sw / 3.0, y: sy, width: sw / 3.0, height: sh },
+                "last-third" => ScreenRect { x: sx + 2.0 * sw / 3.0, y: sy, width: sw / 3.0, height: sh },
+                "first-two-thirds" => ScreenRect { x: sx, y: sy, width: 2.0 * sw / 3.0, height: sh },
+                "last-two-thirds" => ScreenRect { x: sx + sw / 3.0, y: sy, width: 2.0 * sw / 3.0, height: sh },
+
+                // Quarters
+                "top-left" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh / 2.0 },
+                "top-right" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh / 2.0 },
+                "bottom-left" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
+                "bottom-right" => ScreenRect { x: sx + sw / 2.0, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
+
+                // Whole Screen / Centering
+                "maximize" => ScreenRect { x: sx, y: sy, width: sw, height: sh },
+                "almost-maximize" => {
+                    let w = sw * 0.9;
+                    let h = sh * 0.9;
+                    ScreenRect {
+                        x: sx + (sw - w) / 2.0,
+                        y: sy + (sh - h) / 2.0,
+                        width: w,
+                        height: h,
+                    }
+                }
+                "center" => {
+                    let w = sw * 0.7;
+                    let h = sh * 0.8;
+                    ScreenRect {
+                        x: sx + (sw - sw * 0.7) / 2.0,
+                        y: sy + (sh - sh * 0.8) / 2.0,
+                        width: w,
+                        height: h,
+                    }
+                }
+                _ => ScreenRect { x: sx, y: sy, width: sw, height: sh },
+            }
+        } else {
+            let hw = (sw - 3.0 * gap).max(100.0) / 2.0;
+            let hh = (sh - 3.0 * gap).max(100.0) / 2.0;
+            let tw = (sw - 4.0 * gap).max(100.0) / 3.0;
+
+            match action {
+                // Halves with gap
+                "left-half" => ScreenRect { x: sx + gap, y: sy + gap, width: hw, height: sh - 2.0 * gap },
+                "right-half" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap, width: hw, height: sh - 2.0 * gap },
+                "top-half" => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: hh },
+                "bottom-half" => ScreenRect { x: sx + gap, y: sy + gap + hh + gap, width: sw - 2.0 * gap, height: hh },
+
+                // Thirds with gap
+                "first-third" => ScreenRect { x: sx + gap, y: sy + gap, width: tw, height: sh - 2.0 * gap },
+                "center-third" => ScreenRect { x: sx + gap + tw + gap, y: sy + gap, width: tw, height: sh - 2.0 * gap },
+                "last-third" => ScreenRect { x: sx + gap + 2.0 * (tw + gap), y: sy + gap, width: tw, height: sh - 2.0 * gap },
+                "first-two-thirds" => ScreenRect { x: sx + gap, y: sy + gap, width: 2.0 * tw + gap, height: sh - 2.0 * gap },
+                "last-two-thirds" => ScreenRect { x: sx + gap + tw + gap, y: sy + gap, width: 2.0 * tw + gap, height: sh - 2.0 * gap },
+
+                // Quarters with gap
+                "top-left" => ScreenRect { x: sx + gap, y: sy + gap, width: hw, height: hh },
+                "top-right" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap, width: hw, height: hh },
+                "bottom-left" => ScreenRect { x: sx + gap, y: sy + gap + hh + gap, width: hw, height: hh },
+                "bottom-right" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap + hh + gap, width: hw, height: hh },
+
+                // Whole Screen / Centering with gap
+                "maximize" => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: sh - 2.0 * gap },
+                "almost-maximize" => {
+                    let w = (sw - 2.0 * gap) * 0.9;
+                    let h = (sh - 2.0 * gap) * 0.9;
+                    ScreenRect {
+                        x: sx + gap + (sw - 2.0 * gap - w) / 2.0,
+                        y: sy + gap + (sh - 2.0 * gap - h) / 2.0,
+                        width: w,
+                        height: h,
+                    }
+                }
+                "center" => {
+                    let w = (sw - 2.0 * gap) * 0.7;
+                    let h = (sh - 2.0 * gap) * 0.8;
+                    ScreenRect {
+                        x: sx + gap + (sw - 2.0 * gap - w) / 2.0,
+                        y: sy + gap + (sh - 2.0 * gap - h) / 2.0,
+                        width: w,
+                        height: h,
+                    }
+                }
+                _ => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: sh - 2.0 * gap },
+            }
+        };
+
         let target_rect = match action {
-            // Halves
-            "left-half" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh },
-            "right-half" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh },
-            "top-half" => ScreenRect { x: sx, y: sy, width: sw, height: sh / 2.0 },
-            "bottom-half" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw, height: sh / 2.0 },
-
-            // Thirds
-            "first-third" => ScreenRect { x: sx, y: sy, width: sw / 3.0, height: sh },
-            "center-third" => ScreenRect { x: sx + sw / 3.0, y: sy, width: sw / 3.0, height: sh },
-            "last-third" => ScreenRect { x: sx + 2.0 * sw / 3.0, y: sy, width: sw / 3.0, height: sh },
-            "first-two-thirds" => ScreenRect { x: sx, y: sy, width: 2.0 * sw / 3.0, height: sh },
-            "last-two-thirds" => ScreenRect { x: sx + sw / 3.0, y: sy, width: 2.0 * sw / 3.0, height: sh },
-
-            // Quarters
-            "top-left" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh / 2.0 },
-            "top-right" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh / 2.0 },
-            "bottom-left" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
-            "bottom-right" => ScreenRect { x: sx + sw / 2.0, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
-
-            // Whole Screen / Centering
-            "maximize" => ScreenRect { x: sx, y: sy, width: sw, height: sh },
-            "almost-maximize" => {
-                let w = sw * 0.9;
-                let h = sh * 0.9;
-                ScreenRect {
-                    x: sx + (sw - w) / 2.0,
-                    y: sy + (sh - h) / 2.0,
-                    width: w,
-                    height: h,
-                }
-            }
-            "center" => {
-                let w = sw * 0.7;
-                let h = sh * 0.8;
-                ScreenRect {
-                    x: sx + (sw - sw * 0.7) / 2.0,
-                    y: sy + (sh - sh * 0.8) / 2.0,
-                    width: w,
-                    height: h,
-                }
-            }
-
-            // Multi-Display Movement
             "next-display" | "prev-display" => {
                 if screens.len() <= 1 {
                     cur_window_rect
@@ -1412,7 +1467,11 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                     }
                 }
             }
-
+            "restore" => target_rect,
+            _ if matches!(action, "left-half" | "right-half" | "top-half" | "bottom-half"
+                | "first-third" | "center-third" | "last-third" | "first-two-thirds" | "last-two-thirds"
+                | "top-left" | "top-right" | "bottom-left" | "bottom-right"
+                | "maximize" | "almost-maximize" | "center") => target_rect,
             _ => {
                 if had_enhanced {
                     AXUIElementSetAttributeValue(
@@ -1494,6 +1553,187 @@ unsafe fn apply_window_frame(window_ref: *const std::ffi::c_void, rect: ScreenRe
     if !size_val.is_null() {
         CFRelease(size_val as *const std::ffi::c_void);
     }
+}
+
+/// Opens an application by path or by name.
+pub fn open_app(name_or_path: &str) -> PlatformResult<()> {
+    let p = Path::new(name_or_path);
+    if p.is_absolute() && p.exists() {
+        let ns_path = NSString::from_str(&p.to_string_lossy());
+        let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
+        if NSWorkspace::sharedWorkspace().openURL(&url) {
+            return Ok(());
+        }
+    }
+
+    let default_scopes = vec![
+        "/Applications".to_string(),
+        "/Applications/Utilities".to_string(),
+        "/System/Applications".to_string(),
+        "/System/Applications/Utilities".to_string(),
+        "~/Applications".to_string(),
+    ];
+    if let Ok(apps) = list_apps_in_scopes(&default_scopes) {
+        let clean_name = name_or_path.strip_suffix(".app").unwrap_or(name_or_path);
+        if let Some(app) = apps.into_iter().find(|a| {
+            a.name.eq_ignore_ascii_case(clean_name)
+                || a.path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case(clean_name))
+        }) {
+            let ns_path = NSString::from_str(&app.path.to_string_lossy());
+            let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
+            if NSWorkspace::sharedWorkspace().openURL(&url) {
+                return Ok(());
+            }
+        }
+    }
+
+    let status = std::process::Command::new("open")
+        .arg("-a")
+        .arg(name_or_path)
+        .spawn();
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(PlatformError::Os(format!("failed to open application: {name_or_path}")))
+    }
+}
+
+/// Captures visible window frames and determines standard tile placements for running apps.
+pub fn capture_current_window_layout() -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let screens = get_all_screens();
+    let primary_screen = screens.first().copied().unwrap_or(ScreenRect {
+        x: 0.0,
+        y: 25.0,
+        width: 1440.0,
+        height: 875.0,
+    });
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let running = workspace.runningApplications();
+    for i in 0..running.count() {
+        let app = running.objectAtIndex(i);
+        if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            continue;
+        }
+        let pid = app.processIdentifier();
+        if pid == std::process::id() as libc::pid_t {
+            continue;
+        }
+        let app_name = app.localizedName().map(|s| s.to_string()).unwrap_or_default();
+        if app_name.is_empty() {
+            continue;
+        }
+
+        unsafe {
+            let app_ref = AXUIElementCreateApplication(pid);
+            if app_ref.is_null() {
+                continue;
+            }
+            AXUIElementSetMessagingTimeout(app_ref, 0.04);
+            let attr_window = NSString::from_str("AXFocusedWindow");
+            let mut window_ref: *const std::ffi::c_void = std::ptr::null();
+            let mut status = AXUIElementCopyAttributeValue(
+                app_ref,
+                &*attr_window as *const _ as *const std::ffi::c_void,
+                &mut window_ref,
+            );
+            if status != 0 || window_ref.is_null() {
+                let attr_main = NSString::from_str("AXMainWindow");
+                status = AXUIElementCopyAttributeValue(
+                    app_ref,
+                    &*attr_main as *const _ as *const std::ffi::c_void,
+                    &mut window_ref,
+                );
+            }
+            if !window_ref.is_null() {
+                let mut cur_pos_val: *const std::ffi::c_void = std::ptr::null();
+                let mut cur_size_val: *const std::ffi::c_void = std::ptr::null();
+                let mut cur_pos = CGPoint { x: 0.0, y: 0.0 };
+                let mut cur_size = CGSize { width: 0.0, height: 0.0 };
+
+                let attr_pos = NSString::from_str("AXPosition");
+                let attr_size = NSString::from_str("AXSize");
+                if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, &mut cur_pos_val) == 0 && !cur_pos_val.is_null() {
+                    AXValueGetValue(cur_pos_val, K_AX_VALUE_CGPOINT_TYPE, &mut cur_pos as *mut _ as *mut _);
+                    CFRelease(cur_pos_val);
+                }
+                if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut cur_size_val) == 0 && !cur_size_val.is_null() {
+                    AXValueGetValue(cur_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut cur_size as *mut _ as *mut _);
+                    CFRelease(cur_size_val);
+                }
+                CFRelease(window_ref);
+
+                if cur_size.width > 100.0 && cur_size.height > 100.0 {
+                    let sw = primary_screen.width;
+                    let sh = primary_screen.height;
+                    let sx = primary_screen.x;
+                    let sy = primary_screen.y;
+
+                    let rel_x = cur_pos.x - sx;
+                    let rel_y = cur_pos.y - sy;
+                    let w = cur_size.width;
+                    let h = cur_size.height;
+
+                    let position = if (w - sw).abs() < 120.0 && (h - sh).abs() < 120.0 {
+                        "maximize"
+                    } else if (w - sw / 2.0).abs() < 100.0 {
+                        if rel_x < sw / 4.0 {
+                            "left-half"
+                        } else {
+                            "right-half"
+                        }
+                    } else if (h - sh / 2.0).abs() < 100.0 {
+                        if rel_y < sh / 4.0 {
+                            "top-half"
+                        } else {
+                            "bottom-half"
+                        }
+                    } else if (w - sw / 3.0).abs() < 100.0 {
+                        if rel_x < sw / 3.0 {
+                            "first-third"
+                        } else if rel_x < 2.0 * sw / 3.0 {
+                            "center-third"
+                        } else {
+                            "last-third"
+                        }
+                    } else {
+                        "center"
+                    };
+
+                    results.push((app_name, position.to_string()));
+                }
+            }
+            CFRelease(app_ref as *const std::ffi::c_void);
+        }
+    }
+
+    results
+}
+
+/// Applies standard window placements for multiple applications.
+pub fn apply_window_layout(placements: &[(String, String)]) -> PlatformResult<()> {
+    for (app_name, position) in placements {
+        let _ = open_app(app_name);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let workspace = NSWorkspace::sharedWorkspace();
+        let running = workspace.runningApplications();
+        let mut target_pid = None;
+        for i in 0..running.count() {
+            let app = running.objectAtIndex(i);
+            let name = app.localizedName().map(|s| s.to_string()).unwrap_or_default();
+            if name.eq_ignore_ascii_case(app_name) {
+                target_pid = Some(app.processIdentifier() as i32);
+                break;
+            }
+        }
+
+        if let Some(pid) = target_pid {
+            let _ = tile_window(Some(pid), position);
+        }
+    }
+    Ok(())
 }
 
 fn unimplemented_os(what: &str) -> PlatformError {

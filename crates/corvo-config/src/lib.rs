@@ -466,6 +466,20 @@ impl Default for FileSearchSettings {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowPlacement {
+    pub app_name: String,
+    pub position: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowLayoutTemplate {
+    pub id: String,
+    pub name: String,
+    pub hotkey: Option<String>,
+    pub placements: Vec<WindowPlacement>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowManagementSettings {
@@ -475,6 +489,7 @@ pub struct WindowManagementSettings {
     pub gap_between_windows: usize,
     pub show_layouts_in_launcher: bool,
     pub command_items: std::collections::HashMap<String, AppConfig>,
+    pub layouts: Vec<WindowLayoutTemplate>,
 }
 
 impl Default for WindowManagementSettings {
@@ -503,6 +518,7 @@ impl Default for WindowManagementSettings {
             gap_between_windows: 0,
             show_layouts_in_launcher: true,
             command_items,
+            layouts: Vec::new(),
         }
     }
 }

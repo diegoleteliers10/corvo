@@ -384,6 +384,48 @@ pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
     }
 }
 
+static WINDOW_GAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the gap between windows in pixels.
+pub fn set_window_gap(gap: usize) {
+    WINDOW_GAP.store(gap, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Gets the current gap between windows.
+pub fn get_window_gap() -> usize {
+    WINDOW_GAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Opens an application by bundle path or name.
+pub fn open_app(name_or_path: &str) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::open_app(name_or_path);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ops = platform_ops();
+        ops.open_path(std::path::Path::new(name_or_path))
+    }
+}
+
+/// Captures the positions of currently visible application windows.
+pub fn capture_current_window_layout() -> Vec<(String, String)> {
+    #[cfg(target_os = "macos")]
+    return macos::capture_current_window_layout();
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// Applies a window layout arrangement for multiple applications.
+pub fn apply_window_layout(placements: &[(String, String)]) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::apply_window_layout(placements);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = placements;
+        Ok(())
+    }
+}
+
 /// Tiles the target application window using native OS accessibility APIs.
 pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
