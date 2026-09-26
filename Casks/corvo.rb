@@ -1,9 +1,9 @@
 cask "corvo" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.1.1"
-  sha256 arm:   "a2578efab267ee81c0bff7ec588b51959aceab8249960dc3d12304cbc8febe11",
-         intel: "8707d0cc5f9f6b5524f35d924e148f76beb51aaf0bac63a5c58371296698ae46"
+  version "0.1.2"
+  sha256 arm:   "a2b662b51516027b36a3247fdf506ebdaff9ad10ff25b1c3e55da2cba689d97c",
+         intel: "d432ebce44ac2745d18dc7f1d0d3614adcf74736e5e5aec4119c458d5b6f7416"
 
   url "https://github.com/diegoleteliers10/corvo/releases/download/v#{version}/corvo-#{arch}-apple-darwin.dmg"
   name "Corvo"
