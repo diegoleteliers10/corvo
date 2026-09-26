@@ -23,13 +23,9 @@ agent should follow when implementing pieces of this spec.
 
 ## 2. Non-goals (for now)
 
-- WASM/scripted third-party extension runtime
-- Raycast config/extension import (explicitly deferred, not MVP)
-- Auto-paste into the previously focused app (`Action::PasteToActiveApp`)
-- File-type clipboard entries (`CF_HDROP` / `file://` / `NSFilenamesPboardType`)
-- Flatpak / MSI installer / notarized macOS build — portable/AppImage/ad-hoc
-  signed builds are enough until there's a reason to distribute beyond
-  personal use and early testers
+- WASM or scripted third-party extension runtime
+- File-type clipboard entries (`CF_HDROP`, `file://`, `NSFilenamesPboardType`)
+- Flatpak distribution (portable binaries, AppImage, DEB, Homebrew, and MSI are supported)
 
 ## 3. Tech stack
 
@@ -256,32 +252,25 @@ app-launcher, file-search, clipboard-manager, calculator, snippets,
 window-management, emoji-picker, quicklinks, system-actions,
 web-search-fallback.
 
-## 11. Roadmap
+## 11. Roadmap & status
 
-| Phase | Scope | Milestone |
-|---|---|---|
-| 0 — Chassis | Workspace, `corvo-core` (trait+registry), empty GPUI window per OS, single-instance IPC + hotkey | App opens/closes on hotkey, empty search bar |
-| 1 — First vertical slice | `app-launcher` only, end to end | Usable as a basic app launcher |
-| 2 — Stateless commands | `calculator`, `emoji-picker`, `web-search-fallback`, `file-search` | 5 commands working |
-| 3 — Persistence | `corvo-config` finalized, `clipboard-manager`, `snippets`, `quicklinks` | Persistent clipboard history, configurable snippets/quicklinks |
-| 4 — Platform-heavy commands | `window-management`, `system-actions` for all 3 OS | Full MVP, all 10 commands, all 3 platforms |
-| 5 — Packaging | AppImage (Linux), portable `.exe` (Windows), ad-hoc signed `.app` (macOS) | Installable without compiling |
+| Phase | Scope | Status | Milestone |
+|---|---|---|---|
+| 0 — Chassis | Workspace, `corvo-core` (trait + registry), GPUI window per OS, single-instance IPC + hotkey | Completed | Application toggles on hotkey |
+| 1 — First vertical slice | `app-launcher` with frecency ranking | Completed | Full application search and launch |
+| 2 — Stateless commands | `calculator`, `emoji-picker`, `web-search-fallback`, `file-search` | Completed | 5 built-in commands operational |
+| 3 — Persistence | `corvo-config`, `clipboard-manager`, `snippets`, `quicklinks` | Completed | Persistent clipboard history, snippets, quicklinks |
+| 4 — Platform-heavy commands | `window-management`, `system-actions` across platforms | Completed | Window tiling, window gap, layout templates, system controls |
+| 5 — Packaging & Auto-Updater | Cross-platform CI/CD, Homebrew, DMG, AppImage, DEB, MSI, auto-updater | Completed | Fully packaged releases with signature verification |
+| 6 — v0.1.1 Maintenance | Hotkey execution fixes, window gap tiling, layout template management | Completed | Definitively working keybinds, layout capture & restore |
 
 ## 12. Packaging & distribution
 
-- **Linux:** AppImage via `linuxdeploy`/`cargo-appimage`. Don't bundle
-  Wayland/X11/fontconfig system libs, they're ubiquitous and bundling
-  them breaks portability. Flatpak is a possible future step if
-  distributing via Flathub, not needed for MVP.
-- **Windows:** portable `.exe`, statically linked CRT
-  (`RUSTFLAGS="-C target-feature=+crt-static"`) so it runs without the
-  VC++ Redistributable installed. MSI/NSIS installer with autostart
-  registration is a post-MVP nice-to-have.
-- **macOS:** `.app` bundle, ad-hoc signed (`codesign --sign -`) for
-  personal use. Developer ID signing + notarization only if/when this
-  goes beyond personal testing.
-- **CI:** `cargo-dist` for cross-platform release builds via GitHub
-  Actions, producing per-OS artifacts with checksums.
+- **Linux**: AppImage and Debian `.deb` packages built via GitHub Actions.
+- **Windows**: WiX-based MSI installer and portable `.zip` with static CRT.
+- **macOS**: Signed `.app` bundle, compressed into `.dmg` and `.tar.gz` archives, distributed via Homebrew tap `diegoleteliers10/corvo/corvo`.
+- **Auto-Updater**: Embedded cross-platform update worker with Minisign Ed25519 signature checks, SHA-256 verification, and atomic staging.
+- **CI / CD**: GitHub Actions workflow on tag release, uploading assets and publishing release notes automatically.
 
 ## 13. Naming
 
