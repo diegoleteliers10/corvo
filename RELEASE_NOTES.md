@@ -1,10 +1,8 @@
-# Corvo 0.1.5
+# Corvo 0.1.6
 
 ## Fixed
 
-- Show application icons from Windows Start Apps and shortcuts.
-- Keep Corvo active after the launcher closes on Windows and Linux.
-- Hide Windows console windows started by helper commands.
-- Use Alt+Space as the default launcher shortcut on Windows and Linux. macOS keeps Cmd+Space.
-
-Saved shortcuts stay unchanged. Change an older shortcut in Settings if needed.
+- Load cached Windows application icons during each scan.
+- Show launcher content while the application scan runs in the background.
+- Open Settings without waiting for a Windows PowerShell process.
+- Refresh application results after a scan without replacing newer results.
