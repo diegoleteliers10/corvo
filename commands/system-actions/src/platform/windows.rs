@@ -3,6 +3,24 @@ use super::{ActionExecution, SystemActionDef, SystemSettingDef};
 pub fn get_system_actions() -> Vec<SystemActionDef> {
     vec![
         SystemActionDef {
+            id: "dismiss-notifications",
+            title: "Dismiss Notifications",
+            keywords: "dismiss notifications close clear banners alerts action center",
+            icon: phosphor_svgs::style::regular::BELL_SLASH,
+            execution: ActionExecution::RunShell(
+                "powershell -NoProfile -Command \"[Windows.UI.Notifications.ToastNotificationManager]::History.Clear()\"".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "eject-all-disks",
+            title: "Eject All Disks",
+            keywords: "eject all disks unmount usb drives volumes removable safely remove",
+            icon: phosphor_svgs::style::regular::EJECT,
+            execution: ActionExecution::RunShell(
+                "powershell -NoProfile -Command \"$vols = Get-CimInstance Win32_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 2 -and $_.DriveLetter }; foreach ($v in $vols) { (New-Object -ComObject Shell.Application).Namespace(17).ParseName($v.DriveLetter).InvokeVerb('Eject') }\"".into(),
+            ),
+        },
+        SystemActionDef {
             id: "lock",
             title: "Lock Screen",
             keywords: "lock screen display security sleep workstation",
@@ -95,6 +113,40 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             execution: ActionExecution::AdjustBrightness(-0.05),
         },
         SystemActionDef {
+            id: "next-track",
+            title: "Next Track",
+            keywords: "next track song forward music skip player audio",
+            icon: phosphor_svgs::style::regular::SKIP_FORWARD,
+            execution: ActionExecution::RunShell(
+                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]176)\"".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "open-trash",
+            title: "Open Trash",
+            keywords: "open trash recycle bin folder deleted items",
+            icon: phosphor_svgs::style::regular::TRASH,
+            execution: ActionExecution::RunShell("explorer.exe shell:RecycleBinFolder".into()),
+        },
+        SystemActionDef {
+            id: "play-pause",
+            title: "Play / Pause",
+            keywords: "play pause music audio song player toggle",
+            icon: phosphor_svgs::style::regular::PLAY_PAUSE,
+            execution: ActionExecution::RunShell(
+                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]179)\"".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "previous-track",
+            title: "Previous Track",
+            keywords: "previous track song back music rewind player audio",
+            icon: phosphor_svgs::style::regular::SKIP_BACK,
+            execution: ActionExecution::RunShell(
+                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]177)\"".into(),
+            ),
+        },
+        SystemActionDef {
             id: "hide-apps",
             title: "Hide All Applications",
             keywords: "hide all minimize desktop show desktop",
@@ -117,6 +169,20 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
 
 pub fn get_system_settings() -> Vec<SystemSettingDef> {
     vec![
+        SystemSettingDef {
+            id: "about",
+            title: "About Settings",
+            keywords: "about system info specifications device hardware windows version",
+            icon: phosphor_svgs::style::regular::LAPTOP,
+            execution: ActionExecution::OpenUrl("ms-settings:about".into()),
+        },
+        SystemSettingDef {
+            id: "battery",
+            title: "Battery & Power Settings",
+            keywords: "battery power energy saver charge percentage sleep screen timeout",
+            icon: phosphor_svgs::style::regular::BATTERY_FULL,
+            execution: ActionExecution::OpenUrl("ms-settings:batterysaver".into()),
+        },
         SystemSettingDef {
             id: "displays",
             title: "Display Settings",
@@ -186,7 +252,7 @@ pub fn get_system_settings() -> Vec<SystemSettingDef> {
             keywords:
                 "accessibility vision hearing magnifier contrast narrator captions ease of access",
             icon: phosphor_svgs::style::regular::USER_CIRCLE,
-            execution: ActionExecution::OpenUrl("ms-settings:easeofaccess-display".into()),
+            execution: ActionExecution::OpenUrl("ms-settings:easeofaccess".into()),
         },
         SystemSettingDef {
             id: "control-center",
@@ -207,7 +273,7 @@ pub fn get_system_settings() -> Vec<SystemSettingDef> {
             title: "Keyboard Settings",
             keywords: "keyboard typing input layout repeat rate shortcuts",
             icon: phosphor_svgs::style::regular::KEYBOARD,
-            execution: ActionExecution::OpenUrl("ms-settings:keyboard".into()),
+            execution: ActionExecution::OpenUrl("ms-settings:typing".into()),
         },
         SystemSettingDef {
             id: "trackpad",

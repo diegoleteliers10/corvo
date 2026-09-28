@@ -127,3 +127,14 @@ method to this trait and implement it in `linux.rs`, `windows.rs`, and
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
 - [ ] Only the files listed in §2 step 5 changed outside the new crate
 - [ ] The new command has at least one test
+
+## 7. OS parity rule (mandatory)
+
+Every feature that works on macOS must work on Windows and Linux too,
+each one in its native mode. This covers system actions, system settings,
+`launch at login`, brightness and volume controls, shell execution, URL
+opening, and settings UI toggles. Additions go to the three platform files
+together: `system-actions/src/platform/macos.rs`, `linux.rs`, `windows.rs`,
+and `corvo-platform/src/macos.rs`, `linux.rs`, `windows.rs`. The parity
+tests in `system-actions/src/lib.rs` (`core_actions_exist_on_this_platform`,
+`core_settings_exist_on_this_platform`) fail when an ID is missing on any OS.

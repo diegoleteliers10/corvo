@@ -242,4 +242,97 @@ mod tests {
             _ => panic!("expected RunShell"),
         }
     }
+
+    /// Parity contract: every OS must expose the same action and setting IDs.
+    /// Add a new action or setting to macos.rs, linux.rs, and windows.rs together.
+    #[test]
+    fn every_action_and_setting_has_a_payload() {
+        for action in get_system_actions() {
+            assert!(!action.id.is_empty(), "action id must not be empty");
+            assert!(!action.title.is_empty(), "action {} needs a title", action.id);
+            match &action.execution {
+                ActionExecution::RunShell(cmd) => {
+                    assert!(!cmd.trim().is_empty(), "action {} needs a shell command", action.id)
+                }
+                ActionExecution::OpenUrl(_) => {}
+                ActionExecution::AdjustBrightness(_)
+                | ActionExecution::AdjustVolume(_) => {}
+            }
+        }
+        for setting in get_system_settings() {
+            assert!(!setting.id.is_empty(), "setting id must not be empty");
+            match &setting.execution {
+                ActionExecution::RunShell(cmd) => assert!(
+                    !cmd.trim().is_empty(),
+                    "setting {} needs a shell command",
+                    setting.id
+                ),
+                ActionExecution::OpenUrl(url) => {
+                    assert!(!url.trim().is_empty(), "setting {} needs a URL", setting.id)
+                }
+                ActionExecution::AdjustBrightness(_)
+                | ActionExecution::AdjustVolume(_) => {
+                    panic!("setting {} must open a page, not adjust hardware", setting.id)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn core_actions_exist_on_this_platform() {
+        let ids: Vec<&str> = get_system_actions().iter().map(|a| a.id).collect();
+        for expected in [
+            "lock",
+            "sleep",
+            "restart",
+            "shutdown",
+            "logout",
+            "empty-trash",
+            "open-trash",
+            "toggle-mute",
+            "toggle-appearance",
+            "dismiss-notifications",
+            "eject-all-disks",
+            "next-track",
+            "play-pause",
+            "previous-track",
+            "hide-apps",
+            "quit-all",
+            "volume-up",
+            "volume-down",
+            "brightness-up",
+            "brightness-down",
+        ] {
+            assert!(ids.contains(&expected), "missing system action: {expected}");
+        }
+    }
+
+    #[test]
+    fn core_settings_exist_on_this_platform() {
+        let ids: Vec<&str> = get_system_settings().iter().map(|s| s.id).collect();
+        for expected in [
+            "about",
+            "battery",
+            "displays",
+            "sound",
+            "wifi",
+            "network",
+            "bluetooth",
+            "appearance",
+            "wallpaper",
+            "lock-screen",
+            "notifications",
+            "accessibility",
+            "control-center",
+            "desktop-dock",
+            "keyboard",
+            "trackpad",
+            "mouse",
+            "date-time",
+            "software-update",
+            "privacy-security",
+        ] {
+            assert!(ids.contains(&expected), "missing system setting: {expected}");
+        }
+    }
 }

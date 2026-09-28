@@ -1,20 +1,43 @@
 use super::{ActionExecution, SystemActionDef, SystemSettingDef};
 
 fn resolve_linux_desktop_setting(gnome_panel: &str, kde_kcm: &str) -> ActionExecution {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_lowercase();
-    if desktop.contains("kde") {
-        ActionExecution::RunShell(format!(
-            "systemsettings {kde_kcm} || systemsettings5 {kde_kcm}"
-        ))
+    let mut candidates: Vec<String> = Vec::new();
+    if gnome_panel.is_empty() {
+        candidates.push("gnome-control-center 2>/dev/null".into());
     } else {
-        ActionExecution::RunShell(format!("gnome-control-center {gnome_panel}"))
+        candidates.push(format!("gnome-control-center {gnome_panel} 2>/dev/null"));
     }
+    if kde_kcm.is_empty() {
+        candidates.push("systemsettings 2>/dev/null || systemsettings5 2>/dev/null".into());
+    } else {
+        candidates.push(format!(
+            "systemsettings {kde_kcm} 2>/dev/null || systemsettings5 {kde_kcm} 2>/dev/null"
+        ));
+    }
+    candidates.push("xfce4-settings-manager 2>/dev/null".into());
+    ActionExecution::RunShell(candidates.join(" || "))
 }
 
 pub fn get_system_actions() -> Vec<SystemActionDef> {
     vec![
+        SystemActionDef {
+            id: "dismiss-notifications",
+            title: "Dismiss Notifications",
+            keywords: "dismiss notifications close clear banners alerts notification center",
+            icon: phosphor_svgs::style::regular::BELL_SLASH,
+            execution: ActionExecution::RunShell(
+                "dunstctl close-all 2>/dev/null || swaync-client --close-all 2>/dev/null || makoctl dismiss -a 2>/dev/null || true".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "eject-all-disks",
+            title: "Eject All Disks",
+            keywords: "eject all disks unmount usb drives volumes removable safely remove",
+            icon: phosphor_svgs::style::regular::EJECT,
+            execution: ActionExecution::RunShell(
+                "sh -c 'for m in /media/\"$USER\"/* /run/media/\"$USER\"/*; do [ -e \"$m\" ] || continue; udisksctl unmount -p \"$m\" 2>/dev/null || umount \"$m\" 2>/dev/null; udisksctl power-off -p \"$m\" 2>/dev/null || true; done; true'".into(),
+            ),
+        },
         SystemActionDef {
             id: "lock",
             title: "Lock Screen",
@@ -116,6 +139,42 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             execution: ActionExecution::AdjustBrightness(-0.05),
         },
         SystemActionDef {
+            id: "next-track",
+            title: "Next Track",
+            keywords: "next track song forward music skip player audio",
+            icon: phosphor_svgs::style::regular::SKIP_FORWARD,
+            execution: ActionExecution::RunShell(
+                "playerctl next 2>/dev/null || xdotool key XF86AudioNext 2>/dev/null || true".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "open-trash",
+            title: "Open Trash",
+            keywords: "open trash bin folder deleted items files",
+            icon: phosphor_svgs::style::regular::TRASH,
+            execution: ActionExecution::RunShell(
+                "xdg-open trash:/// 2>/dev/null || gio open trash:/// 2>/dev/null || xdg-open \"${HOME:?HOME is not set}/.local/share/Trash/files\"".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "play-pause",
+            title: "Play / Pause",
+            keywords: "play pause music audio song player toggle",
+            icon: phosphor_svgs::style::regular::PLAY_PAUSE,
+            execution: ActionExecution::RunShell(
+                "playerctl play-pause 2>/dev/null || xdotool key XF86AudioPlay 2>/dev/null || true".into(),
+            ),
+        },
+        SystemActionDef {
+            id: "previous-track",
+            title: "Previous Track",
+            keywords: "previous track song back music rewind player audio",
+            icon: phosphor_svgs::style::regular::SKIP_BACK,
+            execution: ActionExecution::RunShell(
+                "playerctl previous 2>/dev/null || xdotool key XF86AudioPrev 2>/dev/null || true".into(),
+            ),
+        },
+        SystemActionDef {
             id: "hide-apps",
             title: "Hide All Applications",
             keywords: "hide all other applications apps desktop minimize show desktop",
@@ -138,6 +197,20 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
 
 pub fn get_system_settings() -> Vec<SystemSettingDef> {
     vec![
+        SystemSettingDef {
+            id: "about",
+            title: "About This System",
+            keywords: "about system info specifications hardware model distro version",
+            icon: phosphor_svgs::style::regular::LAPTOP,
+            execution: resolve_linux_desktop_setting("info-overview", "kcm_about-distro"),
+        },
+        SystemSettingDef {
+            id: "battery",
+            title: "Battery & Power Settings",
+            keywords: "battery power energy saver charge percentage suspend power management",
+            icon: phosphor_svgs::style::regular::BATTERY_FULL,
+            execution: resolve_linux_desktop_setting("power", "kcm_power"),
+        },
         SystemSettingDef {
             id: "displays",
             title: "Displays Settings",

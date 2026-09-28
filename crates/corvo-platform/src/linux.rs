@@ -959,6 +959,7 @@ pub fn adjust_brightness_with_level(delta: f32) -> PlatformResult<f32> {
     if !delta.is_finite() {
         return Err(PlatformError::Os("brightness change must be finite".into()));
     }
+    let before = brightnessctl_level();
     let percent = ((delta.abs() * 100.0).round() as u32).max(1);
     let change = format!("{percent}%{}", if delta >= 0.0 { "+" } else { "-" });
     let brightnessctl_status = Command::new("brightnessctl")
@@ -967,9 +968,15 @@ pub fn adjust_brightness_with_level(delta: f32) -> PlatformResult<f32> {
         .ok()
         .filter(|status| status.success());
     if brightnessctl_status.is_some() {
-        return brightnessctl_level().ok_or_else(|| {
-            PlatformError::Os("brightnessctl changed brightness but did not return a level".into())
-        });
+        if let Some(level) = brightnessctl_level() {
+            return Ok(level);
+        }
+        if let Some(previous) = before {
+            return Ok((previous + delta * 100.0).clamp(0.0, 100.0));
+        }
+        return Err(PlatformError::Os(
+            "brightnessctl changed brightness but did not return a level".into(),
+        ));
     }
 
     let devices = fs::read_dir("/sys/class/backlight").map_err(|error| {
@@ -1037,12 +1044,19 @@ pub fn adjust_audio_output_with_level(delta: f32) -> PlatformResult<f32> {
         ("amixer", vec!["set", "Master", mixer_change.as_str()]),
     ];
     let mut last_error = None;
+    let before = super::audio_output_level();
     for (program, args) in attempts {
         match run_command(program, args) {
             Ok(()) => {
-                return super::audio_output_level().ok_or_else(|| {
-                    PlatformError::Os("volume changed but the new level is unavailable".into())
-                });
+                if let Some(level) = super::audio_output_level() {
+                    return Ok(level);
+                }
+                if let Some(previous) = before {
+                    return Ok((previous + delta.clamp(-1.0, 1.0) * 100.0).clamp(0.0, 100.0));
+                }
+                return Err(PlatformError::Os(
+                    "volume changed but the new level is unavailable".into(),
+                ));
             }
             Err(error) => last_error = Some(format!("{program}: {error}")),
         }
@@ -1622,7 +1636,7 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
         let _ = std::fs::create_dir_all(&autostart_dir);
         let exe = std::env::current_exe().map_err(|e| PlatformError::Os(e.to_string()))?;
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Corvo\nComment=Fast keyboard launcher\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=Corvo\nComment=Fast keyboard launcher\nExec=\"{}\"\nTerminal=false\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
             exe.display()
         );
         std::fs::write(&desktop_path, content)
@@ -1661,5 +1675,26 @@ mod tests {
         let window = parse_wmctrl_line("0x04600007  0  1234 host Example Window").unwrap();
         assert_eq!(window.id, 0x04600007);
         assert_eq!(window.title, "Example Window");
+    }
+
+    #[test]
+    fn launch_at_login_toggles_autostart_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "corvo-autostart-test-{}",
+            std::process::id()
+        ));
+        let prior = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!super::is_launch_at_login_enabled());
+        super::set_launch_at_login(true).expect("enables launch at login");
+        assert!(super::is_launch_at_login_enabled());
+        super::set_launch_at_login(false).expect("disables launch at login");
+        assert!(!super::is_launch_at_login_enabled());
+        let _ = std::fs::remove_dir_all(&dir);
+        match prior {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 }

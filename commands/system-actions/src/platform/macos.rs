@@ -35,7 +35,7 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             keywords: "hide all other applications apps desktop minimize conceal focus",
             icon: phosphor_svgs::style::regular::EYE_SLASH,
             execution: ActionExecution::RunShell(
-                "osascript -e 'tell application \"System Events\" to set visible of every process whose visible is true and frontmost is false and name is not \"corvo\" to false'".into(),
+                "osascript -e 'tell application \"System Events\" to set visible of every process whose visible is true and frontmost is false and name is not \"Corvo\" to false'".into(),
             ),
         },
         SystemActionDef {
@@ -98,7 +98,7 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             keywords: "quit all applications apps terminate close everything exit",
             icon: phosphor_svgs::style::regular::X_CIRCLE,
             execution: ActionExecution::RunShell(
-                "osascript -e 'tell application \"System Events\" to set quit_list to (name of every process whose background only is false and name is not \"corvo\" and name is not \"Finder\")' -e 'repeat with a in quit_list' -e 'tell application a to quit' -e 'end repeat'".into(),
+                "osascript -e 'tell application \"System Events\" to set quit_list to (name of every process whose background only is false and name is not \"Corvo\" and name is not \"Finder\")' -e 'repeat with a in quit_list' -e 'tell application a to quit' -e 'end repeat'".into(),
             ),
         },
         SystemActionDef {

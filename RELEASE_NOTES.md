@@ -1,3 +1,20 @@
+# Corvo 0.1.8
+
+## System actions parity across macOS, Windows, and Linux
+
+- Every system action now works on all three systems, each one in its native mode. Linux and Windows gain Dismiss Notifications, Eject All Disks, Open Trash, Next Track, Play / Pause, and Previous Track.
+- Every system setting category now exists on all three systems. Linux and Windows gain About and Battery settings with native targets.
+- Fixed Windows settings links: keyboard opens typing settings, accessibility opens Ease of Access.
+- Linux settings now try GNOME, KDE, and XFCE handlers in order instead of picking one from the desktop name.
+- Fixed macOS Hide All Apps and Quit All Applications: they no longer hide or quit Corvo itself (wrong process name case).
+- Fixed Linux volume and brightness controls reporting failure when the change applied but the new level could not be read.
+
+## Launch at login on all systems
+
+- macOS uses the Login Item API for bundled builds and a LaunchAgent plist for dev builds, never both at once, so Corvo starts exactly once.
+- Windows registers the HKCU Run key. Linux writes `~/.config/autostart/corvo.desktop`.
+- The setting stays on by default and applies at startup on every OS.
+
 # Corvo 0.1.7
 
 ## Fixed

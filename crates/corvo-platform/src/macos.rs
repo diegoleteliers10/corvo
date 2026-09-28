@@ -2241,35 +2241,52 @@ pub fn is_launch_at_login_enabled() -> bool {
 }
 
 /// Enables or disables launch at login on macOS.
+/// Uses the macOS Login Item API when running as a .app bundle, and a
+/// LaunchAgent plist when running unbundled (development builds). Installing
+/// both simultaneously would cause Corvo to launch twice on login.
 pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
     let app_path = find_corvo_app_path();
 
-    if enabled {
-        if let Some(ref path) = app_path {
-            let path_str = path.to_string_lossy();
+    if app_path.is_some() {
+        // Bundled: use Login Item only. Clean up any stale LaunchAgent.
+        if enabled {
+            let path_str = app_path.as_ref().unwrap().to_string_lossy();
             let script = format!(
                 "tell application \"System Events\" to if not (exists login item \"Corvo\") then make login item at end with properties {{name:\"Corvo\", path:\"{path_str}\", hidden:false}}"
             );
             let _ = std::process::Command::new("osascript")
                 .args(["-e", &script])
                 .output();
+        } else {
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to if exists login item \"Corvo\" then delete login item \"Corvo\""])
+                .output();
         }
+        // Always remove the LaunchAgent when bundled to prevent double-launch.
+        if let Some(home) = std::env::var_os("HOME") {
+            let plist_path = std::path::Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
+            if plist_path.exists() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", "-w", &plist_path.to_string_lossy()])
+                    .output();
+                let _ = std::fs::remove_file(&plist_path);
+            }
+        }
+    } else {
+        // Unbundled (dev build): use LaunchAgent only. Clean up any Login Item.
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to if exists login item \"Corvo\" then delete login item \"Corvo\""])
+            .output();
 
         if let Some(home) = std::env::var_os("HOME") {
-            let launch_agents_dir = Path::new(&home).join("Library/LaunchAgents");
-            let _ = std::fs::create_dir_all(&launch_agents_dir);
+            let launch_agents_dir = std::path::Path::new(&home).join("Library/LaunchAgents");
             let plist_path = launch_agents_dir.join("sh.corvo.corvo.plist");
 
-            let target_exe = if let Some(ref path) = app_path {
-                path.join("Contents/MacOS/corvo")
-            } else if let Ok(exe) = std::env::current_exe() {
-                exe
-            } else {
-                PathBuf::from("/Applications/Corvo.app/Contents/MacOS/corvo")
-            };
-
-            let plist_content = format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
+            if enabled {
+                let _ = std::fs::create_dir_all(&launch_agents_dir);
+                let target_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/corvo"));
+                let plist_content = format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -2286,27 +2303,18 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 </dict>
 </plist>
 "#,
-                target_exe.display()
-            );
-
-            if std::fs::write(&plist_path, plist_content).is_ok() {
-                let _ = std::process::Command::new("launchctl")
-                    .args(["load", "-w", &plist_path.to_string_lossy()])
-                    .output();
-            }
-        }
-    } else {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to if exists login item \"Corvo\" then delete login item \"Corvo\""])
-            .output();
-
-        if let Some(home) = std::env::var_os("HOME") {
-            let plist_path = Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
-            if plist_path.exists() {
+                    target_exe.display()
+                );
+                if std::fs::write(&plist_path, plist_content).is_ok() {
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["load", "-w", &plist_path.to_string_lossy()])
+                        .output();
+                }
+            } else if plist_path.exists() {
                 let _ = std::process::Command::new("launchctl")
                     .args(["unload", "-w", &plist_path.to_string_lossy()])
                     .output();
-                let _ = std::fs::remove_file(plist_path);
+                let _ = std::fs::remove_file(&plist_path);
             }
         }
     }
