@@ -180,8 +180,33 @@ fn corpus() -> &'static RwLock<CorpusState> {
             scopes: Vec::new(),
             scanned_at: None,
             scanning: false,
+            pending_reload: false,
         })
     })
+}
+
+fn corpus_subscribers() -> &'static Mutex<Vec<smol::channel::Sender<()>>> {
+    static SUBSCRIBERS: OnceLock<Mutex<Vec<smol::channel::Sender<()>>>> = OnceLock::new();
+    SUBSCRIBERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn subscribe_corpus_changes() -> smol::channel::Receiver<()> {
+    let (sender, receiver) = smol::channel::unbounded();
+    let mut subscribers = corpus_subscribers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    subscribers.retain(|subscriber| !subscriber.is_closed());
+    subscribers.push(sender.clone());
+    drop(subscribers);
+    if corpus()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .scanned_at
+        .is_some()
+    {
+        let _ = sender.try_send(());
+    }
+    receiver
 }
 
 struct CorpusState {
@@ -189,6 +214,7 @@ struct CorpusState {
     scopes: Vec<String>,
     scanned_at: Option<Instant>,
     scanning: bool,
+    pending_reload: bool,
 }
 
 pub fn warmup() {
@@ -196,33 +222,59 @@ pub fn warmup() {
 }
 
 fn ensure_corpus() {
+    start_scan(false);
+}
+
+fn start_scan(force: bool) {
+    let scopes = corvo_config::Settings::load().applications.search_scopes;
     let mut state = corpus()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let settings = corvo_config::Settings::load();
     let scan_is_fresh = state
         .scanned_at
-        .is_some_and(|scanned_at| scanned_at.elapsed().as_secs() < 30);
-    if scan_is_fresh && state.scopes == settings.applications.search_scopes {
+        .is_some_and(|scanned_at| scanned_at.elapsed().as_secs() < 300);
+    if state.scanning {
+        state.pending_reload |= force || state.scopes != scopes;
         return;
     }
-    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes)
-        .unwrap_or_default();
-    state.scopes = settings.applications.search_scopes;
-    state.scanned_at = Some(Instant::now());
-    state.scanning = false;
+    if !force && scan_is_fresh && state.scopes == scopes {
+        return;
+    }
+    state.scanning = true;
+    drop(state);
+    std::thread::spawn(move || {
+        let scanned = corvo_platform::list_apps_in_scopes(&scopes);
+        let mut state = corpus()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match scanned {
+            Ok(apps) => state.apps = apps,
+            Err(error) => eprintln!("corvo: could not scan applications: {error}"),
+        }
+        state.scopes = scopes;
+        state.scanned_at = Some(Instant::now());
+        state.scanning = false;
+        let pending_reload = std::mem::take(&mut state.pending_reload);
+        drop(state);
+        let mut subscribers = corpus_subscribers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.retain(|sender| sender.try_send(()).is_ok());
+        drop(subscribers);
+        if pending_reload {
+            start_scan(true);
+        } else {
+            ensure_corpus();
+        }
+    });
 }
 
 pub fn reload_corpus() {
-    let mut state = corpus()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let settings = corvo_config::Settings::load();
-    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes)
-        .unwrap_or_default();
-    state.scopes = settings.applications.search_scopes;
-    state.scanned_at = Some(Instant::now());
-    state.scanning = false;
+    start_scan(true);
+}
+
+pub fn cached_apps() -> Vec<AppEntry> {
+    corpus_apps()
 }
 
 fn corpus_apps() -> Vec<AppEntry> {

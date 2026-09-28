@@ -618,21 +618,50 @@ ConvertTo-Json -InputObject $items -Compress -Depth 3
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
-    let script = format!(
-        r#"
-$signature = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);'
-Add-Type -MemberDefinition $signature -Name Foreground -Namespace Corvo
-$processId = [uint32]0
-[void][Corvo.Foreground]::GetWindowThreadProcessId([Corvo.Foreground]::GetForegroundWindow(), [ref]$processId)
-$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-if ($process -and $process.Id -ne {}) {{ [Console]::Write("{{0}}|{{1}}" -f $process.Id, $process.ProcessName) }}
-"#,
-        std::process::id()
-    );
-    let output = powershell_output(&script).ok()?;
-    let (pid, name) = output.trim().split_once('|')?;
-    let pid = pid.parse::<i32>().ok()?;
-    (pid != std::process::id() as i32).then(|| (pid, name.to_owned()))
+    use std::ffi::c_void;
+
+    #[allow(non_snake_case)]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(window: *mut c_void, process_id: *mut u32) -> u32;
+    }
+    #[allow(non_snake_case)]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(
+            process: *mut c_void,
+            flags: u32,
+            name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    let window = unsafe { GetForegroundWindow() };
+    if window.is_null() {
+        return None;
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(window, &mut pid) };
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    let process = unsafe { OpenProcess(0x1000, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut name = [0u16; 32768];
+    let mut size = name.len() as u32;
+    let found = unsafe { QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(process) };
+    if found == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&name[..size as usize]);
+    let app_name = Path::new(&path).file_stem()?.to_string_lossy().into_owned();
+    Some((pid as i32, app_name))
 }
 
 pub fn activate_app(pid: i32) -> PlatformResult<()> {
@@ -816,6 +845,16 @@ fn fill_start_app_icons(apps: &mut [AppEntry]) {
         return;
     };
 
+    for app in apps.iter_mut() {
+        if let Some(app_id) = app
+            .path
+            .to_string_lossy()
+            .strip_prefix("shell:AppsFolder\\")
+        {
+            app.icon_png = cached_icon_for_key(&app_id.to_lowercase());
+        }
+    }
+
     let missing = apps
         .iter()
         .filter_map(|app| {
@@ -824,8 +863,7 @@ fn fill_start_app_icons(apps: &mut [AppEntry]) {
                 .to_string_lossy()
                 .strip_prefix("shell:AppsFolder\\")?
                 .to_owned();
-            (app.icon_png.is_none() && cached_icon_for_key(&app_id.to_lowercase()).is_none())
-                .then_some(app_id)
+            app.icon_png.is_none().then_some(app_id)
         })
         .collect::<Vec<_>>();
     if missing.is_empty() || std::fs::create_dir_all(&cache_dir).is_err() {

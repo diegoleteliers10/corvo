@@ -285,6 +285,28 @@ impl SettingsView {
         let settings = corvo_config::Settings::load();
         let quicklinks_file = corvo_config::QuicklinksFile::load();
         let snippets_file = corvo_config::SnippetsFile::load();
+        let app_updates = corvo_app_launcher::subscribe_corpus_changes();
+        let release_updates = app_updates.clone();
+        cx.on_release(move |_, _| {
+            release_updates.close();
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            while app_updates.recv().await.is_ok() {
+                let apps = corvo_app_launcher::cached_apps();
+                if this
+                    .update(cx, |view, cx| {
+                        view.apps = apps;
+                        view.update_filtered_apps();
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             selected_tab: SettingsTab::General,
             history: vec![SettingsTab::General],
@@ -467,8 +489,8 @@ impl SettingsView {
     }
 
     fn reload_apps(&mut self) {
-        self.apps = corvo_platform::list_apps_in_scopes(&self.settings.applications.search_scopes)
-            .unwrap_or_default();
+        corvo_app_launcher::reload_corpus();
+        self.apps = corvo_app_launcher::cached_apps();
         self.update_filtered_apps();
     }
 
@@ -8562,6 +8584,7 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
                 view.navigate_to_tab(tab, cx);
                 window.activate_window();
             });
+            #[cfg(not(target_os = "windows"))]
             corvo_platform::activate_app(std::process::id() as i32);
             corvo_platform::order_window_front(780.0, 540.0);
             return;
@@ -8606,6 +8629,7 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
         let _ = handle.update(cx, |_view, window, _cx| {
             window.activate_window();
         });
+        #[cfg(not(target_os = "windows"))]
         corvo_platform::activate_app(std::process::id() as i32);
         corvo_platform::order_window_front(780.0, 540.0);
     }
@@ -8620,6 +8644,7 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
                 view.check_for_updates(cx);
                 window.activate_window();
             });
+            #[cfg(not(target_os = "windows"))]
             corvo_platform::activate_app(std::process::id() as i32);
             corvo_platform::order_window_front(780.0, 540.0);
             return;
@@ -8665,6 +8690,7 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
         let _ = handle.update(cx, |_view, window, _cx| {
             window.activate_window();
         });
+        #[cfg(not(target_os = "windows"))]
         corvo_platform::activate_app(std::process::id() as i32);
         corvo_platform::order_window_front(780.0, 540.0);
     }

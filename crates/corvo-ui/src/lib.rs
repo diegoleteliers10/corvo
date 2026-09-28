@@ -3329,15 +3329,18 @@ impl Launcher {
             } else {
                 fast_results.truncate(max_results);
             }
-            if query.is_empty() {
-                if let Some(cell) = INITIAL_RESULTS.get() {
-                    if let Ok(mut lock) = cell.write() {
-                        *lock = fast_results.clone();
+            if !query.is_empty() || received == search_count {
+                let _ = this.update(cx, |launcher, cx| {
+                    if launcher.search_seq != seq {
+                        return;
                     }
-                }
-            }
-            let _ = this.update(cx, |launcher, cx| {
-                if launcher.search_seq == seq {
+                    if query.is_empty() {
+                        if let Some(cell) = INITIAL_RESULTS.get() {
+                            if let Ok(mut lock) = cell.write() {
+                                *lock = fast_results.clone();
+                            }
+                        }
+                    }
                     let prev_selected = launcher.selected;
                     let prev_id = if prev_selected > 0 {
                         launcher.selected_result().map(|r| r.id.clone())
@@ -3360,8 +3363,8 @@ impl Launcher {
                     launcher.actions = Vec::new();
                     launcher.actions_filter = String::new();
                     cx.notify();
-                }
-            });
+                });
+            }
 
             // If a slow command (like disk search) took longer than 20ms, await it and perform a final update
             if received < search_count {
@@ -3401,6 +3404,13 @@ impl Launcher {
                 }
                 let _ = this.update(cx, |launcher, cx| {
                     if launcher.search_seq == seq {
+                        if query.is_empty() {
+                            if let Some(cell) = INITIAL_RESULTS.get() {
+                                if let Ok(mut lock) = cell.write() {
+                                    *lock = results.clone();
+                                }
+                            }
+                        }
                         let prev_selected = launcher.selected;
                         let prev_id = if prev_selected > 0 {
                             launcher.selected_result().map(|r| r.id.clone())
@@ -8030,6 +8040,9 @@ pub fn run(
     intent_tx: smol::channel::Sender<corvo_platform::HotkeyIntent>,
     intent_rx: Receiver<corvo_platform::HotkeyIntent>,
 ) {
+    let app_updates = corvo_app_launcher::subscribe_corpus_changes();
+    let refresh_registry = registry.clone();
+    let refresh_store = store.clone();
     gpui_platform::application().run(|cx: &mut App| {
         cx.set_quit_mode(gpui::QuitMode::Explicit);
         // Runs after GPUI sets the regular policy, so the launcher
@@ -8038,6 +8051,25 @@ pub fn run(
         cx.set_global(RegistryGlobal(registry));
         cx.set_global(StoreGlobal(store));
         cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("Launcher"))]);
+
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            while app_updates.recv().await.is_ok() {
+                let registry = refresh_registry.clone();
+                let store = refresh_store.clone();
+                smol::unblock(move || preload_initial_results(&registry, store)).await;
+                let _ = cx.update(|cx| {
+                    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0)
+                    {
+                        let _ = handle.update(cx, |launcher, _window, cx| {
+                            if launcher.page == LauncherPage::Root {
+                                launcher.refresh(cx);
+                            }
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
 
         // Initialize dynamic global hotkey subsystem
         let hotkey_mgr = corvo_platform::hotkey::HotkeyManager::new(intent_tx);
@@ -8521,6 +8553,10 @@ fn sync_launcher_preferences(cx: &mut App) {
 
 fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
     let store = cx.global::<StoreGlobal>().0.clone();
+    let (previous_pid, previous_name) = match corvo_platform::frontmost_app_info() {
+        Some((pid, name)) => (Some(pid), Some(name)),
+        None => (corvo_platform::frontmost_app_pid(), None),
+    };
     let size_scale = match store.interface_size_option() {
         0 => 0.9,
         2 => 1.1,
@@ -8566,16 +8602,10 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         }
     };
     cx.set_global(LauncherWindow(window));
-    // Whoever is frontmost now loses activation; the pid and name
-    // are recorded before Corvo activates so dismissal or auto-paste
-    // can hand focus back.
-    let (previous_pid, previous_name) = match corvo_platform::frontmost_app_info() {
-        Some((pid, name)) => (Some(pid), Some(name)),
-        None => (corvo_platform::frontmost_app_pid(), None),
-    };
     cx.activate(true);
     corvo_platform::update_screens_cache();
     corvo_platform::make_panel_instant(window_width as f64, initial_height as f64);
+    let clipboard_source = previous_name.clone();
     let _ = window.update(cx, |launcher, _window, cx| {
         launcher.previous_app = previous_pid;
         launcher.previous_app_name = previous_name;
@@ -8584,13 +8614,28 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         }
         launcher.rebuild_root_flat_items();
         launcher.results_scroll_handle.scroll_to_item(0);
-        corvo_clipboard_manager::poll_clipboard_with_source(launcher.previous_app_name.as_deref());
         if launcher.page == LauncherPage::Clipboard {
             launcher.rebuild_clipboard_flat_items();
             launcher.refresh_clipboard(cx);
         }
     });
     corvo_platform::order_panel_front(window_width as f64, initial_height as f64);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        smol::unblock(move || {
+            corvo_clipboard_manager::poll_clipboard_with_source(clipboard_source.as_deref());
+        })
+        .await;
+        let _ = cx.update(|cx| {
+            if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
+                let _ = handle.update(cx, |launcher, _window, cx| {
+                    if launcher.page == LauncherPage::Clipboard {
+                        launcher.refresh_clipboard(cx);
+                    }
+                });
+            }
+        });
+    })
+    .detach();
 }
 
 fn launcher_background(transparency_level: usize) -> u32 {
