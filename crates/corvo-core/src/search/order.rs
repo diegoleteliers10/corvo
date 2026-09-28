@@ -40,10 +40,10 @@ impl LauncherOrder {
             _ => {}
         }
 
-        // Stage 2: Boosted query term (unless competitor has significantly higher real frecency)
+        // Stage 2: Favorites always rank above non-favorites.
         match (a.is_boosted, b.is_boosted) {
-            (true, false) if b.frecency <= a.frecency * 1.5 + 200.0 => return Ordering::Less,
-            (false, true) if a.frecency <= b.frecency * 1.5 + 200.0 => return Ordering::Greater,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
             _ => {}
         }
 
@@ -113,18 +113,9 @@ impl LauncherOrder {
             _ => {}
         }
 
-        // Stage 7: Raw quality score -> frecency -> titlePrefix -> priority
+        // Stage 7: Search quality ranks before frecency.
         let quality_ord = b.quality.cmp(&a.quality);
         if quality_ord != Ordering::Equal {
-            // If quality score differs substantially (more than 300 points), quality takes precedence
-            if (a.quality - b.quality).abs() > 300 {
-                return quality_ord;
-            }
-            // If close, frecency can break the tie
-            let frec_ord = compare_frecency(a.frecency, b.frecency);
-            if frec_ord != Ordering::Equal {
-                return frec_ord;
-            }
             return quality_ord;
         }
 
@@ -145,22 +136,15 @@ impl LauncherOrder {
             return priority_ord;
         }
 
-        natural_cmp(a.title, b.title)
+        natural_cmp(a.title, b.title).then_with(|| a.id.cmp(b.id))
     }
 }
 
 #[inline]
 fn compare_frecency(a: f64, b: f64) -> Ordering {
-    // If difference is greater than 10.0 frecency points
-    if (a - b).abs() > 10.0 {
-        if a > b {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        }
-    } else {
-        Ordering::Equal
-    }
+    let a = if a.is_finite() { a } else { 1.0 };
+    let b = if b.is_finite() { b } else { 1.0 };
+    b.total_cmp(&a)
 }
 
 /// Natural numerical collation comparator (e.g. "Item 2" < "Item 10").
@@ -265,5 +249,67 @@ mod tests {
         };
 
         assert_eq!(LauncherOrder::compare(&a, &b, 2), Ordering::Less);
+    }
+
+    #[test]
+    fn ranking_orders_widely_different_quality_scores_consistently() {
+        let candidate = |id, quality, frecency| CandidateItem {
+            id,
+            title: id,
+            subtitle: None,
+            has_user_alias: false,
+            is_exact_user_alias: false,
+            is_prefix_user_alias: false,
+            is_boosted: false,
+            learned_term: None,
+            frecency,
+            quality,
+            title_is_exact: false,
+            title_is_prefix: false,
+            subtitle_is_exact: false,
+            priority: 0,
+        };
+        let mut candidates = vec![
+            candidate("low", 0, 100.0),
+            candidate("mid", 200, 50.0),
+            candidate("high", 400, 0.0),
+        ];
+        candidates.sort_by(|a, b| LauncherOrder::compare(a, b, 1));
+
+        assert_eq!(
+            candidates.iter().map(|item| item.id).collect::<Vec<_>>(),
+            ["high", "mid", "low"]
+        );
+    }
+
+    #[test]
+    fn favorite_priority_does_not_form_a_cycle_with_frecency() {
+        let candidate = |id, is_boosted, quality, frecency| CandidateItem {
+            id,
+            title: id,
+            subtitle: None,
+            has_user_alias: false,
+            is_exact_user_alias: false,
+            is_prefix_user_alias: false,
+            is_boosted,
+            learned_term: None,
+            frecency,
+            quality,
+            title_is_exact: false,
+            title_is_prefix: false,
+            subtitle_is_exact: false,
+            priority: 0,
+        };
+        let mut candidates = vec![
+            candidate("boosted-low", true, 0, 100.0),
+            candidate("regular-high", false, 400, 250.0),
+            candidate("boosted-mid", true, 350, 0.0),
+        ];
+        candidates.sort_by(|a, b| LauncherOrder::compare(a, b, 1));
+
+        assert_eq!(
+            candidates.iter().map(|item| item.id).collect::<Vec<_>>(),
+            ["boosted-mid", "boosted-low", "regular-high"]
+        );
     }
 }
