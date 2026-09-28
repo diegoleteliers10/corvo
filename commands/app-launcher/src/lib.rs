@@ -358,10 +358,13 @@ fn start_scan(force: bool) {
                 }
             };
             publish_ready_apps(&scopes, &apps);
+            notify_corpus_subscribers();
             corvo_platform::hydrate_shortcut_icons(&mut apps);
             publish_ready_apps(&scopes, &apps);
+            notify_corpus_subscribers();
             corvo_platform::append_start_apps(&mut apps);
             corvo_platform::hydrate_start_app_icons(&mut apps);
+            publish_ready_apps(&scopes, &apps);
             let mut state = corpus()
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -32,9 +32,10 @@ fn main() {
     corvo_app_launcher::warmup();
     corvo_emoji_picker::warmup();
     let config = corvo_config::ConfigService::load();
-    if config.settings().launch_at_login {
-        let _ = corvo_platform::set_launch_at_login(true);
-    }
+    let launch_at_login = config.settings().launch_at_login;
+    std::thread::spawn(move || {
+        let _ = corvo_platform::set_launch_at_login(launch_at_login);
+    });
     let clipboard = &config.settings().clipboard;
     corvo_clipboard_manager::set_preferences(corvo_clipboard_manager::ClipboardPreferences {
         enabled: clipboard.enabled,
