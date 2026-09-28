@@ -126,6 +126,22 @@ pub fn update_cache_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+fn install_error_path() -> io::Result<PathBuf> {
+    Ok(update_cache_dir()?.join("install-error.txt"))
+}
+
+pub fn take_install_error() -> Option<String> {
+    let path = install_error_path().ok()?;
+    let message = fs::read_to_string(&path).ok()?;
+    let _ = fs::remove_file(path);
+    Some(message.trim().to_string())
+}
+
+pub fn cached_update_archive(release: &UpdateRelease) -> Option<PathBuf> {
+    let path = update_cache_dir().ok()?.join(&release.asset.name);
+    path.is_file().then_some(path)
+}
+
 fn state_file_path() -> Option<PathBuf> {
     let proj = ProjectDirs::from("", "", "corvo")?;
     Some(proj.cache_dir().join("update-check.json"))
@@ -530,6 +546,13 @@ pub fn download_and_verify(
 
 /// Applies the update and restarts Corvo via a detached waiter process.
 pub fn install_and_restart(staged_archive: &Path) -> Result<(), UpdateError> {
+    if !staged_archive.is_file() {
+        return Err(UpdateError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "The downloaded update file is missing",
+        )));
+    }
+    let _ = fs::remove_file(install_error_path()?);
     #[cfg(target_os = "macos")]
     {
         install_macos(staged_archive)
@@ -646,24 +669,31 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
 
     let pid = std::process::id();
     let old_bundle = install_parent.join("Corvo.app.old");
+    let error_log = install_error_path()?;
     let script = r#"
-pid="$1"; target="$2"; staging="$3"; old="$4"
+pid="$1"; target="$2"; staging="$3"; old="$4"; error_log="$5"
+fail() { printf '%s\n' "$1" > "$error_log"; exit 1; }
 for i in $(seq 1 150); do
     if ! kill -0 "$pid" 2>/dev/null; then break; fi
     sleep 0.1
 done
-if kill -0 "$pid" 2>/dev/null; then exit 1; fi
-rm -rf "$old" || exit 1
-mv "$target" "$old" || exit 1
+if kill -0 "$pid" 2>/dev/null; then fail "Corvo did not quit before the update."; fi
+rm -rf "$old" || { open -n "$target"; fail "Cannot remove the previous macOS backup."; }
+mv "$target" "$old" || { open -n "$target"; fail "Cannot move the installed Corvo app."; }
 if ! mv "$staging" "$target"; then
-    mv "$old" "$target"
-    exit 1
+    if mv "$old" "$target"; then
+        open -n "$target"
+        fail "Cannot install the downloaded Corvo app. The previous version was restored."
+    fi
+    fail "Cannot install or restore the Corvo app."
 fi
 if ! open -n "$target"; then
     rm -rf "$target"
-    mv "$old" "$target"
-    open -n "$target"
-    exit 1
+    if mv "$old" "$target"; then
+        open -n "$target"
+        fail "Cannot open the updated Corvo app. The previous version was restored."
+    fi
+    fail "Cannot open or restore the Corvo app."
 fi
 "#;
     Command::new("sh")
@@ -674,6 +704,7 @@ fi
         .arg(&bundle_dir)
         .arg(&staging_app)
         .arg(&old_bundle)
+        .arg(&error_log)
         .spawn()?;
 
     std::process::exit(0);
@@ -818,6 +849,7 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
 
     let script_path = target_dir.join(format!(".corvo-update-{}.ps1", std::process::id()));
     fs::write(&script_path, WINDOWS_UPDATE_SCRIPT)?;
+    let error_log = install_error_path()?;
 
     let result = Command::new("powershell.exe")
         .args([
@@ -834,6 +866,7 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
         .arg(&current_exe)
         .arg(&staging_exe)
         .arg(&old_exe)
+        .arg(&error_log)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -851,7 +884,8 @@ param(
     [int]$ParentPid,
     [string]$Target,
     [string]$Staged,
-    [string]$Old
+    [string]$Old,
+    [string]$ErrorLog
 )
 $ErrorActionPreference = 'Stop'
 
@@ -878,17 +912,22 @@ for ($attempt = 0; $attempt -lt 100; $attempt++) {
                 try {
                     [System.IO.File]::Move($Old, $Target)
                 } catch {
-                    [System.IO.File]::WriteAllText("$Target.update-error.log", "Swap failed: $reason. Restore failed: $($_.Exception.Message)")
+                    [System.IO.File]::WriteAllText($ErrorLog, "Swap failed: $reason. Restore failed: $($_.Exception.Message)")
                     exit 1
                 }
                 throw
             }
         }
 
-        Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
+        $newProcess = Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target)) -PassThru
+        Start-Sleep -Milliseconds 500
+        $newProcess.Refresh()
+        if ($newProcess.HasExited) { throw 'The updated Corvo exited after relaunch.' }
+        Remove-Item -LiteralPath $Old -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         exit 0
     } catch {
+        if ($swapped) { break }
         Start-Sleep -Milliseconds 100
     }
 }
@@ -896,19 +935,19 @@ if ($swapped -and [System.IO.File]::Exists($Old)) {
     try {
         [System.IO.File]::Delete($Target)
         [System.IO.File]::Move($Old, $Target)
-        [System.IO.File]::WriteAllText("$Target.update-error.log", "The updated Corvo did not start. The previous version was restored.")
+        [System.IO.File]::WriteAllText($ErrorLog, "The updated Corvo did not start. The previous version was restored.")
         Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
     } catch {
-        [System.IO.File]::WriteAllText("$Target.update-error.log", "Cannot relaunch or restore Corvo: $($_.Exception.Message)")
+        [System.IO.File]::WriteAllText($ErrorLog, "Cannot relaunch or restore Corvo: $($_.Exception.Message)")
         exit 1
     }
 }
 if (-not $swapped -and [System.IO.File]::Exists($Target)) {
     try {
-        [System.IO.File]::WriteAllText("$Target.update-error.log", "The Corvo update could not replace the executable.")
+        [System.IO.File]::WriteAllText($ErrorLog, "The Corvo update could not replace the executable.")
         Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
     } catch {
-        [System.IO.File]::WriteAllText("$Target.update-error.log", "The update and relaunch failed: $($_.Exception.Message)")
+        [System.IO.File]::WriteAllText($ErrorLog, "The update and relaunch failed: $($_.Exception.Message)")
         exit 1
     }
 }
@@ -930,12 +969,15 @@ fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {
         ));
     };
 
-    if let Ok(metadata) = fs::metadata(parent) {
-        if metadata.permissions().readonly() {
-            return Err(UpdateError::PermissionDenied(
-                "System managed installation (/usr/bin). Please update Corvo via your package manager.".into(),
-            ));
-        }
+    if target_path.starts_with("/usr/bin")
+        || target_path.starts_with("/bin")
+        || target_path.starts_with("/snap")
+        || target_path.starts_with("/var/lib/flatpak")
+    {
+        return Err(UpdateError::PermissionDenied(
+            "This Linux installation uses a system package. Update Corvo with the package manager."
+                .into(),
+        ));
     }
 
     let target_name = target_path.file_name().unwrap().to_string_lossy();
@@ -986,34 +1028,55 @@ fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {
     perms.set_mode(0o755);
     fs::set_permissions(&staged_file, perms)?;
 
-    let pid = std::process::id();
-    let target_str = target_path.to_string_lossy();
-    let staged_str = staged_file.to_string_lossy();
+    let old_file = parent.join(format!("{target_name}.old"));
+    let error_log = install_error_path()?;
+    let script = r#"
+pid="$1"; target="$2"; staged="$3"; old="$4"; error_log="$5"
+fail() { printf '%s\n' "$1" > "$error_log"; exit 1; }
+start_old() { nohup "$target" </dev/null >/dev/null 2>&1 & }
+restore() {
+    rm -f "$target"
+    if mv "$old" "$target"; then
+        start_old
+        fail "$1 The previous version was restored."
+    fi
+    fail "$1 The previous version could not be restored."
+}
+for i in $(seq 1 150); do
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+if kill -0 "$pid" 2>/dev/null; then fail "Corvo did not quit before the update."; fi
+rm -f "$old" || { start_old; fail "Cannot remove the previous Linux backup."; }
+if ! mv "$target" "$old"; then
+    start_old
+    fail "Cannot move the installed Corvo executable."
+fi
+if ! mv "$staged" "$target"; then restore "Cannot install the downloaded executable."; fi
+if ! chmod +x "$target"; then restore "Cannot set executable permissions."; fi
+nohup "$target" </dev/null >/dev/null 2>&1 &
+child=$!
+sleep 1
+if ! kill -0 "$child" 2>/dev/null; then restore "The updated Corvo stopped after relaunch."; fi
+rm -f "$old"
+"#;
 
-    let script = format!(
-        "for i in $(seq 1 150); do if ! kill -0 {pid} 2>/dev/null; then break; fi; sleep 0.1; done; \
-         mv -f \"{staged_str}\" \"{target_str}\"; \
-         chmod +x \"{target_str}\"; \
-         \"{target_str}\" &"
-    );
-
-    Command::new("sh").arg("-c").arg(script).spawn()?;
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("corvo-update")
+        .arg(std::process::id().to_string())
+        .arg(&target_path)
+        .arg(&staged_file)
+        .arg(&old_file)
+        .arg(&error_log)
+        .spawn()?;
 
     std::process::exit(0);
 }
 
 /// Cleans up any leftover `.old` executables or staging bundles on startup.
 pub fn cleanup_old_installations() {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(exe) = std::env::current_exe() {
-            let old_exe = exe.with_extension("exe.old");
-            if old_exe.exists() {
-                let _ = fs::remove_file(old_exe);
-            }
-        }
-    }
-
     #[cfg(target_os = "macos")]
     {
         if let Ok(exe) = std::env::current_exe() {

@@ -191,6 +191,14 @@ pub enum UpdateStatusUI {
         percent: f32,
     },
     ReadyToInstall(Box<corvo_platform::UpdateRelease>, std::path::PathBuf),
+    Installing {
+        release: Box<corvo_platform::UpdateRelease>,
+    },
+    InstallFailed {
+        release: Box<corvo_platform::UpdateRelease>,
+        staged: std::path::PathBuf,
+        message: String,
+    },
     Error(String),
 }
 
@@ -353,10 +361,24 @@ impl SettingsView {
         // A background check may have found a newer release before this
         // window opened. Show its changelog with Skip / Download buttons
         // right away instead of an empty update section.
-        if let Some(release) = corvo_platform::load_pending_release() {
-            if !corvo_platform::is_version_dismissed(&release.tag_name) {
+        let pending = corvo_platform::load_pending_release()
+            .filter(|release| !corvo_platform::is_version_dismissed(&release.tag_name));
+        match (pending, corvo_platform::take_install_error()) {
+            (Some(release), Some(message)) => {
+                view.update_status = match corvo_platform::cached_update_archive(&release) {
+                    Some(staged) => UpdateStatusUI::InstallFailed {
+                        release: Box::new(release),
+                        staged,
+                        message,
+                    },
+                    None => UpdateStatusUI::Error(message),
+                };
+            }
+            (Some(release), None) => {
                 view.update_status = UpdateStatusUI::Available(Box::new(release));
             }
+            (None, Some(message)) => view.update_status = UpdateStatusUI::Error(message),
+            (None, None) => {}
         }
         view
     }
@@ -7455,7 +7477,9 @@ impl SettingsView {
     pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.update_status,
-            UpdateStatusUI::Checking | UpdateStatusUI::Downloading { .. }
+            UpdateStatusUI::Checking
+                | UpdateStatusUI::Downloading { .. }
+                | UpdateStatusUI::Installing { .. }
         ) {
             return;
         }
@@ -7561,6 +7585,40 @@ impl SettingsView {
         .detach();
     }
 
+    fn start_install(
+        &mut self,
+        release: corvo_platform::UpdateRelease,
+        staged: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.update_status, UpdateStatusUI::Installing { .. }) {
+            return;
+        }
+        self.update_status = UpdateStatusUI::Installing {
+            release: Box::new(release.clone()),
+        };
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let install_path = staged.clone();
+            let result =
+                smol::unblock(move || corvo_platform::install_and_restart(&install_path)).await;
+            let message = match result {
+                Ok(()) => "Corvo did not restart after the update".to_string(),
+                Err(error) => error.to_string(),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.update_status = UpdateStatusUI::InstallFailed {
+                    release: Box::new(release),
+                    staged,
+                    message,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn render_software_update_action_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         match &self.update_status {
             UpdateStatusUI::Idle => Some(
@@ -7660,8 +7718,15 @@ impl SettingsView {
                     .child("Cancel")
                     .into_any_element(),
             ),
-            UpdateStatusUI::ReadyToInstall(_rel, staged) => {
+            UpdateStatusUI::ReadyToInstall(rel, staged)
+            | UpdateStatusUI::InstallFailed {
+                release: rel,
+                staged,
+                ..
+            } => {
+                let rel_clone = (**rel).clone();
                 let staged_clone = staged.clone();
+                let retry = matches!(self.update_status, UpdateStatusUI::InstallFailed { .. });
                 Some(
                     div()
                         .id("btn-relaunch-corvo")
@@ -7675,14 +7740,31 @@ impl SettingsView {
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.85))
                         .on_click(cx.listener(
-                            move |_this: &mut Self, _: &ClickEvent, _window, _cx| {
-                                let _ = corvo_platform::install_and_restart(&staged_clone);
+                            move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                                this.start_install(rel_clone.clone(), staged_clone.clone(), cx);
                             },
                         ))
-                        .child("Relaunch Corvo")
+                        .child(if retry {
+                            "Retry Relaunch"
+                        } else {
+                            "Relaunch Corvo"
+                        })
                         .into_any_element(),
                 )
             }
+            UpdateStatusUI::Installing { .. } => Some(
+                div()
+                    .id("btn-installing-update")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT_DIM))
+                    .child("Installing...")
+                    .into_any_element(),
+            ),
             UpdateStatusUI::Error(_) => Some(
                 div()
                     .id("btn-retry-check")
@@ -7761,9 +7843,21 @@ impl SettingsView {
                 "Click Relaunch to apply the update immediately.".to_string(),
                 rgb(COLOR_ACCENT),
             ),
+            UpdateStatusUI::Installing { release, .. } => (
+                phosphor_svgs::style::regular::SPINNER,
+                format!("Installing {}", release.tag_name),
+                "Corvo will restart when ready.".to_string(),
+                rgb(COLOR_ACCENT),
+            ),
+            UpdateStatusUI::InstallFailed { message, .. } => (
+                phosphor_svgs::style::regular::WARNING_CIRCLE,
+                "Relaunch failed".to_string(),
+                message.clone(),
+                rgb(COLOR_DESTRUCTIVE),
+            ),
             UpdateStatusUI::Error(err) => (
                 phosphor_svgs::style::regular::WARNING_CIRCLE,
-                "Check failed".to_string(),
+                "Update failed".to_string(),
                 err.clone(),
                 rgb(COLOR_DESTRUCTIVE),
             ),
@@ -8638,8 +8732,7 @@ pub fn prewarm_settings_window(cx: &mut App) {
             return;
         }
     }
-    let display_id =
-        corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64));
+    let display_id = corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64));
     let window_size = size(px(780.0), px(540.0));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -8740,7 +8833,12 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
             show_settings_window_win32(handle, cx);
             let _ = handle.update(cx, |view, window, cx| {
                 view.navigate_to_tab(tab, cx);
-                view.check_for_updates(cx);
+                if !matches!(
+                    view.update_status,
+                    UpdateStatusUI::Error(_) | UpdateStatusUI::InstallFailed { .. }
+                ) {
+                    view.check_for_updates(cx);
+                }
                 window.activate_window();
             });
             #[cfg(not(target_os = "windows"))]
@@ -8781,7 +8879,12 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
             if tab != SettingsTab::General {
                 view.navigate_to_tab(tab, cx);
             }
-            view.check_for_updates(cx);
+            if !matches!(
+                view.update_status,
+                UpdateStatusUI::Error(_) | UpdateStatusUI::InstallFailed { .. }
+            ) {
+                view.check_for_updates(cx);
+            }
             view
         })
     });
@@ -8815,13 +8918,18 @@ fn show_update_window(
             show_settings_window_win32(handle, cx);
             let _ = handle.update(cx, |view, window, cx| {
                 view.navigate_to_tab(SettingsTab::About, cx);
-                match staged {
-                    Some(path) => {
-                        view.update_status =
-                            UpdateStatusUI::ReadyToInstall(Box::new(release), path)
-                    }
-                    None => {
-                        view.update_status = UpdateStatusUI::Available(Box::new(release));
+                if !matches!(
+                    view.update_status,
+                    UpdateStatusUI::Error(_) | UpdateStatusUI::InstallFailed { .. }
+                ) {
+                    match staged {
+                        Some(path) => {
+                            view.update_status =
+                                UpdateStatusUI::ReadyToInstall(Box::new(release), path)
+                        }
+                        None => {
+                            view.update_status = UpdateStatusUI::Available(Box::new(release));
+                        }
                     }
                 }
                 window.activate_window();
@@ -8863,11 +8971,16 @@ fn show_update_window(
         cx.new(|cx| {
             let mut view = SettingsView::new(cx, store);
             view.navigate_to_tab(SettingsTab::About, cx);
-            match staged {
-                Some(path) => {
-                    view.update_status = UpdateStatusUI::ReadyToInstall(Box::new(release), path)
+            if !matches!(
+                view.update_status,
+                UpdateStatusUI::Error(_) | UpdateStatusUI::InstallFailed { .. }
+            ) {
+                match staged {
+                    Some(path) => {
+                        view.update_status = UpdateStatusUI::ReadyToInstall(Box::new(release), path)
+                    }
+                    None => view.update_status = UpdateStatusUI::Available(Box::new(release)),
                 }
-                None => view.update_status = UpdateStatusUI::Available(Box::new(release)),
             }
             view
         })

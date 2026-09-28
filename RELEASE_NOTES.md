@@ -1,3 +1,16 @@
+# Corvo 0.2.0
+
+## Updates
+
+- The Relaunch Corvo button prepares the update without blocking Settings. It shows install errors and lets you retry with the downloaded file.
+- Windows detects an updated Corvo process that exits within 500 ms of relaunch. It then restores the previous executable and records the failure.
+- macOS and Linux record errors from the restart helper. Linux restores the previous executable if the new one stops within 1 s of relaunch.
+- Linux system package installs continue to use the package manager for updates.
+
+## Upgrade from 0.1.9
+
+If the Relaunch Corvo button in 0.1.9 does nothing, download and install 0.2.0 manually once. The fix runs only after 0.2.0 starts.
+
 # Corvo 0.1.9
 
 ## Windows

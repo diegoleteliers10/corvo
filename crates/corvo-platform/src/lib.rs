@@ -13,9 +13,10 @@ pub mod updates;
 pub use hotkey::HotkeyIntent;
 pub use permissions::PermissionKind;
 pub use updates::{
-    check_for_updates, cleanup_old_installations, clear_pending_release, dismiss_version,
-    download_and_verify, install_and_restart, is_version_dismissed, load_pending_release,
-    save_pending_release, UpdateChannel, UpdateError, UpdateRelease,
+    cached_update_archive, check_for_updates, cleanup_old_installations, clear_pending_release,
+    dismiss_version, download_and_verify, install_and_restart, is_version_dismissed,
+    load_pending_release, save_pending_release, take_install_error, UpdateChannel, UpdateError,
+    UpdateRelease,
 };
 
 mod processes;
