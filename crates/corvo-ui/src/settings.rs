@@ -8580,10 +8580,65 @@ impl Render for SettingsView {
 struct SettingsWindow(WindowHandle<SettingsView>);
 impl Global for SettingsWindow {}
 
+/// Shows the settings window via Win32 ShowWindow. Required when the window was
+/// pre-created with show:false and needs to be made visible on demand.
+#[cfg(target_os = "windows")]
+fn show_settings_window_win32(handle: WindowHandle<SettingsView>, cx: &mut App) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let _ = handle.update(cx, |_, window, _| {
+        if let Ok(wh) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::Win32(wh) = wh.as_raw() {
+                corvo_platform::set_launcher_window_visible(wh.hwnd.get(), true);
+            }
+        }
+    });
+}
+
+/// Pre-creates the settings window hidden so the first open is instant.
+/// Call once at app startup on Windows.
+#[cfg(target_os = "windows")]
+pub fn prewarm_settings_window(cx: &mut App) {
+    if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            return;
+        }
+    }
+    let display_id =
+        corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64));
+    let window_size = size(px(780.0), px(540.0));
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            display_id,
+            window_size,
+            cx,
+        ))),
+        display_id,
+        titlebar: Some(gpui::TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(14.0), px(14.0))),
+        }),
+        kind: WindowKind::Normal,
+        is_resizable: true,
+        is_movable: true,
+        focus: false,
+        show: false,
+        ..Default::default()
+    };
+    let store = cx.global::<crate::StoreGlobal>().0.clone();
+    if let Ok(handle) = cx.open_window(options, move |_window, cx| {
+        cx.new(|cx| SettingsView::new(cx, store))
+    }) {
+        cx.set_global(SettingsWindow(handle));
+    }
+}
+
 /// Opens the Settings and Preferences window to a specific tab.
 pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
     if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
+            #[cfg(target_os = "windows")]
+            show_settings_window_win32(handle, cx);
             let _ = handle.update(cx, |view, window, cx| {
                 view.navigate_to_tab(tab, cx);
                 window.activate_window();
@@ -8643,6 +8698,8 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
 pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
     if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
+            #[cfg(target_os = "windows")]
+            show_settings_window_win32(handle, cx);
             let _ = handle.update(cx, |view, window, cx| {
                 view.navigate_to_tab(tab, cx);
                 view.check_for_updates(cx);

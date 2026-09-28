@@ -8207,6 +8207,17 @@ pub fn run(
         })
         .detach();
 
+        // Pre-create the settings window hidden so the first open is instant.
+        // 400ms delay lets the launcher render its first frame first.
+        #[cfg(target_os = "windows")]
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            smol::Timer::after(std::time::Duration::from_millis(400)).await;
+            let _ = cx.update(|cx| {
+                crate::settings::prewarm_settings_window(cx);
+            });
+        })
+        .detach();
+
         // Initialize dynamic global hotkey subsystem
         let hotkey_mgr = corvo_platform::hotkey::HotkeyManager::new(intent_tx);
         let hotkey_holder = std::rc::Rc::new(std::cell::RefCell::new(hotkey_mgr));
