@@ -349,7 +349,15 @@ pub fn setup_with_bindings(
 /// Fallback backward-compatible setup function.
 pub fn setup(tx: smol::channel::Sender<()>) -> Option<HotkeyGuard> {
     let (intent_tx, intent_rx) = smol::channel::unbounded::<HotkeyIntent>();
-    let guard = setup_with_bindings("cmd+space", Vec::new(), intent_tx)?;
+    let guard = setup_with_bindings(
+        if cfg!(target_os = "macos") {
+            "cmd+space"
+        } else {
+            "alt+space"
+        },
+        Vec::new(),
+        intent_tx,
+    )?;
     smol::spawn(async move {
         while let Ok(intent) = intent_rx.recv().await {
             if intent == HotkeyIntent::ToggleLauncher {

@@ -138,6 +138,7 @@ pub fn listening_port_snapshot() -> PlatformResult<Vec<ListeningPortSnapshot>> {
 
 #[cfg(target_os = "windows")]
 fn windows_listening_port_snapshot() -> PlatformResult<Vec<ListeningPortSnapshot>> {
+    use std::os::windows::process::CommandExt;
     let output = std::process::Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -145,6 +146,7 @@ fn windows_listening_port_snapshot() -> PlatformResult<Vec<ListeningPortSnapshot
             "-Command",
             "Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { '{0}|{1}' -f $_.LocalPort, $_.OwningProcess }",
         ])
+        .creation_flags(0x0800_0000)
         .output()
         .map_err(|error| PlatformError::Os(format!("could not query listening ports: {error}")))?;
     if !output.status.success() {

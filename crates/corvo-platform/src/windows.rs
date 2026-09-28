@@ -1,10 +1,13 @@
 //! Windows implementation of the shared desktop operations.
 
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use sha2::{Digest, Sha256};
 
@@ -708,6 +711,7 @@ pub fn adjust_audio_output_with_level(delta: f32) -> PlatformResult<f32> {
 fn run(program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> PlatformResult<()> {
     let status = Command::new(program)
         .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|error| PlatformError::Os(format!("could not start {program}: {error}")))?;
     if status.success() {
@@ -753,6 +757,7 @@ fn powershell_output(script: &str) -> PlatformResult<String> {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|error| PlatformError::Os(format!("could not start PowerShell: {error}")))?;
     if !output.status.success() {
@@ -879,6 +884,47 @@ foreach ($item in $items) {{
         try {{ $image.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png) }} finally {{ $image.Dispose() }}
     }} catch {{ }}
 }}
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct CorvoShellFileInfo {{
+    public IntPtr hIcon;
+    public int iIcon;
+    public uint dwAttributes;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+}}
+public static class CorvoShellIconNative {{
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern int SHParseDisplayName(string name, IntPtr binding, out IntPtr pidl, uint attributes, out uint parsedAttributes);
+    [DllImport("shell32.dll", EntryPoint = "SHGetFileInfoW", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SHGetFileInfo(IntPtr pidl, uint attributes, ref CorvoShellFileInfo info, uint size, uint flags);
+    [DllImport("ole32.dll")] public static extern void CoTaskMemFree(IntPtr memory);
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr handle);
+}}
+'@
+foreach ($item in $items) {{
+    if (Test-Path -LiteralPath ([string]$item.target) -PathType Leaf) {{ continue }}
+    $pidl = [IntPtr]::Zero
+    $info = [CorvoShellFileInfo]::new()
+    $bitmap = $null
+    try {{
+        $parsedAttributes = [uint32]0
+        $name = 'shell:AppsFolder\' + [string]$item.app_id
+        if ([CorvoShellIconNative]::SHParseDisplayName($name, [IntPtr]::Zero, [ref]$pidl, 0, [ref]$parsedAttributes) -ne 0) {{ continue }}
+        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][CorvoShellFileInfo])
+        $flags = [uint32](0x00000008 -bor 0x00000100)
+        if ([CorvoShellIconNative]::SHGetFileInfo($pidl, 0, [ref]$info, $size, $flags) -eq [IntPtr]::Zero) {{ continue }}
+        if ($info.hIcon -eq [IntPtr]::Zero) {{ continue }}
+        $bitmap = [System.Drawing.Icon]::FromHandle($info.hIcon).ToBitmap()
+        $bitmap.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png)
+    }} catch {{ }} finally {{
+        if ($bitmap) {{ $bitmap.Dispose() }}
+        if ($info.hIcon -ne [IntPtr]::Zero) {{ [void][CorvoShellIconNative]::DestroyIcon($info.hIcon) }}
+        if ($pidl -ne [IntPtr]::Zero) {{ [CorvoShellIconNative]::CoTaskMemFree($pidl) }}
+    }}
+}}
 "#
     );
     if powershell_output(&script).is_err() {
@@ -982,11 +1028,16 @@ foreach ($item in $items) {{
         if (-not $iconPath -or -not (Test-Path -LiteralPath $iconPath)) {{ continue }}
         $large = New-Object IntPtr[] 1
         $small = New-Object IntPtr[] 1
-        if ([CorvoIconNative]::ExtractIconEx($iconPath, $iconIndex, $large, $small, 1) -eq 0) {{ continue }}
-        $handle = $large[0]
-        if ($handle -eq [IntPtr]::Zero) {{ $handle = $small[0] }}
-        if ($handle -eq [IntPtr]::Zero) {{ continue }}
-        $icon = [System.Drawing.Icon]::FromHandle($handle)
+        if ([CorvoIconNative]::ExtractIconEx($iconPath, $iconIndex, $large, $small, 1) -gt 0) {{
+            $handle = $large[0]
+            if ($handle -eq [IntPtr]::Zero) {{ $handle = $small[0] }}
+        }}
+        if ($handle -ne [IntPtr]::Zero) {{
+            $icon = [System.Drawing.Icon]::FromHandle($handle)
+        }} else {{
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath)
+        }}
+        if (-not $icon) {{ continue }}
         $bitmap = $icon.ToBitmap()
         $bitmap.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png)
     }} catch {{ }}

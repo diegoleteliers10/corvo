@@ -168,7 +168,12 @@ impl Default for QuicklinksSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: "cmd+space".into(),
+            hotkey: if cfg!(target_os = "macos") {
+                "cmd+space"
+            } else {
+                "alt+space"
+            }
+            .into(),
             theme: "system".into(),
             launch_at_login: false,
             show_menu_bar: true,

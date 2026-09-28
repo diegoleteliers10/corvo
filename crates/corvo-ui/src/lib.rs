@@ -8031,6 +8031,7 @@ pub fn run(
     intent_rx: Receiver<corvo_platform::HotkeyIntent>,
 ) {
     gpui_platform::application().run(|cx: &mut App| {
+        cx.set_quit_mode(gpui::QuitMode::Explicit);
         // Runs after GPUI sets the regular policy, so the launcher
         // stays out of the Dock and Cmd+Tab (SPEC §6).
         corvo_platform::run_as_agent();

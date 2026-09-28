@@ -484,8 +484,10 @@ pub fn extract_app_icon(_bundle: &std::path::Path) -> Option<PathBuf> {
 pub fn run_shell(cmd: &str) -> PlatformResult<()> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let status = std::process::Command::new("cmd")
             .args(["/c", cmd])
+            .creation_flags(0x0800_0000)
             .status()
             .map_err(|error| {
                 PlatformError::Os(format!("could not start shell command: {error}"))
@@ -536,8 +538,10 @@ pub fn open_url(url: &str) -> PlatformResult<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let status = std::process::Command::new("cmd")
             .args(["/c", "start", "", url])
+            .creation_flags(0x0800_0000)
             .spawn();
         if status.is_ok() {
             Ok(())

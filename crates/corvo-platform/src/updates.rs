@@ -680,7 +680,12 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
          start \"\" \"{target_str}\""
     );
 
-    Command::new("cmd").arg("/c").arg(script).spawn()?;
+    use std::os::windows::process::CommandExt;
+    Command::new("cmd")
+        .arg("/c")
+        .arg(script)
+        .creation_flags(0x0800_0000)
+        .spawn()?;
 
     std::process::exit(0);
 }
