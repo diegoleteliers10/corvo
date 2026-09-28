@@ -175,7 +175,7 @@ impl Default for Settings {
             }
             .into(),
             theme: "system".into(),
-            launch_at_login: false,
+            launch_at_login: true,
             show_menu_bar: true,
             compact_mode: false,
             pop_to_root_option: 1, // After 90 seconds

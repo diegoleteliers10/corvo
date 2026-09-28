@@ -1594,6 +1594,47 @@ fn command_error(context: &str, error: std::io::Error) -> PlatformError {
     }
 }
 
+/// Queries whether launch at login is enabled via ~/.config/autostart/corvo.desktop.
+pub fn is_launch_at_login_enabled() -> bool {
+    if let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    {
+        config_dir.join("autostart/corvo.desktop").exists()
+    } else {
+        false
+    }
+}
+
+/// Enables or disables launch at login via ~/.config/autostart/corvo.desktop on Linux.
+pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
+    let autostart_dir = if let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    {
+        config_dir.join("autostart")
+    } else {
+        return Err(PlatformError::Os("could not resolve autostart directory".into()));
+    };
+
+    let desktop_path = autostart_dir.join("corvo.desktop");
+    if enabled {
+        let _ = std::fs::create_dir_all(&autostart_dir);
+        let exe = std::env::current_exe().map_err(|e| PlatformError::Os(e.to_string()))?;
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Corvo\nComment=Fast keyboard launcher\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+            exe.display()
+        );
+        std::fs::write(&desktop_path, content)
+            .map_err(|e| PlatformError::Os(format!("failed to write autostart desktop entry: {e}")))
+    } else {
+        if desktop_path.exists() {
+            let _ = std::fs::remove_file(desktop_path);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_desktop_entry, parse_wmctrl_line};

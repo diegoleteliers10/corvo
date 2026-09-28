@@ -1038,7 +1038,9 @@ impl SettingsView {
                         None,
                         self.settings.launch_at_login,
                         cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.settings.launch_at_login = !this.settings.launch_at_login;
+                            let enabled = !this.settings.launch_at_login;
+                            this.settings.launch_at_login = enabled;
+                            let _ = corvo_platform::set_launch_at_login(enabled);
                             this.save_settings_file();
                             cx.notify();
                         }),

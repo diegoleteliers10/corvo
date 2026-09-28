@@ -1199,3 +1199,53 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     output
 }
+
+/// Queries whether launch at login is enabled in the Windows registry Run key.
+pub fn is_launch_at_login_enabled() -> bool {
+    let output = Command::new("reg")
+        .args(["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "Corvo"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    output.is_ok_and(|out| out.status.success())
+}
+
+/// Enables or disables launch at login via HKCU Run registry key on Windows.
+pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| PlatformError::Os(e.to_string()))?;
+        let exe_str = format!("\"{}\"", exe.display());
+        let status = Command::new("reg")
+            .args([
+                "add",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "/v",
+                "Corvo",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &exe_str,
+                "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| PlatformError::Os(format!("failed to add registry entry: {e}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(PlatformError::Os("failed to set registry run key".into()))
+        }
+    } else {
+        let _ = Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "/v",
+                "Corvo",
+                "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        Ok(())
+    }
+}
+

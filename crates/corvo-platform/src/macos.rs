@@ -2220,6 +2220,123 @@ pub fn apply_window_layout(placements: &[(String, String)]) -> PlatformResult<()
     Ok(())
 }
 
+/// Queries whether launch at login is currently enabled.
+pub fn is_launch_at_login_enabled() -> bool {
+    if let Some(home) = std::env::var_os("HOME") {
+        let plist_path = Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
+        if plist_path.exists() {
+            return true;
+        }
+    }
+    let output = std::process::Command::new("osascript")
+        .args(["-e", "tell application \"System Events\" to get name of every login item"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let names = String::from_utf8_lossy(&output.stdout);
+            return names.split(',').any(|name| name.trim().eq_ignore_ascii_case("Corvo"));
+        }
+    }
+    false
+}
+
+/// Enables or disables launch at login on macOS.
+pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
+    let app_path = find_corvo_app_path();
+
+    if enabled {
+        if let Some(ref path) = app_path {
+            let path_str = path.to_string_lossy();
+            let script = format!(
+                "tell application \"System Events\" to if not (exists login item \"Corvo\") then make login item at end with properties {{name:\"Corvo\", path:\"{path_str}\", hidden:false}}"
+            );
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output();
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let launch_agents_dir = Path::new(&home).join("Library/LaunchAgents");
+            let _ = std::fs::create_dir_all(&launch_agents_dir);
+            let plist_path = launch_agents_dir.join("sh.corvo.corvo.plist");
+
+            let target_exe = if let Some(ref path) = app_path {
+                path.join("Contents/MacOS/corvo")
+            } else if let Ok(exe) = std::env::current_exe() {
+                exe
+            } else {
+                PathBuf::from("/Applications/Corvo.app/Contents/MacOS/corvo")
+            };
+
+            let plist_content = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>sh.corvo.corvo</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
+"#,
+                target_exe.display()
+            );
+
+            if std::fs::write(&plist_path, plist_content).is_ok() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["load", "-w", &plist_path.to_string_lossy()])
+                    .output();
+            }
+        }
+    } else {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to if exists login item \"Corvo\" then delete login item \"Corvo\""])
+            .output();
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let plist_path = Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
+            if plist_path.exists() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", "-w", &plist_path.to_string_lossy()])
+                    .output();
+                let _ = std::fs::remove_file(plist_path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn find_corvo_app_path() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut bundle_dir = exe;
+        while let Some(parent) = bundle_dir.parent() {
+            if bundle_dir.extension().and_then(|e| e.to_str()) == Some("app") {
+                return Some(bundle_dir);
+            }
+            bundle_dir = parent.to_path_buf();
+        }
+    }
+    let standard = PathBuf::from("/Applications/Corvo.app");
+    if standard.exists() {
+        return Some(standard);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let user_app = Path::new(&home).join("Applications/Corvo.app");
+        if user_app.exists() {
+            return Some(user_app);
+        }
+    }
+    None
+}
+
 fn unimplemented_os(what: &str) -> PlatformError {
     PlatformError::Unsupported(format!("macos {what} arrives in phase 4"))
 }
@@ -2296,4 +2413,17 @@ mod tests {
         assert!(!super::is_valid_png(&path));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn launch_at_login_toggles_cleanly() {
+        let original = super::is_launch_at_login_enabled();
+        super::set_launch_at_login(true).expect("enables launch at login");
+        assert!(super::is_launch_at_login_enabled());
+        super::set_launch_at_login(false).expect("disables launch at login");
+        assert!(!super::is_launch_at_login_enabled());
+        if original {
+            let _ = super::set_launch_at_login(true);
+        }
+    }
 }
+

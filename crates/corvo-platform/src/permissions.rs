@@ -79,11 +79,7 @@ pub fn request(kind: PermissionKind) {
                 super::macos::request_screen_recording();
             }
             PermissionKind::Calendars => {
-                let status = super::macos::calendar_authorization_status();
-                if status == 0 {
-                    super::macos::request_calendar_access();
-                    return;
-                }
+                super::macos::request_calendar_access();
             }
             _ => {}
         }

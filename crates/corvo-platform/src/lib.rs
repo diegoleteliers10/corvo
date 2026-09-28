@@ -505,6 +505,33 @@ pub fn extract_app_icon(_bundle: &std::path::Path) -> Option<PathBuf> {
     return None;
 }
 
+/// Queries whether launch at login is currently enabled on the host platform.
+pub fn is_launch_at_login_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::is_launch_at_login_enabled();
+    #[cfg(target_os = "windows")]
+    return windows::is_launch_at_login_enabled();
+    #[cfg(target_os = "linux")]
+    return linux::is_launch_at_login_enabled();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return false;
+}
+
+/// Enables or disables launch at login on the host platform.
+pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::set_launch_at_login(enabled);
+    #[cfg(target_os = "windows")]
+    return windows::set_launch_at_login(enabled);
+    #[cfg(target_os = "linux")]
+    return linux::set_launch_at_login(enabled);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
 /// Executes a shell command on the host platform.
 pub fn run_shell(cmd: &str) -> PlatformResult<()> {
     #[cfg(target_os = "windows")]
