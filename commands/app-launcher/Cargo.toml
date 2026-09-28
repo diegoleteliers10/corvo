@@ -1,6 +1,6 @@
 [package]
 name = "corvo-app-launcher"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 publish = false
 
@@ -10,3 +10,5 @@ corvo-config = { workspace = true }
 corvo-core = { workspace = true }
 corvo-platform = { workspace = true }
 smol = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"

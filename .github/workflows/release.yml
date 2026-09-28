@@ -127,8 +127,34 @@ jobs:
           ls -la "${{ matrix.appimage_name }}"
 
       # Packaging for macOS (App Bundle)
+      - name: Import macOS signing identity
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12_BASE64" ] || [ -z "$MACOS_CERTIFICATE_PASSWORD" ] || [ -z "$MACOS_SIGNING_IDENTITY" ]; then
+            echo "The macOS release needs the stable Corvo signing identity."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/corvo-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$RUNNER_TEMP/corvo-signing.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/corvo-signing.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          openssl pkcs12 -in "$RUNNER_TEMP/corvo-signing.p12" -clcerts -nokeys -passin env:MACOS_CERTIFICATE_PASSWORD | openssl x509 -out "$RUNNER_TEMP/corvo-signing.pem"
+          security add-trusted-cert -r trustRoot -k "$KEYCHAIN" "$RUNNER_TEMP/corvo-signing.pem"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "\"$MACOS_SIGNING_IDENTITY\""
+          echo "CORVO_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          rm "$RUNNER_TEMP/corvo-signing.p12" "$RUNNER_TEMP/corvo-signing.pem"
+
       - name: Package Binary (macOS)
         if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           mkdir -p dist/Corvo.app/Contents/MacOS
           mkdir -p dist/Corvo.app/Contents/Resources
@@ -169,7 +195,11 @@ jobs:
           </plist>
           EOF
 
-          codesign --force --deep -s - dist/Corvo.app
+          codesign --force --deep --options runtime --keychain "$CORVO_SIGNING_KEYCHAIN" -s "$MACOS_SIGNING_IDENTITY" dist/Corvo.app
+          codesign --verify --deep --strict --verbose=2 dist/Corvo.app
+          ACTUAL_REQUIREMENT="$(codesign -dr - dist/Corvo.app 2>&1 | sed -n 's/^designated => //p')"
+          EXPECTED_REQUIREMENT="$(cat assets/macos-signing-requirement.txt)"
+          test "$ACTUAL_REQUIREMENT" = "$EXPECTED_REQUIREMENT"
 
           cd dist
           tar -czf ../${{ matrix.artifact_name }} Corvo.app

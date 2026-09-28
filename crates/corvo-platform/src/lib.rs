@@ -13,14 +13,14 @@ pub mod updates;
 pub use hotkey::HotkeyIntent;
 pub use permissions::PermissionKind;
 pub use updates::{
-    UpdateChannel, UpdateError, UpdateRelease, check_for_updates, cleanup_old_installations,
-    dismiss_version, download_and_verify, install_and_restart, is_version_dismissed,
+    check_for_updates, cleanup_old_installations, dismiss_version, download_and_verify,
+    install_and_restart, is_version_dismissed, UpdateChannel, UpdateError, UpdateRelease,
 };
 
 mod processes;
 pub use processes::{
-    ListeningPortSnapshot, ProcessIdentity, ProcessSnapshot, TerminationMode,
-    listening_port_snapshot, process_snapshot, terminate_process,
+    listening_port_snapshot, process_snapshot, terminate_process, ListeningPortSnapshot,
+    ProcessIdentity, ProcessSnapshot, TerminationMode,
 };
 
 #[cfg(target_os = "macos")]
@@ -41,7 +41,7 @@ pub struct WindowHandle {
 }
 
 /// One installed application, as `app-launcher` sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppEntry {
     pub name: String,
     pub path: PathBuf,
@@ -414,6 +414,31 @@ pub fn list_apps_in_scopes(_scopes: &[String]) -> PlatformResult<Vec<AppEntry>> 
     return macos::list_apps_in_scopes(_scopes);
     #[cfg(not(target_os = "macos"))]
     platform_ops().list_apps()
+}
+
+#[cfg(target_os = "windows")]
+pub fn hydrate_app_icons(apps: &mut [AppEntry]) {
+    windows::hydrate_app_icons(apps);
+}
+
+#[cfg(target_os = "windows")]
+pub fn hydrate_shortcut_icons(apps: &mut [AppEntry]) {
+    windows::hydrate_shortcut_icons(apps);
+}
+
+#[cfg(target_os = "windows")]
+pub fn hydrate_start_app_icons(apps: &mut [AppEntry]) {
+    windows::hydrate_start_app_icons(apps);
+}
+
+#[cfg(target_os = "windows")]
+pub fn append_start_apps(apps: &mut Vec<AppEntry>) {
+    windows::append_start_apps(apps);
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_launcher_window_visible(handle: isize, visible: bool) {
+    windows::set_launcher_window_visible(handle, visible);
 }
 
 /// Finds an app bundle and data named with its bundle identifier.

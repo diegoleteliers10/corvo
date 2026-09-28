@@ -542,35 +542,6 @@ ConvertTo-Json -InputObject $items -Compress -Depth 3
         let mut apps = Vec::new();
         let mut seen = HashSet::new();
 
-        let script = r#"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$items = @(Get-StartApps | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; app_id = [string]$_.AppID } })
-ConvertTo-Json -InputObject $items -Compress -Depth 3
-"#;
-        if let Ok(output) = powershell_output(script) {
-            if let Ok(items) = parse_json_array(&output, "Start Apps") {
-                for item in items {
-                    let (Some(name), Some(app_id)) = (
-                        item.get("name").and_then(serde_json::Value::as_str),
-                        item.get("app_id").and_then(serde_json::Value::as_str),
-                    ) else {
-                        continue;
-                    };
-                    if name.trim().is_empty() || app_id.trim().is_empty() {
-                        continue;
-                    }
-                    let key = format!("startapp:{}", app_id.to_lowercase());
-                    if seen.insert(key) {
-                        apps.push(AppEntry {
-                            name: name.to_owned(),
-                            path: PathBuf::from(format!("shell:AppsFolder\\{app_id}")),
-                            icon_png: None,
-                        });
-                    }
-                }
-            }
-        }
-
         for root in start_menu_roots() {
             collect_shortcuts(&root, &mut |path| {
                 let name = path
@@ -592,9 +563,6 @@ ConvertTo-Json -InputObject $items -Compress -Depth 3
             });
         }
 
-        fill_start_app_icons(&mut apps);
-        fill_shortcut_icons(&mut apps);
-
         apps.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
         Ok(apps)
     }
@@ -615,6 +583,73 @@ ConvertTo-Json -InputObject $items -Compress -Depth 3
         );
         run_powershell(&script)
     }
+}
+
+pub fn append_start_apps(apps: &mut Vec<AppEntry>) {
+    let shortcut_names: HashSet<String> = apps
+        .iter()
+        .filter(|app| {
+            app.path
+                .extension()
+                .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("lnk"))
+        })
+        .map(|app| app.name.trim().to_lowercase())
+        .collect();
+    let script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$items = @(Get-StartApps | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; app_id = [string]$_.AppID } })
+ConvertTo-Json -InputObject $items -Compress -Depth 3
+"#;
+    let Ok(output) = powershell_output(script) else {
+        return;
+    };
+    let Ok(items) = parse_json_array(&output, "Start Apps") else {
+        return;
+    };
+    apps.retain(|app| !app.path.to_string_lossy().starts_with("shell:AppsFolder\\"));
+    let mut seen = HashSet::new();
+    for item in items {
+        let (Some(name), Some(app_id)) = (
+            item.get("name").and_then(serde_json::Value::as_str),
+            item.get("app_id").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if name.trim().is_empty()
+            || app_id.trim().is_empty()
+            || shortcut_names.contains(&name.trim().to_lowercase())
+            || !seen.insert(app_id.to_lowercase())
+        {
+            continue;
+        }
+        apps.push(AppEntry {
+            name: name.to_owned(),
+            path: PathBuf::from(format!("shell:AppsFolder\\{app_id}")),
+            icon_png: cached_icon_for_key(&app_id.to_lowercase()),
+        });
+    }
+    apps.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+}
+
+pub fn hydrate_app_icons(apps: &mut [AppEntry]) {
+    fill_shortcut_icons(apps);
+    fill_start_app_icons(apps);
+}
+
+pub fn hydrate_shortcut_icons(apps: &mut [AppEntry]) {
+    fill_shortcut_icons(apps);
+}
+
+pub fn hydrate_start_app_icons(apps: &mut [AppEntry]) {
+    fill_start_app_icons(apps);
+}
+
+pub fn set_launcher_window_visible(handle: isize, visible: bool) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(window: isize, command: i32) -> i32;
+    }
+    unsafe { ShowWindow(handle, if visible { 5 } else { 0 }) };
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
@@ -889,11 +924,16 @@ fn fill_start_app_icons(apps: &mut [AppEntry]) {
         r#"
 $items = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')) | ConvertFrom-Json
 Add-Type -AssemblyName System.Drawing
+$packages = @{{}}
+Get-AppxPackage | ForEach-Object {{
+    $family = [string]$_.PackageFamilyName
+    if ($family) {{ $packages[$family] = $_ }}
+}}
 foreach ($item in $items) {{
     try {{
         $parts = ([string]$item.app_id).Split('!', 2)
         if ($parts.Count -ne 2 -or -not $parts[0] -or -not $parts[1]) {{ continue }}
-        $package = Get-AppxPackage -PackageFamilyName $parts[0] -ErrorAction SilentlyContinue | Select-Object -First 1
+        $package = $packages[$parts[0]]
         if (-not $package -or -not $package.InstallLocation) {{ continue }}
         $manifestPath = Join-Path $package.InstallLocation 'AppxManifest.xml'
         if (-not (Test-Path -LiteralPath $manifestPath)) {{ continue }}
@@ -965,7 +1005,8 @@ foreach ($item in $items) {{
 }}
 "#
     );
-    if powershell_output(&script).is_err() {
+    if let Err(error) = powershell_output(&script) {
+        eprintln!("corvo: could not extract Windows Start app icons: {error}");
         return;
     }
     for app in apps {
@@ -1036,7 +1077,17 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct CorvoShortcutFileInfo {{
+    public IntPtr hIcon;
+    public int iIcon;
+    public uint dwAttributes;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+}}
 public static class CorvoIconNative {{
+    [DllImport("shell32.dll", EntryPoint = "SHGetFileInfoW", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SHGetFileInfo(string path, uint attributes, ref CorvoShortcutFileInfo info, uint size, uint flags);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
     [DllImport("user32.dll", SetLastError = true)]
@@ -1049,6 +1100,13 @@ foreach ($item in $items) {{
     $large = $null
     $small = $null
     try {{
+        $info = [CorvoShortcutFileInfo]::new()
+        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][CorvoShortcutFileInfo])
+        if ([CorvoIconNative]::SHGetFileInfo([string]$item.source, 0, [ref]$info, $size, 0x00000100) -ne [IntPtr]::Zero -and $info.hIcon -ne [IntPtr]::Zero) {{
+            $bitmap = [System.Drawing.Icon]::FromHandle($info.hIcon).ToBitmap()
+            $bitmap.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png)
+            continue
+        }}
         $shortcut = $shell.CreateShortcut([string]$item.source)
         $location = [string]$shortcut.IconLocation
         $iconPath = [string]$shortcut.TargetPath
@@ -1081,13 +1139,15 @@ foreach ($item in $items) {{
     }} catch {{ }}
     finally {{
         if ($bitmap) {{ $bitmap.Dispose() }}
+        if ($info.hIcon -ne [IntPtr]::Zero) {{ [void][CorvoIconNative]::DestroyIcon($info.hIcon) }}
         if ($large -and $large[0] -ne [IntPtr]::Zero) {{ [void][CorvoIconNative]::DestroyIcon($large[0]) }}
         if ($small -and $small[0] -ne [IntPtr]::Zero) {{ [void][CorvoIconNative]::DestroyIcon($small[0]) }}
     }}
 }}
 "#
     );
-    if powershell_output(&script).is_err() {
+    if let Err(error) = powershell_output(&script) {
+        eprintln!("corvo: could not extract Windows shortcut icons: {error}");
         return;
     }
     for app in apps {

@@ -6,10 +6,87 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use corvo_core::{
-    Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult, search_match_score,
+    search_match_score, Action, ActionGroup, Command, CommandAction, CommandError,
+    ExecutionContext, Icon, SearchContext, SearchResult,
 };
 use corvo_platform::AppEntry;
+
+#[cfg(target_os = "windows")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedCorpus {
+    version: u8,
+    scopes: Vec<String>,
+    apps: Vec<AppEntry>,
+}
+
+#[cfg(target_os = "windows")]
+fn corpus_cache_path() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Corvo/app-corpus.json"))
+}
+
+#[cfg(target_os = "windows")]
+fn read_cached_corpus() -> Option<CachedCorpus> {
+    let bytes = std::fs::read(corpus_cache_path()?).ok()?;
+    let mut cached: CachedCorpus = serde_json::from_slice(&bytes).ok()?;
+    if cached.version != 1
+        || cached.scopes != corvo_config::Settings::load().applications.search_scopes
+    {
+        return None;
+    }
+    for app in &mut cached.apps {
+        if app.icon_png.as_ref().is_some_and(|path| !path.is_file()) {
+            app.icon_png = None;
+        }
+    }
+    Some(cached)
+}
+
+#[cfg(target_os = "windows")]
+fn write_cached_corpus(scopes: &[String], apps: &[AppEntry]) {
+    let Some(path) = corpus_cache_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let cached = CachedCorpus {
+        version: 1,
+        scopes: scopes.to_vec(),
+        apps: apps.to_vec(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&cached) else {
+        return;
+    };
+    let _ = std::fs::write(path, bytes);
+}
+
+#[cfg(target_os = "windows")]
+fn publish_ready_apps(scopes: &[String], apps: &[AppEntry]) {
+    let mut ready = apps
+        .iter()
+        .filter(|app| app.icon_png.as_ref().is_some_and(|path| path.is_file()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ready_paths = ready
+        .iter()
+        .map(|app| app.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    ready.extend(
+        state
+            .apps
+            .iter()
+            .filter(|app| !ready_paths.contains(&app.path))
+            .cloned(),
+    );
+    state.apps = ready;
+    state.scopes = scopes.to_vec();
+    drop(state);
+    notify_corpus_subscribers();
+}
 
 #[derive(Default)]
 pub struct AppLauncherCommand;
@@ -175,8 +252,19 @@ fn app_name_for_path(path: &std::path::Path) -> String {
 fn corpus() -> &'static RwLock<CorpusState> {
     static CORPUS: OnceLock<RwLock<CorpusState>> = OnceLock::new();
     CORPUS.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        let cached = read_cached_corpus();
         RwLock::new(CorpusState {
+            #[cfg(target_os = "windows")]
+            apps: cached
+                .as_ref()
+                .map(|entry| entry.apps.clone())
+                .unwrap_or_default(),
+            #[cfg(not(target_os = "windows"))]
             apps: Vec::new(),
+            #[cfg(target_os = "windows")]
+            scopes: cached.map(|entry| entry.scopes).unwrap_or_default(),
+            #[cfg(not(target_os = "windows"))]
             scopes: Vec::new(),
             scanned_at: None,
             scanning: false,
@@ -244,29 +332,79 @@ fn start_scan(force: bool) {
     drop(state);
     std::thread::spawn(move || {
         let scanned = corvo_platform::list_apps_in_scopes(&scopes);
+        #[cfg(target_os = "windows")]
+        {
+            let previous_apps = corpus_apps();
+            let mut apps = match scanned {
+                Ok(mut apps) => {
+                    let shortcut_names: std::collections::HashSet<String> = apps
+                        .iter()
+                        .map(|app| app.name.trim().to_lowercase())
+                        .collect();
+                    apps.extend(
+                        previous_apps
+                            .iter()
+                            .filter(|app| {
+                                app.path.to_string_lossy().starts_with("shell:AppsFolder\\")
+                                    && !shortcut_names.contains(&app.name.trim().to_lowercase())
+                            })
+                            .cloned(),
+                    );
+                    apps
+                }
+                Err(error) => {
+                    eprintln!("corvo: could not scan applications: {error}");
+                    previous_apps
+                }
+            };
+            publish_ready_apps(&scopes, &apps);
+            corvo_platform::hydrate_shortcut_icons(&mut apps);
+            publish_ready_apps(&scopes, &apps);
+            corvo_platform::append_start_apps(&mut apps);
+            corvo_platform::hydrate_start_app_icons(&mut apps);
+            let mut state = corpus()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.apps = apps.clone();
+            state.scopes = scopes.clone();
+            state.scanned_at = Some(Instant::now());
+            drop(state);
+            write_cached_corpus(&scopes, &apps);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut state = corpus()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match scanned {
+                Ok(apps) => state.apps = apps,
+                Err(error) => eprintln!("corvo: could not scan applications: {error}"),
+            }
+            state.scopes = scopes.clone();
+            state.scanned_at = Some(Instant::now());
+            drop(state);
+        }
+        notify_corpus_subscribers();
+
         let mut state = corpus()
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match scanned {
-            Ok(apps) => state.apps = apps,
-            Err(error) => eprintln!("corvo: could not scan applications: {error}"),
-        }
-        state.scopes = scopes;
-        state.scanned_at = Some(Instant::now());
         state.scanning = false;
         let pending_reload = std::mem::take(&mut state.pending_reload);
         drop(state);
-        let mut subscribers = corpus_subscribers()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        subscribers.retain(|sender| sender.try_send(()).is_ok());
-        drop(subscribers);
         if pending_reload {
             start_scan(true);
         } else {
             ensure_corpus();
         }
     });
+}
+
+fn notify_corpus_subscribers() {
+    let mut subscribers = corpus_subscribers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    subscribers.retain(|sender| sender.try_send(()).is_ok());
 }
 
 pub fn reload_corpus() {
@@ -350,9 +488,9 @@ fn rank<'a>(
             })
             .collect();
         ranked.sort_by(|a, b| {
-            b.1.0
-                .cmp(&a.1.0)
-                .then_with(|| b.1.1.cmp(&a.1.1))
+            b.1 .0
+                .cmp(&a.1 .0)
+                .then_with(|| b.1 .1.cmp(&a.1 .1))
                 .then_with(|| corvo_core::search::natural_cmp(&a.0.name, &b.0.name))
         });
         return ranked.into_iter().map(|(entry, _)| entry).collect();

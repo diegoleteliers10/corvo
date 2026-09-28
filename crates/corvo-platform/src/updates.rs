@@ -597,28 +597,128 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
         )));
     }
 
+    verify_macos_update_identity(&bundle_dir, &staging_app)?;
+
     let pid = std::process::id();
-    let target = bundle_dir.to_string_lossy();
-    let staging = staging_app.to_string_lossy();
-
-    // Spawn detached shell script to wait for exit, atomically swap bundles, and relaunch
-    let script = format!(
-        "for i in $(seq 1 150); do if ! kill -0 {pid} 2>/dev/null; then break; fi; sleep 0.1; done; \
-         rm -rf \"{target}.old\"; \
-         mv \"{target}\" \"{target}.old\" 2>/dev/null; \
-         mv \"{staging}\" \"{target}\" 2>/dev/null || true; \
-         xattr -cr \"{target}\" 2>/dev/null || true; \
-         open -n \"{target}\"; \
-         rm -rf \"{target}.old\""
-    );
-
-    Command::new("sh").arg("-c").arg(script).spawn()?;
+    let old_bundle = install_parent.join("Corvo.app.old");
+    let script = r#"
+pid="$1"; target="$2"; staging="$3"; old="$4"
+for i in $(seq 1 150); do
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+if kill -0 "$pid" 2>/dev/null; then exit 1; fi
+rm -rf "$old" || exit 1
+mv "$target" "$old" || exit 1
+if ! mv "$staging" "$target"; then
+    mv "$old" "$target"
+    exit 1
+fi
+if ! open -n "$target"; then
+    rm -rf "$target"
+    mv "$old" "$target"
+    open -n "$target"
+    exit 1
+fi
+"#;
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("corvo-update")
+        .arg(pid.to_string())
+        .arg(&bundle_dir)
+        .arg(&staging_app)
+        .arg(&old_bundle)
+        .spawn()?;
 
     std::process::exit(0);
 }
 
+#[cfg(target_os = "macos")]
+fn verify_macos_update_identity(current: &Path, staged: &Path) -> Result<(), UpdateError> {
+    let status = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(staged)
+        .status()?;
+    if !status.success() {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "The updated macOS app has an invalid code signature".into(),
+        ));
+    }
+
+    let bundle_id = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleIdentifier"])
+        .arg(staged.join("Contents/Info.plist"))
+        .output()?;
+    if !bundle_id.status.success()
+        || String::from_utf8_lossy(&bundle_id.stdout).trim() != "sh.corvo.corvo"
+    {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "The updated macOS app has a different bundle identifier".into(),
+        ));
+    }
+
+    let staged_requirement = macos_designated_requirement(staged)?;
+    let expected_requirement = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/macos-signing-requirement.txt"
+    ))
+    .trim();
+    if macos_has_adhoc_signature(staged)? || staged_requirement != expected_requirement {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "The updated macOS app has an unexpected signing identity".into(),
+        ));
+    }
+    if !macos_has_adhoc_signature(current)?
+        && macos_designated_requirement(current)? != staged_requirement
+    {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "The updated macOS app uses a different signing identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_has_adhoc_signature(app: &Path) -> Result<bool, UpdateError> {
+    let output = Command::new("codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(app)
+        .output()?;
+    if !output.status.success() {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "Cannot read the macOS app signing identity".into(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .any(|line| line.trim() == "Signature=adhoc"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_designated_requirement(app: &Path) -> Result<String, UpdateError> {
+    let output = Command::new("codesign")
+        .args(["-dr", "-"])
+        .arg(app)
+        .output()?;
+    let requirement = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("designated => ").map(str::to_owned));
+    if !output.status.success() || requirement.is_none() {
+        return Err(UpdateError::SignatureVerificationFailed(
+            "Cannot read the macOS app code requirement".into(),
+        ));
+    }
+    Ok(requirement.unwrap_or_default())
+}
+
 #[cfg(target_os = "windows")]
 fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let current_exe = std::env::current_exe()?;
     let Some(target_dir) = current_exe.parent() else {
         return Err(UpdateError::PermissionDenied(
@@ -635,6 +735,10 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
         .arg(archive_path)
         .arg("-C")
         .arg(&temp_staging_dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
 
     if status.map(|s| !s.success()).unwrap_or(true) {
@@ -667,28 +771,103 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
         )));
     }
 
-    let pid = std::process::id();
-    let target_str = current_exe.to_string_lossy();
-    let old_str = old_exe.to_string_lossy();
-    let staging_str = staging_exe.to_string_lossy();
+    let script_path = target_dir.join(format!(".corvo-update-{}.ps1", std::process::id()));
+    fs::write(&script_path, WINDOWS_UPDATE_SCRIPT)?;
 
-    let script = format!(
-        ":loop\r\ntasklist /fi \"PID eq {pid}\" | find \"{pid}\" >nul\r\n\
-         if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto loop)\r\n\
-         move /y \"{target_str}\" \"{old_str}\"\r\n\
-         move /y \"{staging_str}\" \"{target_str}\"\r\n\
-         start \"\" \"{target_str}\""
-    );
-
-    use std::os::windows::process::CommandExt;
-    Command::new("cmd")
-        .arg("/c")
-        .arg(script)
-        .creation_flags(0x0800_0000)
+    let result = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script_path)
+        .arg(std::process::id().to_string())
+        .arg(&current_exe)
+        .arg(&staging_exe)
+        .arg(&old_exe)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()?;
+
+    drop(result);
 
     std::process::exit(0);
 }
+
+#[cfg(target_os = "windows")]
+const WINDOWS_UPDATE_SCRIPT: &str = r#"
+param(
+    [int]$ParentPid,
+    [string]$Target,
+    [string]$Staged,
+    [string]$Old
+)
+$ErrorActionPreference = 'Stop'
+
+try {
+    $parent = [System.Diagnostics.Process]::GetProcessById($ParentPid)
+    $parent.WaitForExit()
+    $parent.Dispose()
+} catch [System.ArgumentException] {
+}
+
+$swapped = $false
+for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    try {
+        if (-not $swapped) {
+            if ([System.IO.File]::Exists($Old)) {
+                [System.IO.File]::Delete($Old)
+            }
+            [System.IO.File]::Move($Target, $Old)
+            try {
+                [System.IO.File]::Move($Staged, $Target)
+                $swapped = $true
+            } catch {
+                $reason = $_.Exception.Message
+                try {
+                    [System.IO.File]::Move($Old, $Target)
+                } catch {
+                    [System.IO.File]::WriteAllText("$Target.update-error.log", "Swap failed: $reason. Restore failed: $($_.Exception.Message)")
+                    exit 1
+                }
+                throw
+            }
+        }
+
+        Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+        exit 0
+    } catch {
+        Start-Sleep -Milliseconds 100
+    }
+}
+if ($swapped -and [System.IO.File]::Exists($Old)) {
+    try {
+        [System.IO.File]::Delete($Target)
+        [System.IO.File]::Move($Old, $Target)
+        [System.IO.File]::WriteAllText("$Target.update-error.log", "The updated Corvo did not start. The previous version was restored.")
+        Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
+    } catch {
+        [System.IO.File]::WriteAllText("$Target.update-error.log", "Cannot relaunch or restore Corvo: $($_.Exception.Message)")
+        exit 1
+    }
+}
+if (-not $swapped -and [System.IO.File]::Exists($Target)) {
+    try {
+        [System.IO.File]::WriteAllText("$Target.update-error.log", "The Corvo update could not replace the executable.")
+        Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
+    } catch {
+        [System.IO.File]::WriteAllText("$Target.update-error.log", "The update and relaunch failed: $($_.Exception.Message)")
+        exit 1
+    }
+}
+"#;
 
 #[cfg(target_os = "linux")]
 fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {

@@ -253,6 +253,14 @@ impl Global for StoreGlobal {}
 static INITIAL_RESULTS: std::sync::OnceLock<std::sync::RwLock<Vec<SearchResult>>> =
     std::sync::OnceLock::new();
 
+#[cfg(target_os = "windows")]
+fn windows_icon_ready_channel() -> &'static (smol::channel::Sender<()>, smol::channel::Receiver<()>)
+{
+    static CHANNEL: std::sync::OnceLock<(smol::channel::Sender<()>, smol::channel::Receiver<()>)> =
+        std::sync::OnceLock::new();
+    CHANNEL.get_or_init(smol::channel::unbounded)
+}
+
 pub fn preload_initial_results(registry: &CommandRegistry, store: std::sync::Arc<dyn DataStore>) {
     let ctx = SearchContext {
         max_results: 2000,
@@ -274,6 +282,25 @@ pub fn preload_initial_results(registry: &CommandRegistry, store: std::sync::Arc
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(2000);
+    #[cfg(target_os = "windows")]
+    {
+        let icon_paths = results
+            .iter()
+            .filter_map(|result| match &result.icon {
+                Icon::Image(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for path in icon_paths.iter().take(24) {
+            let _ = windows_render_icon(path);
+        }
+        std::thread::spawn(move || {
+            for path in icon_paths.iter().skip(24) {
+                let _ = windows_render_icon(path);
+            }
+            let _ = windows_icon_ready_channel().0.try_send(());
+        });
+    }
     let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
     if let Ok(mut lock) = cell.write() {
         *lock = results;
@@ -1000,6 +1027,8 @@ pub struct Launcher {
     /// activation back so pasting lands in it (SPEC §8).
     previous_app: Option<i32>,
     previous_app_name: Option<String>,
+    #[cfg(target_os = "windows")]
+    visible: bool,
     emoji_category_index: usize,
     emoji_column_count: usize,
     emoji_skin_tone: usize,
@@ -1377,6 +1406,8 @@ impl Launcher {
             burger_menu_open: false,
             previous_app: None,
             previous_app_name: None,
+            #[cfg(target_os = "windows")]
+            visible: true,
             emoji_category_index: 0,
             emoji_column_count,
             emoji_skin_tone,
@@ -2601,13 +2632,12 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let path = if cfg!(target_os = "linux")
-            && corvo_platform::supports_app_uninstall_path(&path)
-        {
-            path
-        } else {
-            path.canonicalize().unwrap_or(path)
-        };
+        let path =
+            if cfg!(target_os = "linux") && corvo_platform::supports_app_uninstall_path(&path) {
+                path
+            } else {
+                path.canonicalize().unwrap_or(path)
+            };
         let icon_png = corvo_platform::extract_app_icon(&path);
         let target = UninstallTarget {
             name,
@@ -4680,7 +4710,14 @@ impl Launcher {
                 let notice_context = process_toast_context(&title, &args, is_brew);
                 cx.spawn(async move |_this, cx| {
                     let output = smol::unblock(move || {
-                        std::process::Command::new(program).args(args).output()
+                        let mut command = std::process::Command::new(program);
+                        command.args(args);
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            command.creation_flags(0x0800_0000);
+                        }
+                        command.output()
                     })
                     .await;
                     let notice = match output {
@@ -4985,10 +5022,38 @@ impl Launcher {
     fn dismiss(&mut self, window: &mut Window) {
         self.force_expanded = false;
         corvo_platform::forget_launcher_panel();
+        #[cfg(target_os = "windows")]
+        {
+            self.visible = false;
+            set_windows_launcher_visible(window, false);
+        }
+        #[cfg(not(target_os = "windows"))]
         window.remove_window();
         if let Some(pid) = self.previous_app.take() {
             corvo_platform::activate_app(pid);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (pid, name) = match corvo_platform::frontmost_app_info() {
+            Some((pid, name)) => (Some(pid), Some(name)),
+            None => (corvo_platform::frontmost_app_pid(), None),
+        };
+        self.previous_app = pid;
+        self.previous_app_name = name;
+        self.visible = true;
+        self.page = LauncherPage::Root;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.selected = 0;
+        self.results = cached_initial_results();
+        self.rebuild_root_flat_items();
+        self.results_scroll_handle.scroll_to_item(0);
+        window.focus(&self.focus_handle, cx);
+        set_windows_launcher_visible(window, true);
+        self.refresh(cx);
+        cx.notify();
     }
 
     fn search_row(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -7634,6 +7699,41 @@ fn action_icon(icon: &Icon, destructive: bool) -> Div {
 
 /// The icon slot at the left of a row: a decoded PNG when the command
 /// extracted one, a vector SVG or glyph otherwise.
+#[cfg(target_os = "windows")]
+fn windows_render_icons() -> &'static std::sync::RwLock<
+    std::collections::HashMap<std::path::PathBuf, std::sync::Arc<gpui::RenderImage>>,
+> {
+    static ICONS: std::sync::OnceLock<
+        std::sync::RwLock<
+            std::collections::HashMap<std::path::PathBuf, std::sync::Arc<gpui::RenderImage>>,
+        >,
+    > = std::sync::OnceLock::new();
+    ICONS.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cached_render_icon(path: &std::path::Path) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    windows_render_icons().read().ok()?.get(path).cloned()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_render_icon(path: &std::path::Path) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let icons = windows_render_icons();
+    if let Some(icon) = icons.read().ok()?.get(path).cloned() {
+        return Some(icon);
+    }
+    let mut pixels = image::open(path).ok()?.into_rgba8();
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let frame = image::Frame::new(pixels);
+    let icon = std::sync::Arc::new(gpui::RenderImage::new(smallvec::SmallVec::from_elem(
+        frame, 1,
+    )));
+    icons.write().ok()?.insert(path.to_path_buf(), icon.clone());
+    Some(icon)
+}
+
 fn icon(icon: Icon, is_application: bool) -> Div {
     let icon_size = if is_application { ICON_SIZE } else { 18.0 };
     let slot = div()
@@ -7644,7 +7744,27 @@ fn icon(icon: Icon, is_application: bool) -> Div {
         .items_center()
         .justify_center();
     match icon {
-        Icon::Image(path) => slot.child(img(path).size(px(icon_size))),
+        Icon::Image(path) => {
+            #[cfg(target_os = "windows")]
+            {
+                if is_application {
+                    match windows_cached_render_icon(&path) {
+                        Some(decoded) => slot.child(img(decoded).size(px(icon_size))),
+                        None => slot.child(icons::render_phosphor_svg(
+                            phosphor_svgs::style::regular::APP_WINDOW,
+                            rgb(COLOR_TEXT_ICON),
+                            icon_size,
+                        )),
+                    }
+                } else {
+                    slot.child(img(path).size(px(icon_size)))
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                slot.child(img(path).size(px(icon_size)))
+            }
+        }
         Icon::Glyph(glyph) if !glyph.is_empty() => slot.child(
             div()
                 .size_full()
@@ -8058,11 +8178,27 @@ pub fn run(
                 let store = refresh_store.clone();
                 smol::unblock(move || preload_initial_results(&registry, store)).await;
                 let _ = cx.update(|cx| {
-                    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0)
-                    {
+                    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
                         let _ = handle.update(cx, |launcher, _window, cx| {
                             if launcher.page == LauncherPage::Root {
                                 launcher.refresh(cx);
+                            }
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
+
+        #[cfg(target_os = "windows")]
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let icon_ready = windows_icon_ready_channel().1.clone();
+            while icon_ready.recv().await.is_ok() {
+                let _ = cx.update(|cx| {
+                    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
+                        let _ = handle.update(cx, |launcher, _, cx| {
+                            if launcher.page == LauncherPage::Root {
+                                cx.notify();
                             }
                         });
                     }
@@ -8482,20 +8618,28 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
 fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
     if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
-            let _ = handle.update(cx, |launcher, window, cx| match page {
-                LauncherPage::Clipboard => launcher.open_clipboard_page(window, cx),
-                LauncherPage::Files => launcher.open_files_page(window, cx),
-                LauncherPage::Emoji => launcher.open_emoji_page(window, cx),
-                LauncherPage::Brew => launcher.open_brew_page(BrewPageMode::Search, window, cx),
-                LauncherPage::Ports => launcher.open_ports_page(window, cx),
-                LauncherPage::Processes => launcher.open_processes_page("", window, cx),
-                _ => {
-                    launcher.page = page;
-                    launcher.refresh(cx);
-                    launcher.sync_palette_size(window, cx);
-                    cx.notify();
+            let _ = handle.update(cx, |launcher, window, cx| {
+                #[cfg(target_os = "windows")]
+                if !launcher.visible {
+                    launcher.show(window, cx);
+                }
+                match page {
+                    LauncherPage::Clipboard => launcher.open_clipboard_page(window, cx),
+                    LauncherPage::Files => launcher.open_files_page(window, cx),
+                    LauncherPage::Emoji => launcher.open_emoji_page(window, cx),
+                    LauncherPage::Brew => launcher.open_brew_page(BrewPageMode::Search, window, cx),
+                    LauncherPage::Ports => launcher.open_ports_page(window, cx),
+                    LauncherPage::Processes => launcher.open_processes_page("", window, cx),
+                    _ => {
+                        launcher.page = page;
+                        launcher.refresh(cx);
+                        launcher.sync_palette_size(window, cx);
+                        cx.notify();
+                    }
                 }
             });
+            #[cfg(target_os = "windows")]
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
             return;
         }
@@ -8507,6 +8651,10 @@ fn open_launcher_with_query(query: &str, cx: &mut App) {
     if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
             let _ = handle.update(cx, |launcher, window, cx| {
+                #[cfg(target_os = "windows")]
+                if !launcher.visible {
+                    launcher.show(window, cx);
+                }
                 launcher.page = LauncherPage::Root;
                 launcher.query = query.to_string();
                 launcher.force_expanded = false;
@@ -8515,6 +8663,8 @@ fn open_launcher_with_query(query: &str, cx: &mut App) {
                 launcher.sync_palette_size(window, cx);
                 cx.notify();
             });
+            #[cfg(target_os = "windows")]
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
             return;
         }
@@ -8525,7 +8675,16 @@ fn open_launcher_with_query(query: &str, cx: &mut App) {
 fn toggle(cx: &mut App) {
     if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
-            let _ = handle.update(cx, |launcher, window, _cx| launcher.dismiss(window));
+            let _ = handle.update(cx, |launcher, window, cx| {
+                #[cfg(target_os = "windows")]
+                if !launcher.visible {
+                    launcher.show(window, cx);
+                    window.activate_window();
+                    return;
+                }
+                let _ = cx;
+                launcher.dismiss(window);
+            });
             return;
         }
     }
@@ -8534,6 +8693,17 @@ fn toggle(cx: &mut App) {
 
 fn active_display_id() -> Option<gpui::DisplayId> {
     corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64))
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_launcher_visible(window: &Window, visible: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+            corvo_platform::set_launcher_window_visible(handle.hwnd.get(), visible);
+        }
+    }
 }
 
 fn open_launcher(cx: &mut App) {
@@ -8602,6 +8772,8 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         }
     };
     cx.set_global(LauncherWindow(window));
+    #[cfg(target_os = "windows")]
+    let _ = window.update(cx, |_, window, _| window.activate_window());
     cx.activate(true);
     corvo_platform::update_screens_cache();
     corvo_platform::make_panel_instant(window_width as f64, initial_height as f64);
