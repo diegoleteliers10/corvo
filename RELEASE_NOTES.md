@@ -7,6 +7,8 @@
 - Reuse and focus the Windows launcher window when the user opens it again.
 - Hide console processes during Windows updates, app scans, background actions, and relaunch. Restore the previous executable if replacement or the relaunch command fails.
 - Sign macOS builds with a stable identity so the app keeps the same code requirement across later updates.
+- Open System Settings and prompt for calendar access when requested from permissions settings.
+- Enable launch at login by default and register startup entries across macOS, Windows, and Linux.
 
 ## Notes
 
