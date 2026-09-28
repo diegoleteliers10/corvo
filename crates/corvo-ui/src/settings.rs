@@ -944,7 +944,7 @@ impl SettingsView {
                                             b.window_control_area(WindowControlArea::Close)
                                         })
                                         .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
-                                            window.remove_window();
+                                            close_settings_window(window);
                                         })
                                         .child(crate::icons::render_phosphor_svg(
                                             phosphor_svgs::style::regular::X,
@@ -1351,7 +1351,7 @@ impl SettingsView {
                         return;
                     }
                     "w" => {
-                        window.remove_window();
+                        close_settings_window(window);
                         return;
                     }
                     _ => {}
@@ -8589,17 +8589,43 @@ impl Render for SettingsView {
 struct SettingsWindow(WindowHandle<SettingsView>);
 impl Global for SettingsWindow {}
 
+fn close_settings_window(window: &mut Window) {
+    #[cfg(target_os = "windows")]
+    set_settings_window_visible(window, false);
+    #[cfg(not(target_os = "windows"))]
+    window.remove_window();
+}
+
+#[cfg(target_os = "windows")]
+fn set_settings_window_visible(window: &Window, visible: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(window: isize, command: i32) -> i32;
+    }
+
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+            unsafe { ShowWindow(handle.hwnd.get(), if visible { 5 } else { 0 }) };
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn keep_settings_window_alive(window: &mut Window, cx: &mut App) {
+    window.on_window_should_close(cx, |window, _| {
+        close_settings_window(window);
+        false
+    });
+}
+
 /// Shows the settings window via Win32 ShowWindow. Required when the window was
 /// pre-created with show:false and needs to be made visible on demand.
 #[cfg(target_os = "windows")]
 fn show_settings_window_win32(handle: WindowHandle<SettingsView>, cx: &mut App) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let _ = handle.update(cx, |_, window, _| {
-        if let Ok(wh) = HasWindowHandle::window_handle(window) {
-            if let RawWindowHandle::Win32(wh) = wh.as_raw() {
-                corvo_platform::set_launcher_window_visible(wh.hwnd.get(), true);
-            }
-        }
+        set_settings_window_visible(window, true);
     });
 }
 
@@ -8635,7 +8661,8 @@ pub fn prewarm_settings_window(cx: &mut App) {
         ..Default::default()
     };
     let store = cx.global::<crate::StoreGlobal>().0.clone();
-    if let Ok(handle) = cx.open_window(options, move |_window, cx| {
+    if let Ok(handle) = cx.open_window(options, move |window, cx| {
+        keep_settings_window_alive(window, cx);
         cx.new(|cx| SettingsView::new(cx, store))
     }) {
         cx.set_global(SettingsWindow(handle));
@@ -8683,6 +8710,8 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
     let opened = cx.open_window(options, move |_window, cx| {
+        #[cfg(target_os = "windows")]
+        keep_settings_window_alive(_window, cx);
         cx.new(|cx| {
             let mut view = SettingsView::new(cx, store);
             if tab != SettingsTab::General {
@@ -8745,6 +8774,8 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
     let opened = cx.open_window(options, move |_window, cx| {
+        #[cfg(target_os = "windows")]
+        keep_settings_window_alive(_window, cx);
         cx.new(|cx| {
             let mut view = SettingsView::new(cx, store);
             if tab != SettingsTab::General {
@@ -8776,6 +8807,8 @@ fn show_update_window(
     staged: Option<std::path::PathBuf>,
     cx: &mut App,
 ) {
+    #[cfg(target_os = "windows")]
+    crate::hide_launcher_before_settings(cx);
     if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
         if cx.windows().contains(&handle.into()) {
             #[cfg(target_os = "windows")]
@@ -8825,6 +8858,8 @@ fn show_update_window(
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
     let opened = cx.open_window(options, move |_window, cx| {
+        #[cfg(target_os = "windows")]
+        keep_settings_window_alive(_window, cx);
         cx.new(|cx| {
             let mut view = SettingsView::new(cx, store);
             view.navigate_to_tab(SettingsTab::About, cx);

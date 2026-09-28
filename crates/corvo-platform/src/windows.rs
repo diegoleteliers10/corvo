@@ -645,11 +645,30 @@ pub fn hydrate_start_app_icons(apps: &mut [AppEntry]) {
 }
 
 pub fn set_launcher_window_visible(handle: isize, visible: bool) {
+    #[allow(non_snake_case)]
     #[link(name = "user32")]
     unsafe extern "system" {
         fn ShowWindow(window: isize, command: i32) -> i32;
+        fn SetWindowPos(
+            window: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+        fn SetForegroundWindow(window: isize) -> i32;
     }
-    unsafe { ShowWindow(handle, if visible { 5 } else { 0 }) };
+    if visible {
+        unsafe {
+            ShowWindow(handle, 5);
+            SetWindowPos(handle, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+            SetForegroundWindow(handle);
+        }
+    } else {
+        unsafe { ShowWindow(handle, 0) };
+    }
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
@@ -700,10 +719,58 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
 }
 
 pub fn activate_app(pid: i32) -> PlatformResult<()> {
-    let script = format!(
-        "$process = Get-Process -Id {pid} -ErrorAction Stop; $hwnd = $process.MainWindowHandle; if ($hwnd -eq 0) {{ exit 1 }}; $signature = '[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);'; Add-Type -MemberDefinition $signature -Name Window -Namespace Corvo; [void][Corvo.Window]::ShowWindowAsync($hwnd, 9); if (-not [Corvo.Window]::SetForegroundWindow($hwnd)) {{ exit 1 }}"
-    );
-    run_powershell(&script)
+    #[allow(non_snake_case)]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(isize, isize) -> i32,
+            data: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(window: isize, process_id: *mut u32) -> u32;
+        fn GetWindow(window: isize, command: u32) -> isize;
+        fn IsWindowVisible(window: isize) -> i32;
+        fn ShowWindowAsync(window: isize, command: i32) -> i32;
+        fn SetForegroundWindow(window: isize) -> i32;
+    }
+
+    struct WindowSearch {
+        pid: u32,
+        window: isize,
+    }
+
+    unsafe extern "system" fn find_main_window(window: isize, data: isize) -> i32 {
+        let search = &mut *(data as *mut WindowSearch);
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, &mut pid);
+        if pid == search.pid && IsWindowVisible(window) != 0 && GetWindow(window, 4) == 0 {
+            search.window = window;
+            return 0;
+        }
+        1
+    }
+
+    let mut search = WindowSearch {
+        pid: pid as u32,
+        window: 0,
+    };
+    unsafe {
+        EnumWindows(
+            find_main_window,
+            (&mut search as *mut WindowSearch) as isize,
+        )
+    };
+    if search.window == 0 {
+        return Err(PlatformError::Os(format!(
+            "no main window found for process {pid}"
+        )));
+    }
+    unsafe {
+        ShowWindowAsync(search.window, 9);
+        if SetForegroundWindow(search.window) == 0 {
+            return Err(PlatformError::Os(format!("could not focus process {pid}")));
+        }
+    }
+    Ok(())
 }
 
 pub fn send_paste_keystroke() -> PlatformResult<()> {
@@ -869,7 +936,15 @@ fn cached_icon_for_key(key: &str) -> Option<PathBuf> {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
     let cached = cache_dir.join(format!("{:016x}.png", hasher.finish()));
-    cached.is_file().then_some(cached)
+    if !cached.is_file() {
+        return None;
+    }
+    if image::open(&cached).is_ok() {
+        Some(cached)
+    } else {
+        let _ = std::fs::remove_file(&cached);
+        None
+    }
 }
 
 fn fill_start_app_icons(apps: &mut [AppEntry]) {
@@ -1030,6 +1105,16 @@ fn fill_shortcut_icons(apps: &mut [AppEntry]) {
         return;
     };
 
+    for app in apps.iter_mut() {
+        if app
+            .path
+            .extension()
+            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("lnk"))
+        {
+            app.icon_png = cached_shortcut_icon(&app.path);
+        }
+    }
+
     let missing = apps
         .iter()
         .filter(|app| {
@@ -1096,17 +1181,13 @@ public static class CorvoIconNative {{
 '@
 foreach ($item in $items) {{
     $handle = [IntPtr]::Zero
+    $icon = $null
     $bitmap = $null
     $large = $null
     $small = $null
     try {{
         $info = [CorvoShortcutFileInfo]::new()
         $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][CorvoShortcutFileInfo])
-        if ([CorvoIconNative]::SHGetFileInfo([string]$item.source, 0, [ref]$info, $size, 0x00000100) -ne [IntPtr]::Zero -and $info.hIcon -ne [IntPtr]::Zero) {{
-            $bitmap = [System.Drawing.Icon]::FromHandle($info.hIcon).ToBitmap()
-            $bitmap.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png)
-            continue
-        }}
         $shortcut = $shell.CreateShortcut([string]$item.source)
         $location = [string]$shortcut.IconLocation
         $iconPath = [string]$shortcut.TargetPath
@@ -1121,17 +1202,23 @@ foreach ($item in $items) {{
         $iconPath = [Environment]::ExpandEnvironmentVariables($iconPath)
         if (-not (Test-Path -LiteralPath $iconPath)) {{ $iconPath = [string]$shortcut.TargetPath; $iconIndex = 0 }}
         $iconPath = [Environment]::ExpandEnvironmentVariables($iconPath)
-        if (-not $iconPath -or -not (Test-Path -LiteralPath $iconPath)) {{ continue }}
-        $large = New-Object IntPtr[] 1
-        $small = New-Object IntPtr[] 1
-        if ([CorvoIconNative]::ExtractIconEx($iconPath, $iconIndex, $large, $small, 1) -gt 0) {{
-            $handle = $large[0]
-            if ($handle -eq [IntPtr]::Zero) {{ $handle = $small[0] }}
+        if ($iconPath -and (Test-Path -LiteralPath $iconPath -PathType Leaf)) {{
+            $large = New-Object IntPtr[] 1
+            $small = New-Object IntPtr[] 1
+            if ([CorvoIconNative]::ExtractIconEx($iconPath, $iconIndex, $large, $small, 1) -gt 0) {{
+                $handle = $large[0]
+                if ($handle -eq [IntPtr]::Zero) {{ $handle = $small[0] }}
+            }}
+            if ($handle -ne [IntPtr]::Zero) {{
+                $icon = [System.Drawing.Icon]::FromHandle($handle)
+            }} else {{
+                try {{ $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath) }} catch {{ }}
+            }}
         }}
-        if ($handle -ne [IntPtr]::Zero) {{
-            $icon = [System.Drawing.Icon]::FromHandle($handle)
-        }} else {{
-            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath)
+        if (-not $icon) {{
+            if ([CorvoIconNative]::SHGetFileInfo([string]$item.source, 0, [ref]$info, $size, 0x00000100) -ne [IntPtr]::Zero -and $info.hIcon -ne [IntPtr]::Zero) {{
+                $icon = [System.Drawing.Icon]::FromHandle($info.hIcon)
+            }}
         }}
         if (-not $icon) {{ continue }}
         $bitmap = $icon.ToBitmap()
@@ -1248,4 +1335,3 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
         Ok(())
     }
 }
-

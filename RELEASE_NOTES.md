@@ -1,3 +1,12 @@
+# Corvo 0.1.9
+
+## Windows
+
+- Alt+Space shows or hides the launcher. The launcher stays above normal windows while it is open.
+- Closing the launcher returns focus to the previous app without starting PowerShell.
+- Settings keeps its window after close, so it opens without creating the window again.
+- App icons load for search results outside the initial list. Corvo removes damaged icon files and extracts them again.
+
 # Corvo 0.1.8
 
 ## Fixed

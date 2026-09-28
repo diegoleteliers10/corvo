@@ -295,16 +295,24 @@ pub fn preload_initial_results(registry: &CommandRegistry, store: std::sync::Arc
         for path in icon_paths.iter().take(24) {
             let _ = windows_render_icon(path);
         }
+        let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
+        if let Ok(mut lock) = cell.write() {
+            *lock = results;
+        }
         std::thread::spawn(move || {
             for path in icon_paths.iter().skip(24) {
                 let _ = windows_render_icon(path);
             }
             let _ = windows_icon_ready_channel().0.try_send(());
         });
+        return;
     }
-    let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
-    if let Ok(mut lock) = cell.write() {
-        *lock = results;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
+        if let Ok(mut lock) = cell.write() {
+            *lock = results;
+        }
     }
 }
 
@@ -2112,6 +2120,8 @@ impl Launcher {
                     self.close_burger_menu(cx);
                     self.close_actions(cx);
                     self.close_filter_dropdown(cx);
+                    #[cfg(target_os = "windows")]
+                    self.dismiss(window);
                     open_settings(cx);
                     cx.stop_propagation();
                     return;
@@ -4150,10 +4160,16 @@ impl Launcher {
                     .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
                         launcher.close_burger_menu(cx);
                         if is_preferences {
+                            #[cfg(target_os = "windows")]
+                            launcher.dismiss(window);
                             open_settings(cx);
                         } else if is_about {
+                            #[cfg(target_os = "windows")]
+                            launcher.dismiss(window);
                             open_settings_tab(SettingsTab::About, cx);
                         } else if is_check_updates {
+                            #[cfg(target_os = "windows")]
+                            launcher.dismiss(window);
                             open_settings_tab_with_update_check(SettingsTab::About, cx);
                         } else if is_quit {
                             launcher.dismiss(window);
@@ -7735,6 +7751,52 @@ fn windows_render_icon(path: &std::path::Path) -> Option<std::sync::Arc<gpui::Re
     Some(icon)
 }
 
+#[cfg(target_os = "windows")]
+fn windows_request_render_icon(path: &std::path::Path) {
+    type Requests = (
+        std::collections::HashSet<std::path::PathBuf>,
+        std::collections::HashMap<std::path::PathBuf, std::time::Instant>,
+    );
+    static REQUESTS: std::sync::OnceLock<std::sync::Mutex<Requests>> = std::sync::OnceLock::new();
+    let requests = REQUESTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    let Ok(mut state) = requests.lock() else {
+        return;
+    };
+    if state.0.contains(path)
+        || state
+            .1
+            .get(path)
+            .is_some_and(|failed_at| failed_at.elapsed() < std::time::Duration::from_secs(2))
+    {
+        return;
+    }
+    state.1.remove(path);
+    state.0.insert(path.to_path_buf());
+    drop(state);
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let mut decoded = false;
+        for delay_ms in [0, 100, 500] {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            if windows_render_icon(&path).is_some() {
+                decoded = true;
+                break;
+            }
+        }
+        if let Ok(mut state) = requests.lock() {
+            state.0.remove(&path);
+            if !decoded {
+                state.1.insert(path, std::time::Instant::now());
+            }
+        }
+        if decoded {
+            let _ = windows_icon_ready_channel().0.try_send(());
+        }
+    });
+}
+
 fn icon(icon: Icon, is_application: bool) -> Div {
     let icon_size = if is_application { ICON_SIZE } else { 18.0 };
     let slot = div()
@@ -7751,11 +7813,14 @@ fn icon(icon: Icon, is_application: bool) -> Div {
                 if is_application {
                     match windows_cached_render_icon(&path) {
                         Some(decoded) => slot.child(img(decoded).size(px(icon_size))),
-                        None => slot.child(icons::render_phosphor_svg(
-                            phosphor_svgs::style::regular::APP_WINDOW,
-                            rgb(COLOR_TEXT_ICON),
-                            icon_size,
-                        )),
+                        None => {
+                            windows_request_render_icon(&path);
+                            slot.child(icons::render_phosphor_svg(
+                                phosphor_svgs::style::regular::APP_WINDOW,
+                                rgb(COLOR_TEXT_ICON),
+                                icon_size,
+                            ))
+                        }
                     }
                 } else {
                     slot.child(img(path).size(px(icon_size)))
@@ -8538,7 +8603,38 @@ fn execute_system_setting_intent(setting_id: &str, cx: &mut App) {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_launcher_before_settings(cx: &mut App) {
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
+        let _ = handle.update(cx, |launcher, window, _| {
+            if launcher.visible {
+                launcher.dismiss(window);
+            }
+        });
+    }
+}
+
 fn execute_command_intent(cmd_id: &str, cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    if matches!(
+        cmd_id,
+        "open-settings"
+            | "Open Settings"
+            | "check-for-updates"
+            | "Check for Updates"
+            | "about-corvo"
+            | "About Corvo"
+            | "export-backup"
+            | "Export Backup"
+            | "import-backup"
+            | "Import Backup"
+            | "import-from-raycast"
+            | "Import from Raycast"
+            | "Create Snippet"
+            | "create-snippet"
+    ) {
+        hide_launcher_before_settings(cx);
+    }
     match cmd_id {
         "open-settings" | "Open Settings" => {
             open_settings(cx);
@@ -8807,7 +8903,10 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
     };
     cx.set_global(LauncherWindow(window));
     #[cfg(target_os = "windows")]
-    let _ = window.update(cx, |_, window, _| window.activate_window());
+    let _ = window.update(cx, |_, window, _| {
+        set_windows_launcher_visible(window, true);
+        window.activate_window();
+    });
     cx.activate(true);
     corvo_platform::update_screens_cache();
     corvo_platform::make_panel_instant(window_width as f64, initial_height as f64);
