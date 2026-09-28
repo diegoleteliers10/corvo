@@ -59,7 +59,7 @@ struct GitHubRelease {
     pub assets: Vec<ReleaseAsset>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRelease {
     pub version: semver::Version,
     pub tag_name: String,
@@ -159,6 +159,48 @@ pub fn dismiss_version(version: &str) {
     let mut state = load_check_state();
     state.dismissed_version = Some(version.to_string());
     save_check_state(&state);
+    clear_pending_release();
+}
+
+fn pending_release_path() -> Option<PathBuf> {
+    let proj = ProjectDirs::from("", "", "corvo")?;
+    Some(proj.cache_dir().join("pending-update.json"))
+}
+
+/// Persists the latest known release so the Settings About tab can show
+/// the changelog with Skip / Download buttons without a new network check.
+pub fn save_pending_release(release: &UpdateRelease) {
+    let Some(path) = pending_release_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(release) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// Returns the persisted release when it is still newer than this build.
+/// Clears stale entries (same or older version) so the UI never prompts
+/// for an update that no longer applies.
+pub fn load_pending_release() -> Option<UpdateRelease> {
+    let path = pending_release_path()?;
+    let bytes = fs::read(&path).ok()?;
+    let release: UpdateRelease = serde_json::from_slice(&bytes).ok()?;
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    if release.version > current {
+        Some(release)
+    } else {
+        let _ = fs::remove_file(&path);
+        None
+    }
+}
+
+pub fn clear_pending_release() {
+    if let Some(path) = pending_release_path() {
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub fn is_version_dismissed(version: &str) -> bool {
@@ -311,6 +353,7 @@ pub fn check_for_updates(
 
     let Some((latest_ver, latest_rel)) = eligible_releases.into_iter().next() else {
         save_check_state(&state);
+        clear_pending_release();
         return Ok(None);
     };
 
@@ -346,7 +389,7 @@ pub fn check_for_updates(
         .unwrap_or("No release notes provided.");
     let clean_notes = clean_release_notes(notes);
 
-    Ok(Some(UpdateRelease {
+    let release = UpdateRelease {
         version: latest_ver,
         tag_name: latest_tag,
         title: latest_rel
@@ -357,7 +400,9 @@ pub fn check_for_updates(
         asset: target_asset,
         checksum_url,
         signature_url,
-    }))
+    };
+    save_pending_release(&release);
+    Ok(Some(release))
 }
 
 /// Downloads the release asset into `update_cache_dir()` while streaming SHA-256 computation.

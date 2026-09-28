@@ -5,7 +5,8 @@ mod icons;
 mod settings;
 
 pub use settings::{
-    open_settings, open_settings_tab, open_settings_tab_with_update_check, SettingsTab,
+    open_settings, open_settings_tab, open_settings_tab_with_update_check,
+    open_settings_with_available_update, open_settings_with_ready_update, SettingsTab,
 };
 
 use corvo_core::{
@@ -8242,8 +8243,11 @@ pub fn run(
         })
         .detach();
 
-        // Background update pump (Tinycast model): 30s initial delay, 24h interval, 2h backoff
-        cx.spawn(async move |_cx: &mut AsyncApp| {
+        // Background update pump (Tinycast model): 30s initial delay, 24h interval, 2h backoff.
+        // When a newer release is found, the About tab opens with its
+        // changelog plus Skip / Download buttons so the update is visible
+        // instead of silently dropped.
+        cx.spawn(async move |cx: &mut AsyncApp| {
             smol::Timer::after(std::time::Duration::from_secs(30)).await;
             loop {
                 let settings = corvo_config::Settings::load();
@@ -8258,12 +8262,31 @@ pub fn run(
                 match check_res {
                     Ok(Some(release)) => {
                         if settings.updates.auto_download {
-                            let cancel_flag = std::sync::atomic::AtomicBool::new(false);
                             let rel = release.clone();
-                            let _ = smol::unblock(move || {
+                            let dl_res = smol::unblock(move || {
+                                let cancel_flag = std::sync::atomic::AtomicBool::new(false);
                                 corvo_platform::download_and_verify(&rel, &cancel_flag, None)
+                                    .map(|path| (rel, path))
                             })
                             .await;
+                            match dl_res {
+                                Ok((rel, path)) => {
+                                    let _ = cx.update(|cx| {
+                                        crate::open_settings_with_ready_update(rel, path, cx);
+                                    });
+                                }
+                                Err(_) => {
+                                    let rel = release.clone();
+                                    let _ = cx.update(|cx| {
+                                        crate::open_settings_with_available_update(rel, cx);
+                                    });
+                                }
+                            }
+                        } else {
+                            let rel = release.clone();
+                            let _ = cx.update(|cx| {
+                                crate::open_settings_with_available_update(rel, cx);
+                            });
                         }
                         smol::Timer::after(std::time::Duration::from_secs(24 * 3600)).await;
                     }

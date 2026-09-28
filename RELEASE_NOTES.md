@@ -1,5 +1,11 @@
 # Corvo 0.1.8
 
+## Fixed
+
+- The background update check now opens Settings > About with the release changelog plus Skip and Download buttons when a newer version is found, instead of silently dropping it.
+- A previously found update stays visible when reopening About, without needing another manual check.
+- Skipping a version dismisses the prompt and clears the pending update.
+
 ## System actions parity across macOS, Windows, and Linux
 
 - Every system action now works on all three systems, each one in its native mode. Linux and Windows gain Dismiss Notifications, Eject All Disks, Open Trash, Next Track, Play / Pause, and Previous Track.

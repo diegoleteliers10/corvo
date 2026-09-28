@@ -307,7 +307,7 @@ impl SettingsView {
             }
         })
         .detach();
-        Self {
+        let mut view = Self {
             selected_tab: SettingsTab::General,
             history: vec![SettingsTab::General],
             history_index: 0,
@@ -349,7 +349,16 @@ impl SettingsView {
             focus_handle: cx.focus_handle(),
             update_status: UpdateStatusUI::Idle,
             cancel_update_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        // A background check may have found a newer release before this
+        // window opened. Show its changelog with Skip / Download buttons
+        // right away instead of an empty update section.
+        if let Some(release) = corvo_platform::load_pending_release() {
+            if !corvo_platform::is_version_dismissed(&release.tag_name) {
+                view.update_status = UpdateStatusUI::Available(Box::new(release));
+            }
         }
+        view
     }
 
     fn save_quicklinks_file(&mut self) {
@@ -8760,4 +8769,99 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
 /// Opens the Settings and Preferences window.
 pub fn open_settings(cx: &mut App) {
     open_settings_tab(SettingsTab::General, cx);
+}
+
+fn show_update_window(
+    release: corvo_platform::UpdateRelease,
+    staged: Option<std::path::PathBuf>,
+    cx: &mut App,
+) {
+    if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            #[cfg(target_os = "windows")]
+            show_settings_window_win32(handle, cx);
+            let _ = handle.update(cx, |view, window, cx| {
+                view.navigate_to_tab(SettingsTab::About, cx);
+                match staged {
+                    Some(path) => {
+                        view.update_status =
+                            UpdateStatusUI::ReadyToInstall(Box::new(release), path)
+                    }
+                    None => {
+                        view.update_status = UpdateStatusUI::Available(Box::new(release));
+                    }
+                }
+                window.activate_window();
+                cx.notify();
+            });
+            #[cfg(not(target_os = "windows"))]
+            corvo_platform::activate_app(std::process::id() as i32);
+            corvo_platform::order_window_front(780.0, 540.0);
+            return;
+        }
+    }
+
+    let display_id = corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64));
+    let window_size = size(px(780.0), px(540.0));
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            display_id,
+            window_size,
+            cx,
+        ))),
+        display_id,
+        titlebar: Some(gpui::TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(14.0), px(14.0))),
+        }),
+        kind: WindowKind::Normal,
+        is_resizable: true,
+        is_movable: true,
+        focus: true,
+        show: true,
+        ..Default::default()
+    };
+
+    let store = cx.global::<crate::StoreGlobal>().0.clone();
+    let opened = cx.open_window(options, move |_window, cx| {
+        cx.new(|cx| {
+            let mut view = SettingsView::new(cx, store);
+            view.navigate_to_tab(SettingsTab::About, cx);
+            match staged {
+                Some(path) => {
+                    view.update_status = UpdateStatusUI::ReadyToInstall(Box::new(release), path)
+                }
+                None => view.update_status = UpdateStatusUI::Available(Box::new(release)),
+            }
+            view
+        })
+    });
+
+    if let Ok(handle) = opened {
+        cx.set_global(SettingsWindow(handle));
+        let _ = handle.update(cx, |_view, window, _cx| {
+            window.activate_window();
+        });
+        #[cfg(not(target_os = "windows"))]
+        corvo_platform::activate_app(std::process::id() as i32);
+        corvo_platform::order_window_front(780.0, 540.0);
+    }
+}
+
+/// Shows the About tab with the release changelog plus Skip and
+/// Download buttons. Used by the background update check so a found
+/// update is visible instead of silently downloaded and dropped.
+pub fn open_settings_with_available_update(release: corvo_platform::UpdateRelease, cx: &mut App) {
+    show_update_window(release, None, cx);
+}
+
+/// Shows the About tab in the ready-to-install state after a background
+/// download, so the user only clicks Relaunch to apply the update.
+pub fn open_settings_with_ready_update(
+    release: corvo_platform::UpdateRelease,
+    staged: std::path::PathBuf,
+    cx: &mut App,
+) {
+    show_update_window(release, Some(staged), cx);
 }
