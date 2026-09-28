@@ -13,12 +13,12 @@ use corvo_core::{
     Icon, SearchContext, SearchResult,
 };
 use gpui::{
-    actions, div, font, img, prelude::*, px, rgb, rgba, size, uniform_list, AnyElement, App,
-    AppContext, AsyncApp, Bounds, ClickEvent, Context, Div, FocusHandle, FontWeight, Global,
-    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Pixels, Render,
-    ScrollHandle, ScrollStrategy, SharedString, Size, Stateful, Styled, Subscription, TextOverflow,
-    TextRun, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, linear_color_stop, linear_gradient,
+    actions, div, font, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, size,
+    uniform_list, AnyElement, App, AppContext, AsyncApp, Bounds, ClickEvent, Context, Div,
+    FocusHandle, FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
+    ParentElement, Pixels, Render, ScrollHandle, ScrollStrategy, SharedString, Size, Stateful,
+    Styled, Subscription, TextOverflow, TextRun, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use smol::channel::Receiver;
 
@@ -47,16 +47,56 @@ fn sort_search_results(results: &mut [SearchResult]) {
     results.sort_by(|left, right| {
         let left_calc = left.id.starts_with("calculator:");
         let right_calc = right.id.starts_with("calculator:");
-        right_calc
-            .cmp(&left_calc)
-            .then_with(|| {
-                right
-                    .score
-                    .cmp(&left.score)
-                    .then_with(|| corvo_core::search::natural_cmp(&left.title, &right.title))
-                    .then_with(|| left.id.cmp(&right.id))
-            })
+        right_calc.cmp(&left_calc).then_with(|| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| corvo_core::search::natural_cmp(&left.title, &right.title))
+                .then_with(|| left.id.cmp(&right.id))
+        })
     });
+}
+
+fn command_menu_match_score(query: &str, result: &SearchResult) -> Option<i32> {
+    let fields = [
+        result.title.as_str(),
+        result.subtitle.as_deref().unwrap_or_default(),
+        result.accessory.as_deref().unwrap_or_default(),
+    ];
+    corvo_core::search_match_score(query, &fields).or_else(|| {
+        let useful_words = query
+            .split_whitespace()
+            .filter(|word| !matches!(word.to_lowercase().as_str(), "all" | "the" | "a" | "an"))
+            .collect::<Vec<_>>();
+        let reduced_query = useful_words.join(" ");
+        (!reduced_query.is_empty() && reduced_query != query)
+            .then(|| corvo_core::search_match_score(&reduced_query, &fields))
+            .flatten()
+    })
+}
+
+fn command_menu_exact_word_match(query: &str, result: &SearchResult) -> bool {
+    let query_words = query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| {
+            !word.is_empty() && !matches!(word.to_lowercase().as_str(), "all" | "the" | "a" | "an")
+        })
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    let result_words = [
+        result.title.as_str(),
+        result.subtitle.as_deref().unwrap_or_default(),
+        result.accessory.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .flat_map(|field| field.split(|character: char| !character.is_alphanumeric()))
+    .map(str::to_lowercase)
+    .collect::<Vec<_>>();
+
+    !query_words.is_empty()
+        && query_words
+            .iter()
+            .all(|query_word| result_words.iter().any(|word| word == query_word))
 }
 
 fn apply_result_preferences(
@@ -157,11 +197,9 @@ fn apply_result_preferences(
     indices.sort_by(|&i, &j| {
         let left_calc = results[i].id.starts_with("calculator:");
         let right_calc = results[j].id.starts_with("calculator:");
-        right_calc
-            .cmp(&left_calc)
-            .then_with(|| {
-                corvo_core::search::LauncherOrder::compare(&candidates[i], &candidates[j], q_len)
-            })
+        right_calc.cmp(&left_calc).then_with(|| {
+            corvo_core::search::LauncherOrder::compare(&candidates[i], &candidates[j], q_len)
+        })
     });
 
     let mut sorted_results = Vec::with_capacity(results.len());
@@ -222,9 +260,11 @@ pub fn preload_initial_results(registry: &CommandRegistry, store: std::sync::Arc
     };
     let mut results = Vec::new();
     for command in registry.commands() {
-        if ctx.store.as_ref().is_some_and(|store| {
-            store.command_enabled(command.id()) && store.show_command_in_launcher(command.id())
-        }) {
+        if command.prefix().is_none()
+            && ctx.store.as_ref().is_some_and(|store| {
+                store.command_enabled(command.id()) && store.show_command_in_launcher(command.id())
+            })
+        {
             results.extend(smol::block_on(command.search("", &ctx)));
         }
     }
@@ -252,12 +292,559 @@ struct LauncherWindow(WindowHandle<Launcher>);
 
 impl Global for LauncherWindow {}
 
+struct ToastWindowGlobal(WindowHandle<ActionToast>);
+
+impl Global for ToastWindowGlobal {}
+
+#[derive(Clone, Copy)]
+enum ToastCategory {
+    System,
+    Installation,
+    Uninstallation,
+    Port,
+    Clipboard,
+    Process,
+    Window,
+    Brightness,
+    Homebrew,
+    Application,
+    Files,
+    Quicklink,
+    Snippet,
+    Search,
+    General,
+}
+
+impl ToastCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "SYSTEM",
+            Self::Installation => "INSTALL",
+            Self::Uninstallation => "UNINSTALL",
+            Self::Port => "PORT MANAGER",
+            Self::Clipboard => "CLIPBOARD",
+            Self::Process => "PROCESS",
+            Self::Window => "WINDOW",
+            Self::Brightness => "DISPLAY",
+            Self::Homebrew => "HOMEBREW",
+            Self::Application => "APPLICATION",
+            Self::Files => "FILES",
+            Self::Quicklink => "LINK",
+            Self::Snippet => "SNIPPET",
+            Self::Search => "SEARCH",
+            Self::General => "CORVO",
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            Self::System => "⚙",
+            Self::Installation => "↓",
+            Self::Uninstallation => "⌫",
+            Self::Port => "⇥",
+            Self::Clipboard => "▣",
+            Self::Process => "◉",
+            Self::Window => "◩",
+            Self::Brightness => "☼",
+            Self::Homebrew => "🍺",
+            Self::Application => "⌘",
+            Self::Files => "▤",
+            Self::Quicklink => "↗",
+            Self::Snippet => "✎",
+            Self::Search => "⌕",
+            Self::General => "•",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToastOutcome {
+    Success,
+    Failure,
+}
+
+struct ToastNotice {
+    category: ToastCategory,
+    title: String,
+    detail: String,
+    outcome: ToastOutcome,
+    progress: Option<ToastProgress>,
+}
+
+#[derive(Clone, Copy)]
+struct ToastProgress {
+    percent: f32,
+}
+
+impl ToastNotice {
+    fn success(
+        category: ToastCategory,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            title: title.into(),
+            detail: detail.into(),
+            outcome: ToastOutcome::Success,
+            progress: None,
+        }
+    }
+
+    fn failure(
+        category: ToastCategory,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            title: title.into(),
+            detail: detail.into(),
+            outcome: ToastOutcome::Failure,
+            progress: None,
+        }
+    }
+
+    fn with_progress(mut self, percent: f32) -> Self {
+        self.progress = Some(ToastProgress {
+            percent: percent.clamp(0.0, 100.0),
+        });
+        self
+    }
+}
+
+struct ProcessToastContext {
+    category: ToastCategory,
+    success_title: String,
+    success_detail: String,
+    failure_title: String,
+}
+
+fn process_toast_context(title: &str, args: &[String], is_brew: bool) -> ProcessToastContext {
+    if !is_brew {
+        return ProcessToastContext {
+            category: ToastCategory::General,
+            success_title: title.to_string(),
+            success_detail: "Completed".into(),
+            failure_title: format!("{title} failed"),
+        };
+    }
+
+    let operation = args.first().map(String::as_str).unwrap_or_default();
+    let target = args
+        .iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str);
+    let (category, success_title, success_detail, failure_title) = match operation {
+        "install" => (
+            ToastCategory::Installation,
+            "Installed",
+            target.unwrap_or("package"),
+            "Install failed",
+        ),
+        "uninstall" => (
+            ToastCategory::Uninstallation,
+            "Uninstalled",
+            target.unwrap_or("package"),
+            "Uninstall failed",
+        ),
+        "upgrade" => (
+            ToastCategory::Homebrew,
+            if target.is_some() {
+                "Upgraded"
+            } else {
+                "Upgrade complete"
+            },
+            target.unwrap_or("All outdated packages"),
+            "Upgrade failed",
+        ),
+        "services" => {
+            let service_action = args.get(1).map(String::as_str).unwrap_or("updated");
+            let service = args.get(2).map(String::as_str).unwrap_or("service");
+            let (verb, past) = match service_action {
+                "start" => ("Start", "Started"),
+                "stop" => ("Stop", "Stopped"),
+                "restart" => ("Restart", "Restarted"),
+                _ => ("Update", "Updated"),
+            };
+            (
+                ToastCategory::System,
+                match past {
+                    "Started" => "Service started",
+                    "Stopped" => "Service stopped",
+                    "Restarted" => "Service restarted",
+                    _ => "Service updated",
+                },
+                service,
+                match verb {
+                    "Start" => "Could not start service",
+                    "Stop" => "Could not stop service",
+                    "Restart" => "Could not restart service",
+                    _ => "Could not update service",
+                },
+            )
+        }
+        "cleanup" => (
+            ToastCategory::Homebrew,
+            "Cleanup complete",
+            "Homebrew cache cleaned",
+            "Cleanup failed",
+        ),
+        _ => (
+            ToastCategory::Homebrew,
+            title,
+            "Completed",
+            "Homebrew command failed",
+        ),
+    };
+
+    ProcessToastContext {
+        category,
+        success_title: success_title.into(),
+        success_detail: success_detail.into(),
+        failure_title: failure_title.into(),
+    }
+}
+
+fn process_failure_detail(error: &str) -> String {
+    let detail = error
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(error)
+        .trim();
+    detail.chars().take(120).collect()
+}
+
+async fn run_shell_toast(
+    cmd: String,
+    category: ToastCategory,
+    title: String,
+    volume_direction: Option<bool>,
+) -> ToastNotice {
+    let (result, volume_level) = smol::unblock(move || {
+        let result = corvo_platform::run_shell(&cmd);
+        let volume_level = if result.is_ok() && volume_direction.is_some() {
+            corvo_platform::audio_output_level()
+        } else {
+            None
+        };
+        (result, volume_level)
+    })
+    .await;
+    match result {
+        Ok(()) => match (volume_direction, volume_level) {
+            (Some(increasing), Some(percent)) => ToastNotice::success(
+                category,
+                if increasing {
+                    "Volume increased"
+                } else {
+                    "Volume decreased"
+                },
+                "Output volume",
+            )
+            .with_progress(percent),
+            (Some(increasing), None) => ToastNotice::success(
+                category,
+                if increasing {
+                    "Volume increased"
+                } else {
+                    "Volume decreased"
+                },
+                "Output level unavailable",
+            ),
+            _ => ToastNotice::success(category, title, "Completed"),
+        },
+        Err(error) => ToastNotice::failure(category, format!("{title} failed"), error.to_string()),
+    }
+}
+
+fn category_for_result(result_id: &str) -> ToastCategory {
+    match result_id.split(':').next().unwrap_or_default() {
+        "system-actions" => ToastCategory::System,
+        "brew" => ToastCategory::Homebrew,
+        "kill-process" => {
+            if result_id == "kill-process:open-ports" {
+                ToastCategory::Port
+            } else {
+                ToastCategory::Process
+            }
+        }
+        "clipboard-manager" | "emoji-picker" => ToastCategory::Clipboard,
+        "window-management" => ToastCategory::Window,
+        "app-launcher" => ToastCategory::Application,
+        "file-search" => ToastCategory::Files,
+        "quicklinks" => ToastCategory::Quicklink,
+        "snippets" => ToastCategory::Snippet,
+        "web-search-fallback" => ToastCategory::Search,
+        _ => ToastCategory::General,
+    }
+}
+
+fn copy_notice(result_id: &str, result: Result<(), String>, item_kind: &str) -> ToastNotice {
+    let category = category_for_result(result_id);
+    match result {
+        Ok(()) => {
+            let detail = match result_id.split(':').next().unwrap_or_default() {
+                "emoji-picker" => "Emoji copied to clipboard",
+                "quicklinks" => "Link copied to clipboard",
+                "snippets" => "Snippet copied to clipboard",
+                "web-search-fallback" => "Search link copied to clipboard",
+                _ => match item_kind {
+                    "image" => "Image copied to clipboard",
+                    "emoji" => "Emoji copied to clipboard",
+                    "link" => "Link copied to clipboard",
+                    _ => "Text copied to clipboard",
+                },
+            };
+            ToastNotice::success(category, "Copied", detail)
+        }
+        Err(error) => ToastNotice::failure(category, "Copy failed", error),
+    }
+}
+
+fn paste_notice(result: Result<(), String>, item_kind: &str) -> ToastNotice {
+    match result {
+        Ok(()) => ToastNotice::success(
+            ToastCategory::Clipboard,
+            "Pasted",
+            format!("{} pasted into the previous app", item_kind),
+        ),
+        Err(error) => ToastNotice::failure(ToastCategory::Clipboard, "Paste failed", error),
+    }
+}
+
+struct ActionToast {
+    notice: ToastNotice,
+}
+
+impl Render for ActionToast {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(progress) = self.notice.progress {
+            let is_brightness = matches!(self.notice.category, ToastCategory::Brightness);
+            let icon = if is_brightness {
+                phosphor_svgs::style::regular::SUN
+            } else {
+                phosphor_svgs::style::regular::SPEAKER_HIGH
+            };
+            let fill_width = 172.0 * progress.percent / 100.0;
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(220.0))
+                        .h(px(132.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_between()
+                        .p_6()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgba(0x343638ff))
+                        .bg(rgba(0x17181aff))
+                        .child(crate::icons::render_phosphor_svg(
+                            icon,
+                            rgb(COLOR_TEXT),
+                            30.0,
+                        ))
+                        .child(
+                            div().flex().items_center().child(
+                                div()
+                                    .w(px(172.0))
+                                    .h(px(8.0))
+                                    .rounded_full()
+                                    .bg(rgba(0x343638ff))
+                                    .child(
+                                        div()
+                                            .w(px(fill_width))
+                                            .h(px(8.0))
+                                            .rounded_full()
+                                            .bg(rgb(COLOR_ACCENT)),
+                                    ),
+                            ),
+                        ),
+                );
+        }
+
+        let (symbol, color) = if matches!(self.notice.outcome, ToastOutcome::Success) {
+            ("✓", COLOR_ACCENT)
+        } else {
+            ("!", COLOR_DESTRUCTIVE)
+        };
+        let pill = div()
+            .w(px(520.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_5()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba(0x343638ff))
+            .bg(rgba(0x111214ff))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgba(0x25282aff))
+                            .text_size(px(15.0))
+                            .text_color(rgb(COLOR_ACCENT))
+                            .child(self.notice.category.symbol()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(self.notice.category.label()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(15.0))
+                                    .text_color(rgb(COLOR_TEXT))
+                                    .text_overflow(TextOverflow::Truncate(
+                                        SharedString::new_static("…"),
+                                    ))
+                                    .child(format!(
+                                        "{} · {}",
+                                        self.notice.title, self.notice.detail
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .text_color(rgb(color))
+                            .child(symbol),
+                    ),
+            );
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(pill)
+    }
+}
+
+fn show_action_toast(notice: ToastNotice, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<ToastWindowGlobal>().map(|global| global.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |_toast, window, _cx| window.remove_window());
+        }
+    }
+
+    let toast_size = if notice.progress.is_some() {
+        size(px(240.0), px(172.0))
+    } else {
+        size(px(520.0), px(52.0))
+    };
+    let display_id = active_display_id();
+    let mut bounds = centered_bounds(toast_size, cx);
+    if let Some(display) = cx
+        .displays()
+        .into_iter()
+        .find(|display| Some(display.id()) == display_id)
+        .or_else(|| cx.primary_display())
+    {
+        let display_bounds = display.bounds();
+        bounds.origin.x =
+            display_bounds.origin.x + (display_bounds.size.width - toast_size.width) / 2.0;
+        bounds.origin.y =
+            display_bounds.origin.y + display_bounds.size.height - toast_size.height - px(84.0);
+    }
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        display_id,
+        titlebar: None,
+        kind: window_kind(),
+        is_resizable: false,
+        is_movable: false,
+        is_minimizable: false,
+        focus: false,
+        show: true,
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    };
+    let opened: Result<WindowHandle<ActionToast>, _> =
+        cx.open_window(options, move |window, cx| {
+            let toast = cx.new(|_| ActionToast { notice });
+            let toast_window = window.window_handle();
+            cx.spawn(async move |cx| {
+                smol::Timer::after(std::time::Duration::from_millis(2400)).await;
+                let _ = toast_window.update(cx, |_view, window, _cx| window.remove_window());
+            })
+            .detach();
+            toast
+        });
+    if let Ok(handle) = opened {
+        cx.set_global(ToastWindowGlobal(handle));
+        #[cfg(target_os = "macos")]
+        corvo_platform::remove_action_toast_shadow(
+            toast_size.width.to_f64(),
+            toast_size.height.to_f64(),
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LauncherPage {
     Root,
     Emoji,
     Clipboard,
+    Files,
+    Brew,
+    Ports,
+    Processes,
     Uninstaller,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrewPageMode {
+    Installed,
+    Upgrades,
+    Services,
+    Search,
+}
+
+impl BrewPageMode {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Upgrades => "upgrades",
+            Self::Services => "services",
+            Self::Search => "search",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Installed => "Installed",
+            Self::Upgrades => "Upgrades",
+            Self::Services => "Services",
+            Self::Search => "Search Homebrew",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +913,30 @@ enum ClipboardFlatItem {
     Row(usize),
 }
 
+enum FilePreviewState {
+    Empty,
+    Loading(std::path::PathBuf),
+    Ready {
+        path: std::path::PathBuf,
+        preview: FilePreview,
+    },
+}
+
+enum FilePreview {
+    Folder,
+    Image,
+    Text(String),
+    Unsupported,
+    Error(String),
+}
+
+#[derive(Clone)]
+struct FileSearchCandidate {
+    result: SearchResult,
+    name: corvo_core::search::SearchText,
+    path: corvo_core::search::SearchText,
+}
+
 #[derive(Clone, Debug)]
 struct UninstallTarget {
     name: String,
@@ -355,6 +966,9 @@ pub struct Launcher {
     page: LauncherPage,
     query: String,
     cursor_idx: usize,
+    port_argument: String,
+    port_cursor_idx: usize,
+    port_input_active: bool,
     cursor_visible: bool,
     results: Vec<SearchResult>,
     selected: usize,
@@ -362,6 +976,13 @@ pub struct Launcher {
     results_scroll_handle: ScrollHandle,
     emoji_scroll_handle: ScrollHandle,
     clipboard_scroll_handle: UniformListScrollHandle,
+    file_scroll_handle: ScrollHandle,
+    file_preview: FilePreviewState,
+    file_preview_seq: u64,
+    file_default_results: Vec<SearchResult>,
+    file_index: std::sync::Arc<Vec<FileSearchCandidate>>,
+    file_index_ready: bool,
+    file_index_loading: bool,
     filter_dropdown_open: bool,
     filter_dropdown_selected: usize,
     root_flat_items: Vec<RootFlatItem>,
@@ -385,6 +1006,7 @@ pub struct Launcher {
     background_color: u32,
     row_height: f32,
     clipboard_filter_index: usize,
+    brew_page_mode: BrewPageMode,
     registry: CommandRegistry,
     store: std::sync::Arc<dyn DataStore>,
     current_window_height: f32,
@@ -507,6 +1129,110 @@ fn render_cursor(cursor_x: Pixels, height: Pixels, visible: bool) -> Div {
         .child(div().w(px(2.0)).h(height).rounded_xs().bg(color))
 }
 
+fn load_file_preview(path: &std::path::Path) -> FilePreview {
+    use std::io::Read;
+
+    const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return FilePreview::Error("Could not read file metadata".into());
+    };
+    if metadata.file_type().is_symlink() {
+        return FilePreview::Unsupported;
+    }
+    if metadata.is_dir() {
+        return FilePreview::Folder;
+    }
+    if !metadata.is_file() {
+        return FilePreview::Unsupported;
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "avif"
+    ) {
+        return FilePreview::Image;
+    }
+    if metadata.len() > MAX_PREVIEW_BYTES {
+        return FilePreview::Unsupported;
+    }
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return FilePreview::Error("Could not read file".into());
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return FilePreview::Error("Could not read file".into());
+    }
+    if bytes.len() as u64 > MAX_PREVIEW_BYTES || bytes.contains(&0) {
+        return FilePreview::Unsupported;
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => FilePreview::Text(text),
+        Err(_) => FilePreview::Unsupported,
+    }
+}
+
+fn prepare_file_search_index(results: Vec<SearchResult>) -> Vec<FileSearchCandidate> {
+    results
+        .into_iter()
+        .map(|result| FileSearchCandidate {
+            name: corvo_core::search::SearchText::new(&result.title),
+            path: corvo_core::search::SearchText::new(
+                result.subtitle.as_deref().unwrap_or_default(),
+            ),
+            result,
+        })
+        .collect()
+}
+
+fn filter_file_search_results(
+    results: &[FileSearchCandidate],
+    query: &str,
+    max_results: usize,
+) -> Vec<SearchResult> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    use corvo_core::search::{quality, FieldRole, SearchText};
+
+    let query = SearchText::new(query);
+    let mut matches = results
+        .iter()
+        .filter_map(|candidate| {
+            let score = quality(
+                &query,
+                &[
+                    (FieldRole::Name, &candidate.name),
+                    (FieldRole::Subtitle, &candidate.path),
+                ],
+            )?;
+            let mut result = candidate.result.clone();
+            result.score = score;
+            Some(result)
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| corvo_core::search::natural_cmp(&left.title, &right.title))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    matches.truncate(max_results);
+    matches
+}
+
 fn format_wrapped_preview_lines(text: &str, max_line_len: usize) -> Vec<String> {
     let mut result = Vec::new();
     for line in text.lines() {
@@ -604,14 +1330,24 @@ impl Launcher {
             _ => 1.0,
         };
         let current_window_height = palette_size(
-            store.compact_mode(), false, page, &query, false, false, false,
-        ).height(size_scale);
+            store.compact_mode(),
+            false,
+            page,
+            &query,
+            false,
+            false,
+            false,
+        )
+        .height(size_scale);
         let cursor_idx = query.chars().count();
         let mut launcher = Self {
             focus_handle,
             page,
             query,
             cursor_idx,
+            port_argument: String::new(),
+            port_cursor_idx: 0,
+            port_input_active: false,
             cursor_visible: true,
             results: cached_initial_results(),
             selected: 0,
@@ -619,6 +1355,13 @@ impl Launcher {
             results_scroll_handle: ScrollHandle::new(),
             emoji_scroll_handle: ScrollHandle::new(),
             clipboard_scroll_handle: UniformListScrollHandle::new(),
+            file_scroll_handle: ScrollHandle::new(),
+            file_preview: FilePreviewState::Empty,
+            file_preview_seq: 0,
+            file_default_results: Vec::new(),
+            file_index: std::sync::Arc::new(Vec::new()),
+            file_index_ready: false,
+            file_index_loading: false,
             filter_dropdown_open: false,
             filter_dropdown_selected: 0,
             root_flat_items: Vec::new(),
@@ -640,6 +1383,7 @@ impl Launcher {
             background_color,
             row_height,
             clipboard_filter_index: 0,
+            brew_page_mode: BrewPageMode::Installed,
             registry: cx.global::<RegistryGlobal>().0.clone(),
             store,
             current_window_height,
@@ -652,6 +1396,10 @@ impl Launcher {
             LauncherPage::Root => launcher.refresh(cx),
             LauncherPage::Emoji => launcher.refresh_emoji(cx),
             LauncherPage::Clipboard => launcher.refresh_clipboard(cx),
+            LauncherPage::Files => launcher.refresh_files(cx),
+            LauncherPage::Brew => launcher.refresh_brew(cx),
+            LauncherPage::Ports => launcher.refresh_ports(cx),
+            LauncherPage::Processes => launcher.refresh_processes(cx),
             LauncherPage::Uninstaller => {}
         }
         launcher
@@ -894,6 +1642,10 @@ impl Launcher {
             LauncherPage::Root => self.refresh(cx),
             LauncherPage::Emoji => self.refresh_emoji(cx),
             LauncherPage::Clipboard => self.refresh_clipboard(cx),
+            LauncherPage::Files => self.refresh_files(cx),
+            LauncherPage::Brew => self.refresh_brew(cx),
+            LauncherPage::Ports => self.refresh_ports(cx),
+            LauncherPage::Processes => self.refresh_processes(cx),
             LauncherPage::Uninstaller => {
                 let visible = self.uninstaller_visible_indices();
                 if let UninstallerState::Ready(ready) = &mut self.uninstaller {
@@ -907,7 +1659,12 @@ impl Launcher {
     }
 
     fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filter_dropdown_open {
+        if self.port_input_active {
+            self.port_input_active = false;
+            self.cursor_idx = self.query.chars().count();
+            self.cursor_visible = true;
+            cx.notify();
+        } else if self.filter_dropdown_open {
             self.close_filter_dropdown(cx);
         } else if self.burger_menu_open {
             self.close_burger_menu(cx);
@@ -931,7 +1688,13 @@ impl Launcher {
             } else {
                 self.open_root_page(window, cx);
             }
-        } else if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
+        } else if self.page == LauncherPage::Emoji
+            || self.page == LauncherPage::Clipboard
+            || self.page == LauncherPage::Files
+            || self.page == LauncherPage::Brew
+            || self.page == LauncherPage::Ports
+            || self.page == LauncherPage::Processes
+        {
             if !self.query.is_empty() {
                 self.query.clear();
                 self.cursor_idx = 0;
@@ -1087,6 +1850,10 @@ impl Launcher {
 
         // ⌘↵: Execute secondary action
         if cmd && !ctrl && !alt && key == "enter" {
+            if self.page == LauncherPage::Uninstaller {
+                self.run_selected_action(window, cx);
+                return;
+            }
             if self.filtered_actions().len() > 1 {
                 self.action_selected = 1;
                 self.run_selected_action(window, cx);
@@ -1205,6 +1972,98 @@ impl Launcher {
         let alt = mods.alt;
         let shift = mods.shift;
 
+        if self.page == LauncherPage::Root && self.selected_result_is_port_action() {
+            if !cmd && !ctrl && !alt && key == "tab" {
+                self.port_input_active = !self.port_input_active;
+                self.port_cursor_idx = self.port_argument.chars().count();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            if self.port_input_active && !cmd && !ctrl && !alt {
+                match key {
+                    "escape" => {
+                        self.handle_escape(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "up" | "down" => {
+                        self.port_input_active = false;
+                        cx.notify();
+                    }
+                    _ => {
+                        match key {
+                            "enter" => {
+                                self.kill_port_argument(window, cx);
+                                cx.stop_propagation();
+                                return;
+                            }
+                            "right" => {
+                                self.port_cursor_idx = (self.port_cursor_idx + 1)
+                                    .min(self.port_argument.chars().count());
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                            "left" => {
+                                if self.port_cursor_idx == 0 {
+                                    self.port_input_active = false;
+                                    self.cursor_idx = self.query.chars().count();
+                                    self.cursor_visible = true;
+                                } else {
+                                    self.port_cursor_idx -= 1;
+                                }
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                            "backspace" => {
+                                if self.port_cursor_idx > 0 {
+                                    self.port_argument.remove(self.port_cursor_idx - 1);
+                                    self.port_cursor_idx -= 1;
+                                }
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                            "delete" => {
+                                if self.port_cursor_idx < self.port_argument.len() {
+                                    self.port_argument.remove(self.port_cursor_idx);
+                                }
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                            _ => {}
+                        }
+                        let typed = keystroke.key_char.clone();
+                        if let Some(text) =
+                            typed.filter(|text| text.chars().all(|ch| ch.is_ascii_digit()))
+                        {
+                            for ch in text.chars() {
+                                self.port_argument.insert(self.port_cursor_idx, ch);
+                                self.port_cursor_idx += 1;
+                            }
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                }
+                if self.port_input_active {
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            if !cmd && !ctrl && !alt && key == "right" {
+                self.port_input_active = true;
+                self.port_cursor_idx = self.port_argument.chars().count();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         // Stage 0: Global App & Window Lifecycle
         if cmd && !ctrl && !alt && !shift {
             match key {
@@ -1226,11 +2085,9 @@ impl Launcher {
                     return;
                 }
                 "k" => {
-                    if self.page != LauncherPage::Uninstaller {
-                        self.toggle_actions(cx);
-                        cx.stop_propagation();
-                        return;
-                    }
+                    self.toggle_actions(cx);
+                    cx.stop_propagation();
+                    return;
                 }
                 _ => {}
             }
@@ -1295,8 +2152,21 @@ impl Launcher {
             if cmd && !ctrl && !alt && (key == "backspace" || key == "delete") {
                 if let Some(res) = self.selected_result() {
                     if let Some(id) = res.id.strip_prefix("clipboard-manager:entry:") {
-                        corvo_clipboard_manager::delete_entry(id);
+                        let result = corvo_clipboard_manager::delete_entry(id);
                         self.refresh_clipboard(cx);
+                        let notice = match result {
+                            Ok(()) => ToastNotice::success(
+                                ToastCategory::Clipboard,
+                                "Item removed",
+                                "Removed from clipboard history",
+                            ),
+                            Err(error) => ToastNotice::failure(
+                                ToastCategory::Clipboard,
+                                "Could not remove item",
+                                error,
+                            ),
+                        };
+                        show_action_toast(notice, cx);
                         cx.stop_propagation();
                         return;
                     }
@@ -1547,6 +2417,10 @@ impl Launcher {
                 self.refresh_current_page(cx);
             } else if self.page == LauncherPage::Emoji
                 || self.page == LauncherPage::Clipboard
+                || self.page == LauncherPage::Files
+                || self.page == LauncherPage::Brew
+                || self.page == LauncherPage::Ports
+                || self.page == LauncherPage::Processes
                 || self.page == LauncherPage::Uninstaller
             {
                 self.open_root_page(window, cx);
@@ -1612,6 +2486,7 @@ impl Launcher {
 
     fn open_root_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.page = LauncherPage::Root;
+        self.brew_page_mode = BrewPageMode::Installed;
         self.query.clear();
         self.force_expanded = false;
         self.cursor_idx = 0;
@@ -1647,6 +2522,78 @@ impl Launcher {
         cx.notify();
     }
 
+    fn open_files_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Files;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.results = self.file_default_results.clone();
+        self.selected = 0;
+        self.file_preview = FilePreviewState::Empty;
+        self.file_index_ready = false;
+        self.file_scroll_handle.scroll_to_item(0);
+        self.actions_open = false;
+        self.actions.clear();
+        self.actions_filter.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_files(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_brew_page(&mut self, mode: BrewPageMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Brew;
+        self.brew_page_mode = mode;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_brew(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_ports_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Ports;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_ports(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_processes_page(&mut self, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Processes;
+        self.query = filter.to_string();
+        self.cursor_idx = self.query.chars().count();
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_processes(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
     fn open_uninstaller_page(
         &mut self,
         name: String,
@@ -1654,7 +2601,13 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let path = path.canonicalize().unwrap_or(path);
+        let path = if cfg!(target_os = "linux")
+            && corvo_platform::supports_app_uninstall_path(&path)
+        {
+            path
+        } else {
+            path.canonicalize().unwrap_or(path)
+        };
         let icon_png = corvo_platform::extract_app_icon(&path);
         let target = UninstallTarget {
             name,
@@ -1762,6 +2715,7 @@ impl Launcher {
             self.filter_dropdown_selected = match self.page {
                 LauncherPage::Emoji => self.emoji_category_index,
                 LauncherPage::Clipboard => self.clipboard_filter_index,
+                LauncherPage::Files => 0,
                 _ => 0,
             };
         }
@@ -1781,6 +2735,7 @@ impl Launcher {
             LauncherPage::Clipboard => {
                 self.set_clipboard_filter(idx, cx);
             }
+            LauncherPage::Files => {}
             _ => {}
         }
         self.filter_dropdown_open = false;
@@ -1795,6 +2750,28 @@ impl Launcher {
         self.root_flat_items.clear();
         self.root_to_flat.clear();
         self.root_to_flat.resize(self.results.len(), 0);
+
+        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
+            for (kind, title) in [("formula", "Formulae"), ("cask", "Casks")] {
+                let matching: Vec<_> = self
+                    .results
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, result)| result.id.split(':').nth(2) == Some(kind))
+                    .map(|(index, _)| index)
+                    .collect();
+                if matching.is_empty() {
+                    continue;
+                }
+                self.root_flat_items
+                    .push(RootFlatItem::Header(title.into()));
+                for result_index in matching {
+                    self.root_to_flat[result_index] = self.root_flat_items.len();
+                    self.root_flat_items.push(RootFlatItem::Row(result_index));
+                }
+            }
+            return;
+        }
 
         if !self.results.is_empty() {
             self.root_flat_items
@@ -1834,6 +2811,24 @@ impl Launcher {
         self.select(next, cx);
     }
 
+    fn select_result_index(&mut self, result_index: usize, cx: &mut Context<Self>) {
+        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
+            let visible_position = self
+                .root_flat_items
+                .iter()
+                .filter_map(|item| match item {
+                    RootFlatItem::Row(index) => Some(*index),
+                    RootFlatItem::Header(_) => None,
+                })
+                .position(|index| index == result_index);
+            if let Some(visible_position) = visible_position {
+                self.select(visible_position, cx);
+            }
+        } else {
+            self.select(result_index, cx);
+        }
+    }
+
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.page == LauncherPage::Uninstaller {
             let visible = self.uninstaller_visible_indices();
@@ -1861,6 +2856,13 @@ impl Launcher {
             cx.notify();
             return;
         }
+        if self.page == LauncherPage::Files {
+            self.selected = index.min(self.results.len().saturating_sub(1));
+            self.file_scroll_handle.scroll_to_item(self.selected);
+            self.refresh_file_preview(cx);
+            cx.notify();
+            return;
+        }
         if self.page == LauncherPage::Emoji {
             self.selected = index.min(self.results.len().saturating_sub(1));
             let row = self.selected / self.emoji_column_count;
@@ -1869,14 +2871,31 @@ impl Launcher {
             return;
         }
 
+        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
+            let Some(result_index) = self
+                .root_flat_items
+                .iter()
+                .filter_map(|item| match item {
+                    RootFlatItem::Row(result_index) => Some(*result_index),
+                    RootFlatItem::Header(_) => None,
+                })
+                .nth(index)
+            else {
+                return;
+            };
+            self.selected = result_index;
+            let flat_idx = self.root_to_flat.get(result_index).copied().unwrap_or(0);
+            self.results_scroll_handle.scroll_to_item(flat_idx);
+            cx.notify();
+            return;
+        }
+
         self.selected = index.min(self.results.len().saturating_sub(1));
+        if !self.selected_result_is_port_action() {
+            self.port_input_active = false;
+        }
         let flat_idx = self.root_to_flat.get(self.selected).copied().unwrap_or(0);
-        let scroll_target = if self.selected > 0 {
-            (flat_idx + 1).min(self.root_flat_items.len().saturating_sub(1))
-        } else {
-            0
-        };
-        self.results_scroll_handle.scroll_to_item(scroll_target);
+        self.results_scroll_handle.scroll_to_item(flat_idx);
         cx.notify();
     }
 
@@ -1906,6 +2925,11 @@ impl Launcher {
     fn selectable_count(&self) -> usize {
         if self.page == LauncherPage::Uninstaller {
             self.uninstaller_visible_indices().len()
+        } else if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
+            self.root_flat_items
+                .iter()
+                .filter(|item| matches!(item, RootFlatItem::Row(_)))
+                .count()
         } else {
             self.results.len()
         }
@@ -1921,6 +2945,15 @@ impl Launcher {
             visible
                 .iter()
                 .position(|index| *index == focused)
+                .unwrap_or(0)
+        } else if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
+            self.root_flat_items
+                .iter()
+                .filter_map(|item| match item {
+                    RootFlatItem::Row(result_index) => Some(*result_index),
+                    RootFlatItem::Header(_) => None,
+                })
+                .position(|result_index| result_index == self.selected)
                 .unwrap_or(0)
         } else {
             self.selected
@@ -1951,14 +2984,22 @@ impl Launcher {
             .filter(|selected| **selected)
             .count();
         if selected_count == 0 {
-            ready.message = Some("Select at least one item to move to Trash".into());
+            ready.message = Some(if cfg!(target_os = "macos") {
+                "Select at least one item to move to Trash".into()
+            } else {
+                "Select the application package to uninstall".into()
+            });
             ready.confirming = false;
             cx.notify();
             return;
         }
         if !ready.confirming {
             ready.confirming = true;
-            ready.message = Some(format!("Move {selected_count} selected items to Trash?"));
+            ready.message = Some(if cfg!(target_os = "macos") {
+                format!("Move {selected_count} selected items to Trash?")
+            } else {
+                format!("Uninstall {}?", ready.target.name)
+            });
             cx.notify();
             return;
         }
@@ -1984,10 +3025,11 @@ impl Launcher {
                     .map(|()| moved_paths)
             })
             .await;
-            let (files, reached_scan_limit, message) = match result {
+            let (files, reached_scan_limit, message, notice) = match result {
                 Ok(moved_paths) => {
                     let moved_paths: std::collections::HashSet<_> =
                         moved_paths.into_iter().collect();
+                    let moved_count = moved_paths.len();
                     let remaining: Vec<_> = files
                         .into_iter()
                         .filter(|file| !moved_paths.contains(&file.path))
@@ -1995,21 +3037,45 @@ impl Launcher {
                     (
                         remaining,
                         scan_limited,
-                        Some(format!("Moved {} items to Trash", moved_paths.len())),
+                        Some(if cfg!(target_os = "macos") {
+                            format!("Moved {moved_count} items to Trash")
+                        } else {
+                            format!("Uninstalled {}", target.name)
+                        }),
+                        ToastNotice::success(
+                            ToastCategory::Uninstallation,
+                            if cfg!(target_os = "macos") {
+                                "Moved to Trash"
+                            } else {
+                                "Uninstalled"
+                            },
+                            format!("{} · {moved_count} items", target.name),
+                        ),
                     )
                 }
                 Err(error) => {
+                    let notice = ToastNotice::failure(
+                        ToastCategory::Uninstallation,
+                        format!("Could not remove {}", target.name),
+                        error.to_string(),
+                    );
                     let scan_target = target.clone();
                     let current_scan = smol::unblock(move || {
                         corvo_platform::associated_app_files(&scan_target.path)
                     })
                     .await;
                     match current_scan {
-                        Ok(scan) => (scan.files, scan.reached_scan_limit, Some(error.to_string())),
-                        Err(_) => (files, scan_limited, Some(error.to_string())),
+                        Ok(scan) => (
+                            scan.files,
+                            scan.reached_scan_limit,
+                            Some(error.to_string()),
+                            notice,
+                        ),
+                        Err(_) => (files, scan_limited, Some(error.to_string()), notice),
                     }
                 }
             };
+            cx.update(|cx| show_action_toast(notice, cx));
             let _ = this.update(cx, |launcher, cx| {
                 let selected_files = vec![false; files.len()];
                 launcher.uninstaller = UninstallerState::Ready(UninstallerReady {
@@ -2034,11 +3100,83 @@ impl Launcher {
         self.results.get(self.selected)
     }
 
+    fn selected_result_is_port_action(&self) -> bool {
+        self.selected_result()
+            .is_some_and(|result| result.id == "kill-process:open-ports")
+    }
+
+    fn kill_port_argument(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(port) = self.port_argument.parse::<u16>() else {
+            self.port_input_active = false;
+            self.cursor_visible = true;
+            show_action_toast(
+                ToastNotice::failure(
+                    ToastCategory::Port,
+                    "Invalid port",
+                    "Enter a port from 1 to 65535",
+                ),
+                cx,
+            );
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                let listeners = corvo_platform::listening_port_snapshot()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|listener| listener.port == port)
+                    .map(|listener| listener.process)
+                    .collect::<std::collections::HashSet<_>>();
+                if listeners.is_empty() {
+                    return Err(format!("No process is listening on port {port}"));
+                }
+                let mut stopped = 0;
+                let mut errors = Vec::new();
+                for identity in listeners {
+                    match corvo_platform::terminate_process(
+                        identity,
+                        corvo_platform::TerminationMode::Graceful,
+                    ) {
+                        Ok(()) => stopped += 1,
+                        Err(error) => errors.push(error.to_string()),
+                    }
+                }
+                if errors.is_empty() {
+                    let process_label = if stopped == 1 { "process" } else { "processes" };
+                    Ok(format!("Stopped {stopped} {process_label} on port {port}"))
+                } else {
+                    Err(format!("Stopped {stopped}. {}", errors.join("; ")))
+                }
+            })
+            .await;
+            let notice = match result {
+                Ok(message) => ToastNotice::success(ToastCategory::Port, "Port released", message),
+                Err(message) => {
+                    ToastNotice::failure(ToastCategory::Port, "Could not clear port", message)
+                }
+            };
+            cx.update(|cx| show_action_toast(notice, cx));
+            let _ = this.update(cx, |launcher, _cx| {
+                launcher.port_input_active = false;
+            });
+        })
+        .detach();
+    }
+
     /// Runs every command's search on the background executor and swaps
     /// the result list when they answer.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let query = self.query.clone();
         let commands = self.registry.commands().to_vec();
+        let scoped_command_id = commands
+            .iter()
+            .find(|command| {
+                command.prefix().is_some_and(|prefix| {
+                    corvo_core::search::matches_command_prefix(&query, prefix)
+                }) || (command.id() == "kill-process"
+                    && corvo_core::search::matches_command_prefix(&query, "port manager"))
+            })
+            .map(|command| command.id());
         let launcher_store = self.store.clone();
         let settings = corvo_config::Settings::load();
         let fallback_enabled = self.store.command_enabled("web-search-fallback");
@@ -2051,8 +3189,11 @@ impl Launcher {
             self.results_scroll_handle.scroll_to_item(0);
             cx.notify();
         } else {
-            let fast = cached_query_results(&query, max_results, fallback_enabled);
-            self.results = fast;
+            self.results = if scoped_command_id.is_some() {
+                Vec::new()
+            } else {
+                cached_query_results(&query, max_results, fallback_enabled)
+            };
             apply_result_preferences(&mut self.results, &settings, &query);
             self.rebuild_root_flat_items();
             self.selected = 0;
@@ -2073,6 +3214,10 @@ impl Launcher {
                 .into_iter()
                 .filter(|command| {
                     command.id() != "web-search-fallback"
+                        && scoped_command_id.map_or_else(
+                            || command.prefix().is_none() || !query.trim().is_empty(),
+                            |id| command.id() == id,
+                        )
                         && ctx
                             .store
                             .as_ref()
@@ -2083,10 +3228,42 @@ impl Launcher {
             let (sender, receiver) = smol::channel::unbounded();
             for command in searchable {
                 let sender = sender.clone();
-                let query = query.clone();
+                let command_prefix = command.prefix().map(str::to_owned);
+                let typed_query = query.clone();
+                let search_command_menu = scoped_command_id.is_none() && command_prefix.is_some();
+                let search_query = if search_command_menu {
+                    if command.id() == "kill-process" {
+                        "Port Manager".to_string()
+                    } else {
+                        command_prefix.unwrap_or_default()
+                    }
+                } else {
+                    query.clone()
+                };
                 let ctx = ctx.clone();
                 smol::spawn(async move {
-                    let results = command.search(&query, &ctx).await;
+                    let mut results = command.search(&search_query, &ctx).await;
+                    if search_command_menu {
+                        let has_exact_word_match = results.iter().any(|result| {
+                            command_menu_exact_word_match(typed_query.trim(), result)
+                        });
+                        results.retain_mut(|result| {
+                            if typed_query.trim().is_empty() {
+                                return true;
+                            }
+                            if has_exact_word_match
+                                && !command_menu_exact_word_match(typed_query.trim(), result)
+                            {
+                                return false;
+                            }
+                            let Some(score) = command_menu_match_score(typed_query.trim(), result)
+                            else {
+                                return false;
+                            };
+                            result.score = score + 600;
+                            true
+                        });
+                    }
                     let _ = sender.send(results).await;
                 })
                 .detach();
@@ -2145,7 +3322,7 @@ impl Launcher {
                     MAX_WEAK_SEARCH_RESULTS
                 };
                 fast_results.truncate(limit);
-                if fallback_enabled {
+                if scoped_command_id.is_none() && fallback_enabled {
                     fast_results.extend(corvo_web_search_fallback::search_results(&query));
                 }
                 apply_result_preferences(&mut fast_results, &search_settings, &query);
@@ -2170,7 +3347,11 @@ impl Launcher {
                     launcher.results = fast_results;
                     launcher.rebuild_root_flat_items();
                     if let Some(ref id) = prev_id {
-                        launcher.selected = launcher.results.iter().position(|r| &r.id == id).unwrap_or(0);
+                        launcher.selected = launcher
+                            .results
+                            .iter()
+                            .position(|r| &r.id == id)
+                            .unwrap_or(0);
                     } else {
                         launcher.selected = 0;
                         launcher.results_scroll_handle.scroll_to_item(0);
@@ -2211,7 +3392,7 @@ impl Launcher {
                         MAX_WEAK_SEARCH_RESULTS
                     };
                     results.truncate(limit);
-                    if fallback_enabled {
+                    if scoped_command_id.is_none() && fallback_enabled {
                         results.extend(corvo_web_search_fallback::search_results(&query));
                     }
                     apply_result_preferences(&mut results, &search_settings, &query);
@@ -2229,7 +3410,11 @@ impl Launcher {
                         launcher.results = results;
                         launcher.rebuild_root_flat_items();
                         if let Some(ref id) = prev_id {
-                            launcher.selected = launcher.results.iter().position(|r| &r.id == id).unwrap_or(0);
+                            launcher.selected = launcher
+                                .results
+                                .iter()
+                                .position(|r| &r.id == id)
+                                .unwrap_or(0);
                         } else {
                             launcher.selected = 0;
                             launcher.results_scroll_handle.scroll_to_item(0);
@@ -2344,12 +3529,376 @@ impl Launcher {
         .detach();
     }
 
+    fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "file-search")
+            .cloned()
+        else {
+            self.results.clear();
+            self.file_index = std::sync::Arc::new(Vec::new());
+            self.file_default_results.clear();
+            self.file_index_ready = false;
+            self.file_index_loading = false;
+            self.file_preview = FilePreviewState::Empty;
+            cx.notify();
+            return;
+        };
+        if !self.store.command_enabled(command.id()) {
+            self.results.clear();
+            self.file_index = std::sync::Arc::new(Vec::new());
+            self.file_default_results.clear();
+            self.file_index_ready = false;
+            self.file_index_loading = false;
+            self.file_preview = FilePreviewState::Empty;
+            cx.notify();
+            return;
+        }
+
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        let query = self.query.trim().to_lowercase();
+
+        if self.file_index_ready {
+            if query.is_empty() {
+                self.set_file_results(self.file_default_results.clone(), cx);
+                return;
+            }
+            let index = self.file_index.clone();
+            cx.spawn(async move |this, cx| {
+                smol::Timer::after(std::time::Duration::from_millis(40)).await;
+                let Ok(is_current) = this.read_with(cx, |launcher, _| {
+                    launcher.page == LauncherPage::Files && launcher.search_seq == seq
+                }) else {
+                    return;
+                };
+                if !is_current {
+                    return;
+                }
+                let results =
+                    smol::unblock(move || filter_file_search_results(&index, &query, 100)).await;
+                let _ = this.update(cx, |launcher, cx| {
+                    if launcher.page == LauncherPage::Files && launcher.search_seq == seq {
+                        launcher.set_file_results(results, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+
+        if self.file_index_loading {
+            let results = if query.is_empty() {
+                self.file_default_results.clone()
+            } else {
+                let candidates = prepare_file_search_index(self.file_default_results.clone());
+                filter_file_search_results(&candidates, &query, 100)
+            };
+            self.set_file_results(results, cx);
+            return;
+        }
+
+        self.file_index_loading = true;
+        let launcher_store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let shallow_ctx = SearchContext {
+                max_results: 100,
+                store: Some(launcher_store.clone()),
+            };
+            let shallow_results = command.search("file-search-page:", &shallow_ctx).await;
+            let shallow_candidates = prepare_file_search_index(shallow_results.clone());
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.page == LauncherPage::Files {
+                    launcher.file_default_results = shallow_results.clone();
+                    let query = launcher.query.trim().to_lowercase();
+                    let visible = if query.is_empty() {
+                        shallow_results
+                    } else {
+                        filter_file_search_results(&shallow_candidates, &query, 100)
+                    };
+                    launcher.set_file_results(visible, cx);
+                }
+            });
+
+            let index_ctx = SearchContext {
+                max_results: 20_000,
+                store: Some(launcher_store),
+            };
+            let index = command.search("file-search-page:index", &index_ctx).await;
+            let index = smol::unblock(move || prepare_file_search_index(index)).await;
+            let _ = this.update(cx, |launcher, cx| {
+                launcher.file_index_loading = false;
+                launcher.file_index = std::sync::Arc::new(index);
+                launcher.file_index_ready = true;
+                if launcher.page == LauncherPage::Files {
+                    launcher.refresh_files(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_file_results(&mut self, results: Vec<SearchResult>, cx: &mut Context<Self>) {
+        let previous_id = self.selected_result().map(|result| result.id.clone());
+        self.results = results;
+        self.selected = previous_id
+            .and_then(|id| self.results.iter().position(|result| result.id == id))
+            .unwrap_or(0)
+            .min(self.results.len().saturating_sub(1));
+        self.file_scroll_handle.scroll_to_item(self.selected);
+        self.refresh_file_preview(cx);
+        cx.notify();
+    }
+
+    fn refresh_file_preview(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .selected_result()
+            .and_then(|result| result.id.strip_prefix("file-search:"))
+            .filter(|path| *path != "open")
+            .map(std::path::PathBuf::from);
+        let Some(path) = path else {
+            self.file_preview_seq += 1;
+            self.file_preview = FilePreviewState::Empty;
+            return;
+        };
+        let already_loaded = match &self.file_preview {
+            FilePreviewState::Loading(current) => current == &path,
+            FilePreviewState::Ready { path: current, .. } => current == &path,
+            FilePreviewState::Empty => false,
+        };
+        if already_loaded {
+            return;
+        }
+
+        self.file_preview_seq += 1;
+        let seq = self.file_preview_seq;
+        self.file_preview = FilePreviewState::Loading(path.clone());
+        cx.spawn(async move |this, cx| {
+            let preview_path = path.clone();
+            let preview = smol::unblock(move || load_file_preview(&preview_path)).await;
+            let _ = this.update(cx, |launcher, cx| {
+                let selected_path = launcher
+                    .selected_result()
+                    .and_then(|result| result.id.strip_prefix("file-search:"));
+                if launcher.page == LauncherPage::Files
+                    && launcher.file_preview_seq == seq
+                    && selected_path == Some(path.to_string_lossy().as_ref())
+                {
+                    launcher.file_preview = FilePreviewState::Ready { path, preview };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_brew(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "brew")
+            .cloned()
+        else {
+            self.results.clear();
+            self.rebuild_root_flat_items();
+            cx.notify();
+            return;
+        };
+        if !self.store.command_enabled(command.id()) {
+            self.results.clear();
+            self.rebuild_root_flat_items();
+            cx.notify();
+            return;
+        }
+
+        let mode = self.brew_page_mode;
+        let query = format!("brew-page:{}:{}", mode.token(), self.query);
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command.search(&query, &ctx).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq
+                    && launcher.page == LauncherPage::Brew
+                    && launcher.brew_page_mode == mode
+                {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = if mode == BrewPageMode::Upgrades {
+                        launcher
+                            .root_flat_items
+                            .iter()
+                            .find_map(|item| match item {
+                                RootFlatItem::Row(index) => Some(*index),
+                                RootFlatItem::Header(_) => None,
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_ports(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "kill-process")
+            .cloned()
+        else {
+            self.results.clear();
+            self.rebuild_root_flat_items();
+            cx.notify();
+            return;
+        };
+        let filter = self.query.clone();
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command
+                .search(&format!("kill-process-page:ports:{filter}"), &ctx)
+                .await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::Ports {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_processes(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "kill-process")
+            .cloned()
+        else {
+            self.results.clear();
+            self.rebuild_root_flat_items();
+            cx.notify();
+            return;
+        };
+        let filter = self.query.clone();
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command
+                .search(&format!("kill-process-page:processes:{filter}"), &ctx)
+                .await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::Processes {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Opens the ⌘K actions menu for the selected result, or closes it.
     fn toggle_actions(&mut self, cx: &mut Context<Self>) {
         self.burger_menu_open = false;
         self.filter_dropdown_open = false;
         if self.actions_open {
             self.close_actions(cx);
+            return;
+        }
+        if self.page == LauncherPage::Uninstaller {
+            let UninstallerState::Ready(ready) = &self.uninstaller else {
+                return;
+            };
+            let focused = ready.files.get(ready.focused);
+            let selected = ready
+                .selected_files
+                .get(ready.focused)
+                .copied()
+                .unwrap_or(false);
+            let target_name = ready.target.name.clone();
+            let mut actions = Vec::new();
+            if focused.is_some() {
+                actions.extend([
+                    CommandAction {
+                        id: "uninstaller:toggle-file".into(),
+                        label: if selected {
+                            "Unselect File"
+                        } else {
+                            "Select File"
+                        }
+                        .into(),
+                        action: Action::CloseWindow,
+                        icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::CIRCLE),
+                        group: corvo_core::ActionGroup::Standard,
+                        hotkey: Some("⌘↵"),
+                    },
+                    CommandAction {
+                        id: "uninstaller:copy-path".into(),
+                        label: "Copy Path".into(),
+                        action: Action::CloseWindow,
+                        icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
+                        group: corvo_core::ActionGroup::Standard,
+                        hotkey: Some("⌥⌘C"),
+                    },
+                    CommandAction {
+                        id: "uninstaller:show-in-finder".into(),
+                        label: "Show in Finder".into(),
+                        action: Action::CloseWindow,
+                        icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::FOLDER),
+                        group: corvo_core::ActionGroup::Standard,
+                        hotkey: Some("⇧⌘O"),
+                    },
+                    CommandAction {
+                        id: "uninstaller:show-info".into(),
+                        label: "Show Info in Finder".into(),
+                        action: Action::CloseWindow,
+                        icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::INFO),
+                        group: corvo_core::ActionGroup::Standard,
+                        hotkey: Some("⇧⌘I"),
+                    },
+                ]);
+            }
+            self.actions = actions;
+            self.actions_title = target_name;
+            self.actions_filter.clear();
+            self.action_selected = 0;
+            self.actions_open = true;
+            cx.notify();
             return;
         }
         let (result_id, title, command_id) = match self.selected_result() {
@@ -2371,7 +3920,10 @@ impl Launcher {
         };
         let mut actions = command.actions(&result_id);
         let settings = corvo_config::Settings::load();
-        let config = settings.result_item(&result_id, &title).cloned().unwrap_or_default();
+        let config = settings
+            .result_item(&result_id, &title)
+            .cloned()
+            .unwrap_or_default();
         let favorite = settings.result_is_favorite(&result_id);
         actions.push(CommandAction {
             id: "launcher:favorite".into(),
@@ -2590,6 +4142,12 @@ impl Launcher {
             .collect()
     }
 
+    fn selected_action(&self) -> Option<&CommandAction> {
+        self.filtered_actions()
+            .get(self.action_selected)
+            .and_then(|index| self.actions.get(*index))
+    }
+
     fn run_selected_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let filtered = self.filtered_actions();
         let Some(position) = filtered.get(self.action_selected) else {
@@ -2599,12 +4157,101 @@ impl Launcher {
             return;
         };
         let entry_id = entry.id.clone();
+        if entry_id.starts_with("uninstaller:") {
+            self.actions_open = false;
+            self.actions.clear();
+            self.actions_filter.clear();
+            match entry_id.as_str() {
+                "uninstaller:toggle-file" => self.toggle_uninstaller_focus(cx),
+                "uninstaller:copy-path" => {
+                    let path = match &self.uninstaller {
+                        UninstallerState::Ready(ready) => ready
+                            .files
+                            .get(ready.focused)
+                            .map(|file| file.path.display().to_string()),
+                        _ => None,
+                    };
+                    if let Some(path) = path {
+                        let result = corvo_platform::platform_ops()
+                            .copy_text(&path)
+                            .map_err(|error| error.to_string());
+                        let notice = match result {
+                            Ok(()) => ToastNotice::success(
+                                ToastCategory::Uninstallation,
+                                "Path copied",
+                                path,
+                            ),
+                            Err(error) => ToastNotice::failure(
+                                ToastCategory::Uninstallation,
+                                "Could not copy path",
+                                error,
+                            ),
+                        };
+                        show_action_toast(notice, cx);
+                    }
+                    cx.notify();
+                }
+                "uninstaller:show-in-finder" | "uninstaller:show-info" => {
+                    let path = match &self.uninstaller {
+                        UninstallerState::Ready(ready) => {
+                            ready.files.get(ready.focused).map(|file| file.path.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(path) = path {
+                        let show_in_finder = entry_id == "uninstaller:show-in-finder";
+                        let result = if show_in_finder {
+                            std::process::Command::new("open")
+                                .arg("-R")
+                                .arg(&path)
+                                .status()
+                        } else {
+                            std::process::Command::new("osascript")
+                                .arg("-e")
+                                .arg("on run argv\n tell application \"Finder\" to open information window of (POSIX file (item 1 of argv))\nend run")
+                                .arg(path.as_os_str())
+                                .status()
+                        };
+                        let notice = match result {
+                            Ok(status) if status.success() => ToastNotice::success(
+                                ToastCategory::Uninstallation,
+                                if show_in_finder {
+                                    "Showing in Finder"
+                                } else {
+                                    "Showing file info"
+                                },
+                                path.file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("Selected file"),
+                            ),
+                            Ok(status) => ToastNotice::failure(
+                                ToastCategory::Uninstallation,
+                                "Could not open Finder action",
+                                format!("Exit code {}", status.code().unwrap_or(-1)),
+                            ),
+                            Err(error) => ToastNotice::failure(
+                                ToastCategory::Uninstallation,
+                                "Could not open Finder action",
+                                error.to_string(),
+                            ),
+                        };
+                        show_action_toast(notice, cx);
+                    }
+                    cx.notify();
+                }
+                _ => {}
+            }
+            return;
+        }
         let action = Ok(entry.action.clone());
         let is_repeatable = entry_id.contains("volume-up")
             || entry_id.contains("volume-down")
             || entry_id.contains("brightness-up")
             || entry_id.contains("brightness-down")
-            || matches!(entry.action, Action::AdjustBrightness(_));
+            || matches!(
+                entry.action,
+                Action::AdjustBrightness(_) | Action::AdjustVolume(_)
+            );
         if !is_repeatable {
             self.actions_open = false;
             self.actions = Vec::new();
@@ -2625,7 +4272,7 @@ impl Launcher {
 
     fn execute_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page == LauncherPage::Uninstaller {
-            self.toggle_uninstaller_focus(cx);
+            self.begin_uninstall(cx);
             return;
         }
         if self.page == LauncherPage::Emoji {
@@ -2634,6 +4281,17 @@ impl Launcher {
         }
         if self.page == LauncherPage::Clipboard {
             self.execute_selected_clipboard(window, cx);
+            return;
+        }
+        if self.page == LauncherPage::Files {
+            if let Some(path) = self
+                .selected_result()
+                .and_then(|result| result.id.strip_prefix("file-search:"))
+                .filter(|path| *path != "open")
+                .map(std::path::PathBuf::from)
+            {
+                self.perform(Ok(Action::Open(path)), window, cx);
+            }
             return;
         }
         let selected_opt = self.selected_result().cloned().or_else(|| {
@@ -2665,6 +4323,34 @@ impl Launcher {
             self.open_clipboard_page(window, cx);
             return;
         }
+        if result.id == "kill-process:open-ports" {
+            self.open_ports_page(window, cx);
+            return;
+        }
+        if let Some(filter) = result.id.strip_prefix("kill-process:open-processes") {
+            let filter = filter.strip_prefix(':').unwrap_or_default();
+            self.open_processes_page(filter, window, cx);
+            return;
+        }
+        match result.id.as_str() {
+            "brew:show-installed" => {
+                self.open_brew_page(BrewPageMode::Installed, window, cx);
+                return;
+            }
+            "brew:show-upgrades" => {
+                self.open_brew_page(BrewPageMode::Upgrades, window, cx);
+                return;
+            }
+            "brew:manage-services" => {
+                self.open_brew_page(BrewPageMode::Services, window, cx);
+                return;
+            }
+            "brew:search" => {
+                self.open_brew_page(BrewPageMode::Search, window, cx);
+                return;
+            }
+            _ => {}
+        }
         if result.id == "system-actions:check-for-updates" || result.id == "check-for-updates" {
             self.dismiss(window);
             open_settings_tab_with_update_check(SettingsTab::About, cx);
@@ -2692,11 +4378,10 @@ impl Launcher {
             .find(|a| a.group == ActionGroup::Primary)
             .or_else(|| actions.first())
         {
+            if command_id == "app-launcher" {
+                corvo_app_launcher::record_launch(&result_id);
+            }
             let primary_action = primary.action.clone();
-            cx.spawn(async move |_this, _cx| {
-                let _ = command.execute(&result_id, &ctx).await;
-            })
-            .detach();
             self.perform(Ok(primary_action), window, cx);
             return;
         }
@@ -2781,20 +4466,49 @@ impl Launcher {
         let ops = corvo_platform::platform_ops();
         match action {
             Ok(Action::Open(path)) => {
+                let category = self
+                    .selected_result()
+                    .map(|result| category_for_result(&result.id))
+                    .unwrap_or(ToastCategory::General);
+                let item_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("item")
+                    .to_string();
                 self.previous_app = None;
                 corvo_platform::forget_launcher_panel();
                 window.remove_window();
-                let _ = ops.open_path(&path);
+                if let Err(error) = ops.open_path(&path) {
+                    show_action_toast(
+                        ToastNotice::failure(
+                            category,
+                            "Could not open item",
+                            format!("{item_name} · {error}"),
+                        ),
+                        cx,
+                    );
+                }
             }
             Ok(Action::OpenAppUninstaller { name, path }) => {
                 self.open_uninstaller_page(name, path, window, cx);
             }
+            Ok(Action::OpenFileSearch) => self.open_files_page(window, cx),
             Ok(Action::SetResultFavorite {
                 result_id,
                 title,
                 favorite,
             }) => {
-                self.save_result_flag(&result_id, &title, None, Some(favorite));
+                let saved = self.save_result_flag(&result_id, &title, None, Some(favorite));
+                let notice = if saved {
+                    ToastNotice::success(
+                        ToastCategory::General,
+                        if favorite { "Pinned" } else { "Unpinned" },
+                        title,
+                    )
+                } else {
+                    ToastNotice::failure(ToastCategory::General, "Could not update favorite", title)
+                };
+                show_action_toast(notice, cx);
                 self.refresh(cx);
             }
             Ok(Action::SetResultHidden {
@@ -2802,16 +4516,69 @@ impl Launcher {
                 title,
                 hidden,
             }) => {
-                self.save_result_flag(&result_id, &title, Some(hidden), None);
+                let saved = self.save_result_flag(&result_id, &title, Some(hidden), None);
+                let notice = if saved {
+                    ToastNotice::success(
+                        ToastCategory::General,
+                        if hidden { "Hidden" } else { "Shown" },
+                        title,
+                    )
+                } else {
+                    ToastNotice::failure(
+                        ToastCategory::General,
+                        "Could not update visibility",
+                        title,
+                    )
+                };
+                show_action_toast(notice, cx);
                 self.refresh(cx);
             }
             Ok(Action::OpenUrl(url)) => {
+                let (category, action_title, is_system_setting) = self
+                    .selected_result()
+                    .map(|result| {
+                        (
+                            category_for_result(&result.id),
+                            result.title.clone(),
+                            result.id.starts_with("system-actions:"),
+                        )
+                    })
+                    .unwrap_or((ToastCategory::General, "Link".into(), false));
                 self.previous_app = None;
                 corvo_platform::forget_launcher_panel();
                 window.remove_window();
-                let _ = corvo_platform::open_url(&url);
+                match corvo_platform::open_url(&url) {
+                    Ok(()) if is_system_setting => show_action_toast(
+                        ToastNotice::success(
+                            ToastCategory::System,
+                            "Opening setting",
+                            action_title,
+                        ),
+                        cx,
+                    ),
+                    Err(error) => show_action_toast(
+                        ToastNotice::failure(category, "Could not open link", error.to_string()),
+                        cx,
+                    ),
+                    _ => {}
+                }
             }
             Ok(Action::RunShell(cmd)) => {
+                let (category, action_title, action_id) = self
+                    .selected_result()
+                    .map(|result| {
+                        (
+                            category_for_result(&result.id),
+                            result.title.clone(),
+                            result.id.clone(),
+                        )
+                    })
+                    .unwrap_or((ToastCategory::General, "Action".into(), String::new()));
+                let volume_direction = match action_id.as_str() {
+                    "system-actions:action:volume-up" => Some(true),
+                    "system-actions:action:volume-down" => Some(false),
+                    _ => None,
+                };
                 let is_repeatable = self.selected_result().is_some_and(|r| {
                     r.id.contains("volume-up")
                         || r.id.contains("volume-down")
@@ -2825,8 +4592,10 @@ impl Launcher {
                     || cmd.contains("[char]174");
 
                 if is_repeatable {
-                    cx.spawn(async move |_this, _cx| {
-                        let _ = corvo_platform::run_shell(&cmd);
+                    cx.spawn(async move |_this, cx| {
+                        let notice =
+                            run_shell_toast(cmd, category, action_title, volume_direction).await;
+                        cx.update(|cx| show_action_toast(notice, cx));
                     })
                     .detach();
                     cx.notify();
@@ -2834,84 +4603,338 @@ impl Launcher {
                     self.previous_app = None;
                     corvo_platform::forget_launcher_panel();
                     window.remove_window();
-                    let _ = corvo_platform::run_shell(&cmd);
-                }
-            }
-            Ok(Action::Copy(text)) => {
-                let _ = ops.copy_text(&text);
-                self.dismiss(window);
-            }
-            Ok(Action::PasteText(text)) => {
-                let previous_pid = self.previous_app.take().or_else(corvo_platform::frontmost_app_pid);
-                let _ = ops.copy_text(&text);
-                corvo_platform::forget_launcher_panel();
-                window.remove_window();
-                if let Some(pid) = previous_pid {
-                    cx.spawn(async move |_this, _cx| {
-                        if let Err(err) = corvo_platform::auto_paste(pid, &text).await {
-                            eprintln!("corvo: auto-paste error: {err}");
-                        }
+                    cx.spawn(async move |_this, cx| {
+                        let notice =
+                            run_shell_toast(cmd, category, action_title, volume_direction).await;
+                        cx.update(|cx| show_action_toast(notice, cx));
                     })
                     .detach();
                 }
             }
-            Ok(Action::CopyImage(path)) => {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    corvo_platform::copy_image_to_pasteboard(&bytes);
-                }
-                self.dismiss(window);
+            Ok(Action::ConfirmProcessTermination { pid, start_time }) => {
+                self.actions_title = format!("Confirm force quit for PID {pid}");
+                self.actions_filter.clear();
+                self.action_selected = 0;
+                self.actions = vec![CommandAction {
+                    id: "kill-process:confirm-force-terminate".into(),
+                    label: format!("Force Quit Process {pid}"),
+                    action: Action::TerminateProcess {
+                        pid,
+                        start_time,
+                        force: true,
+                    },
+                    icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::WARNING),
+                    group: ActionGroup::Destructive,
+                    hotkey: Some("↵"),
+                }];
+                self.actions_open = true;
+                cx.notify();
             }
-            Ok(Action::PasteImage(path)) => {
-                let previous_pid = self.previous_app.take().or_else(corvo_platform::frontmost_app_pid);
+            Ok(Action::TerminateProcess {
+                pid,
+                start_time,
+                force,
+            }) => {
+                cx.spawn(async move |_this, cx| {
+                    let identity = corvo_platform::ProcessIdentity { pid, start_time };
+                    let mode = if force {
+                        corvo_platform::TerminationMode::Force
+                    } else {
+                        corvo_platform::TerminationMode::Graceful
+                    };
+                    let result =
+                        smol::unblock(move || corvo_platform::terminate_process(identity, mode))
+                            .await;
+                    let notice = match result {
+                        Ok(()) => ToastNotice::success(
+                            ToastCategory::Process,
+                            "Quit requested",
+                            format!("PID {pid}"),
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::Process,
+                            "Could not stop process",
+                            format!("PID {pid} · {error}"),
+                        ),
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
+                })
+                .detach();
+            }
+            Ok(Action::RunProcess {
+                program,
+                args,
+                title,
+            }) => {
+                let is_brew = program.ends_with("/brew") || program == "brew";
+                let notice_context = process_toast_context(&title, &args, is_brew);
+                cx.spawn(async move |_this, cx| {
+                    let output = smol::unblock(move || {
+                        std::process::Command::new(program).args(args).output()
+                    })
+                    .await;
+                    let notice = match output {
+                        Ok(output) if output.status.success() => ToastNotice::success(
+                            notice_context.category,
+                            notice_context.success_title,
+                            notice_context.success_detail,
+                        ),
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let detail = if stderr.trim().is_empty() {
+                                format!("Exit code {}", output.status.code().unwrap_or(-1))
+                            } else {
+                                process_failure_detail(&stderr)
+                            };
+                            ToastNotice::failure(
+                                notice_context.category,
+                                notice_context.failure_title,
+                                detail,
+                            )
+                        }
+                        Err(error) => ToastNotice::failure(
+                            notice_context.category,
+                            notice_context.failure_title,
+                            error.to_string(),
+                        ),
+                    };
+                    if is_brew {
+                        corvo_brew::invalidate_cache();
+                    }
+                    cx.update(|cx| show_action_toast(notice, cx));
+                })
+                .detach();
+            }
+            Ok(Action::Copy(text)) => {
+                let result_id = self
+                    .selected_result()
+                    .map(|result| result.id.clone())
+                    .unwrap_or_default();
+                let result = ops.copy_text(&text).map_err(|error| error.to_string());
+                let notice = copy_notice(&result_id, result, "text");
+                self.dismiss(window);
+                show_action_toast(notice, cx);
+            }
+            Ok(Action::PasteText(text)) => {
+                let result_id = self
+                    .selected_result()
+                    .map(|result| result.id.clone())
+                    .unwrap_or_default();
+                let previous_pid = self
+                    .previous_app
+                    .take()
+                    .or_else(corvo_platform::frontmost_app_pid);
                 corvo_platform::forget_launcher_panel();
                 window.remove_window();
-                cx.spawn(async move |_this, _cx| {
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        if let Some(pid) = previous_pid {
-                            if let Err(err) = corvo_platform::auto_paste_image(pid, &bytes).await {
-                                eprintln!("corvo: auto-paste image error: {err}");
-                            }
-                        } else {
-                            corvo_platform::copy_image_to_pasteboard(&bytes);
-                        }
+                if let Some(pid) = previous_pid {
+                    cx.spawn(async move |_this, cx| {
+                        let result = corvo_platform::auto_paste(pid, &text).await;
+                        let notice =
+                            paste_notice(result.map_err(|error| error.to_string()), "Text");
+                        cx.update(|cx| show_action_toast(notice, cx));
+                    })
+                    .detach();
+                } else {
+                    let result = ops.copy_text(&text).map_err(|error| error.to_string());
+                    show_action_toast(copy_notice(&result_id, result, "text"), cx);
+                }
+            }
+            Ok(Action::CopyImage(path)) => {
+                let result_id = self
+                    .selected_result()
+                    .map(|result| result.id.clone())
+                    .unwrap_or_default();
+                let notice = match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let result = corvo_platform::copy_image_to_pasteboard(&bytes)
+                            .map_err(|error| error.to_string());
+                        copy_notice(&result_id, result, "image")
                     }
+                    Err(error) => copy_notice(&result_id, Err(error.to_string()), "image"),
+                };
+                self.dismiss(window);
+                show_action_toast(notice, cx);
+            }
+            Ok(Action::PasteImage(path)) => {
+                let previous_pid = self
+                    .previous_app
+                    .take()
+                    .or_else(corvo_platform::frontmost_app_pid);
+                corvo_platform::forget_launcher_panel();
+                window.remove_window();
+                cx.spawn(async move |_this, cx| {
+                    let result = if let Ok(bytes) = std::fs::read(&path) {
+                        if let Some(pid) = previous_pid {
+                            corvo_platform::auto_paste_image(pid, &bytes)
+                                .await
+                                .map_err(|error| error.to_string())
+                                .map(|()| ())
+                        } else {
+                            corvo_platform::copy_image_to_pasteboard(&bytes)
+                                .map_err(|error| error.to_string())
+                        }
+                    } else {
+                        Err("Could not read image file".to_string())
+                    };
+                    let notice = match (previous_pid.is_some(), result) {
+                        (true, result) => paste_notice(result, "Image"),
+                        (false, result) => copy_notice("clipboard-manager", result, "image"),
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
                 })
                 .detach();
             }
             Ok(Action::ShowToast(msg)) => {
                 if let Some(text) = msg.strip_prefix("copy:") {
-                    let _ = ops.copy_text(text);
+                    let result_id = self
+                        .selected_result()
+                        .map(|result| result.id.clone())
+                        .unwrap_or_default();
+                    let result = ops.copy_text(text).map_err(|error| error.to_string());
+                    let notice = copy_notice(&result_id, result, "text");
                     self.dismiss(window);
+                    show_action_toast(notice, cx);
                 } else if let Some(id) = msg.strip_prefix("delete:") {
-                    corvo_clipboard_manager::delete_entry(id);
+                    let result = corvo_clipboard_manager::delete_entry(id);
                     self.refresh_clipboard(cx);
+                    let notice = match result {
+                        Ok(()) => ToastNotice::success(
+                            ToastCategory::Clipboard,
+                            "Item removed",
+                            "Removed from clipboard history",
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::Clipboard,
+                            "Could not remove item",
+                            error,
+                        ),
+                    };
+                    show_action_toast(notice, cx);
                 } else if msg == "clear" {
-                    corvo_clipboard_manager::clear_history();
+                    let result = corvo_clipboard_manager::clear_history();
                     self.refresh_clipboard(cx);
+                    let notice = match result {
+                        Ok(()) => ToastNotice::success(
+                            ToastCategory::Clipboard,
+                            "History cleared",
+                            "Clipboard history is empty",
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::Clipboard,
+                            "Could not clear history",
+                            error,
+                        ),
+                    };
+                    show_action_toast(notice, cx);
+                } else if msg == "Clipboard History" {
+                    self.open_clipboard_page(window, cx);
+                } else if msg == "Search Emoji & Symbols" {
+                    self.open_emoji_page(window, cx);
+                } else {
+                    show_action_toast(
+                        ToastNotice::success(ToastCategory::General, "Action complete", msg),
+                        cx,
+                    );
                 }
             }
             Ok(Action::AdjustBrightness(delta)) => {
-                cx.spawn(async move |_this, _cx| {
-                    if let Err(err) = corvo_platform::adjust_brightness(delta) {
-                        eprintln!("corvo: adjust brightness error: {err}");
-                    }
+                let direction = if delta >= 0.0 {
+                    "Brightness increased"
+                } else {
+                    "Brightness reduced"
+                };
+                cx.spawn(async move |_this, cx| {
+                    let result =
+                        smol::unblock(move || corvo_platform::adjust_brightness_with_level(delta))
+                            .await;
+                    let notice = match result {
+                        Ok(Some(percent)) => ToastNotice::success(
+                            ToastCategory::Brightness,
+                            "Display updated",
+                            direction,
+                        )
+                        .with_progress(percent),
+                        Ok(None) => ToastNotice::success(
+                            ToastCategory::Brightness,
+                            "Display updated",
+                            direction,
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::Brightness,
+                            "Could not change brightness",
+                            error.to_string(),
+                        ),
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
                 })
                 .detach();
-                cx.notify();
+            }
+            Ok(Action::AdjustVolume(delta)) => {
+                cx.spawn(async move |_this, cx| {
+                    let result = smol::unblock(move || {
+                        corvo_platform::adjust_audio_output_with_level(delta)
+                    })
+                    .await;
+                    let notice = match result {
+                        Ok(Some(percent)) => {
+                            ToastNotice::success(ToastCategory::System, "Output volume updated", "")
+                                .with_progress(percent)
+                        }
+                        Ok(None) => ToastNotice::success(
+                            ToastCategory::System,
+                            "Output volume updated",
+                            if delta >= 0.0 {
+                                "Volume increased"
+                            } else {
+                                "Volume reduced"
+                            },
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::System,
+                            "Could not change output volume",
+                            error.to_string(),
+                        ),
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
+                })
+                .detach();
             }
             Ok(Action::TileWindow(action_id)) => {
                 let previous_pid = self.previous_app.take();
                 self.dismiss(window);
-                cx.spawn(async move |_this, _cx| {
+                cx.spawn(async move |_this, cx| {
                     smol::Timer::after(std::time::Duration::from_millis(50)).await;
-                    if let Err(err) = corvo_platform::tile_window(previous_pid, &action_id) {
-                        eprintln!("corvo: tile window error: {err}");
-                    }
+                    let result = corvo_platform::tile_window(previous_pid, &action_id);
+                    let notice = match result {
+                        Ok(()) => ToastNotice::success(
+                            ToastCategory::Window,
+                            "Window arranged",
+                            action_id
+                                .strip_prefix("layout:")
+                                .unwrap_or(&action_id)
+                                .replace('-', " "),
+                        ),
+                        Err(error) => ToastNotice::failure(
+                            ToastCategory::Window,
+                            "Could not arrange window",
+                            error.to_string(),
+                        ),
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
                 })
                 .detach();
             }
             Ok(Action::CloseWindow) => self.dismiss(window),
-            _ => {}
+            Err(error) => {
+                let category = self
+                    .selected_result()
+                    .map(|result| category_for_result(&result.id))
+                    .unwrap_or(ToastCategory::General);
+                show_action_toast(
+                    ToastNotice::failure(category, "Action failed", error.to_string()),
+                    cx,
+                );
+            }
         }
     }
 
@@ -2921,22 +4944,30 @@ impl Launcher {
         title: &str,
         hidden: Option<bool>,
         favorite: Option<bool>,
-    ) {
+    ) -> bool {
+        let mut saved = true;
         let mut settings = corvo_config::Settings::load();
         if settings.set_result_item_flags(result_id, title, hidden, favorite) {
             if let Err(error) = settings.save() {
                 eprintln!("corvo: could not save item preferences: {error}");
+                saved = false;
             }
         }
         if let (Some(hidden), Some(_index)) = (hidden, result_id.strip_prefix("quicklinks:")) {
             let mut quicklinks = corvo_config::QuicklinksFile::load();
-            if let Some(link) = quicklinks.quicklinks.iter_mut().find(|link| link.name == title) {
+            if let Some(link) = quicklinks
+                .quicklinks
+                .iter_mut()
+                .find(|link| link.name == title)
+            {
                 link.hidden = hidden;
                 if let Err(error) = quicklinks.save() {
                     eprintln!("corvo: could not save quicklink visibility: {error}");
+                    saved = false;
                 }
             }
         }
+        saved
     }
 
     /// Closes the panel and hands activation back to the app that was
@@ -2953,6 +4984,36 @@ impl Launcher {
     fn search_row(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let font_size = px(20.0);
         let cursor_x = cursor_offset_for_query(&self.query, self.cursor_idx, font_size, window);
+        let port_input_visible =
+            self.page == LauncherPage::Root && self.selected_result_is_port_action();
+        let query_width =
+            cursor_offset_for_query(&self.query, self.query.chars().count(), font_size, window);
+        let port_before = self
+            .port_argument
+            .chars()
+            .take(self.port_cursor_idx)
+            .collect::<String>();
+        let port_after = self
+            .port_argument
+            .chars()
+            .skip(self.port_cursor_idx)
+            .collect::<String>();
+        let placeholder = if self.page == LauncherPage::Brew {
+            match self.brew_page_mode {
+                BrewPageMode::Installed => "Filter installed packages...",
+                BrewPageMode::Upgrades => "Filter available upgrades...",
+                BrewPageMode::Services => "Filter Homebrew services...",
+                BrewPageMode::Search => "Search formulae and casks...",
+            }
+        } else if self.page == LauncherPage::Ports {
+            "Filter or enter a port (e.g. 3000)..."
+        } else if self.page == LauncherPage::Processes {
+            "Filter processes by name or PID..."
+        } else if self.page == LauncherPage::Files {
+            "Search files and folders..."
+        } else {
+            "Search for apps and commands..."
+        };
 
         let input_view = if self.query.is_empty() {
             div()
@@ -2962,11 +5023,17 @@ impl Launcher {
                 .h(px(28.0))
                 .flex()
                 .items_center()
-                .child(render_cursor(px(0.0), px(24.0), self.cursor_visible))
+                .child(render_cursor(
+                    px(0.0),
+                    px(24.0),
+                    self.cursor_visible && !self.port_input_active,
+                ))
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
-                        .child("Search for apps and commands..."),
+                        .child(placeholder),
                 )
         } else {
             div()
@@ -2978,11 +5045,20 @@ impl Launcher {
                 .items_center()
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT))
                         .child(self.query.clone()),
                 )
-                .child(render_cursor(cursor_x, px(24.0), self.cursor_visible))
+                .child(render_cursor(
+                    cursor_x,
+                    px(24.0),
+                    self.cursor_visible && !self.port_input_active,
+                ))
         };
+        let input_view = input_view.when(port_input_visible, |input| {
+            input.flex_none().w(query_width + px(8.0))
+        });
 
         div()
             .id("search-row")
@@ -3003,6 +5079,49 @@ impl Launcher {
             }))
             .child(search_icon())
             .child(input_view)
+            .when(port_input_visible, |view| {
+                view.child(
+                    div()
+                        .id("port-argument")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(COLOR_ACCENT))
+                        .text_size(px(13.0))
+                        .text_color(rgb(COLOR_TEXT))
+                        .when(self.port_input_active, |field| {
+                            field.border_color(rgb(COLOR_ACCENT))
+                        })
+                        .child(
+                            div()
+                                .min_w(px(44.0))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    if self.port_argument.is_empty() && !self.port_input_active {
+                                        "Port".to_string()
+                                    } else {
+                                        port_before
+                                    },
+                                )
+                                .when(self.port_input_active, |field| {
+                                    field.child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h(px(16.0))
+                                            .when(self.cursor_visible, |cursor| {
+                                                cursor.bg(rgb(COLOR_TEXT))
+                                            }),
+                                    )
+                                })
+                                .child(port_after),
+                        ),
+                )
+            })
     }
 
     fn results_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -3053,6 +5172,39 @@ impl Launcher {
         }
     }
 
+    fn brew_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child(self.brew_page_mode.title().to_uppercase())
+    }
+
+    fn ports_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("OPEN PORTS")
+    }
+
+    fn processes_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("PROCESSES")
+    }
+
     fn emoji_search_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let font_size = px(18.0);
         let cursor_x = cursor_offset_for_query(&self.query, self.cursor_idx, font_size, window);
@@ -3073,6 +5225,8 @@ impl Launcher {
                 .child(render_cursor(px(0.0), px(22.0), self.cursor_visible))
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
                         .child("Search emoji and symbols..."),
                 )
@@ -3086,6 +5240,8 @@ impl Launcher {
                 .items_center()
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT))
                         .child(self.query.clone()),
                 )
@@ -3313,6 +5469,8 @@ impl Launcher {
                 .child(render_cursor(px(0.0), px(22.0), self.cursor_visible))
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
                         .child("Type to filter entries..."),
                 )
@@ -3326,6 +5484,8 @@ impl Launcher {
                 .items_center()
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT))
                         .child(self.query.clone()),
                 )
@@ -3446,6 +5606,8 @@ impl Launcher {
                 .child(render_cursor(px(0.0), px(22.0), self.cursor_visible))
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
                         .child("Filter files and folders..."),
                 )
@@ -3459,6 +5621,8 @@ impl Launcher {
                 .items_center()
                 .child(
                     div()
+                        .relative()
+                        .top(px(2.0))
                         .text_color(rgb(COLOR_TEXT))
                         .child(self.query.clone()),
                 )
@@ -3519,7 +5683,11 @@ impl Launcher {
                 .px_4()
                 .py_3()
                 .text_color(rgb(COLOR_TEXT_DIM))
-                .child("Moving selected files to Trash..."),
+                .child(if cfg!(target_os = "macos") {
+                    "Moving selected files to Trash..."
+                } else {
+                    "Uninstalling application..."
+                }),
             UninstallerState::Closed => div().id("uninstaller-closed").flex_1(),
             UninstallerState::Ready(ready) => {
                 let selected_count = ready
@@ -3986,6 +6154,232 @@ impl Launcher {
             .overflow_y_scroll()
             .child(content_view)
             .child(info_list)
+    }
+
+    fn file_search_split_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("file-search-split-view")
+            .flex_1()
+            .flex()
+            .overflow_hidden()
+            .child(self.file_search_list(cx))
+            .child(div().w(px(1.0)).self_stretch().bg(rgb(COLOR_DIVIDER)))
+            .child(self.file_search_preview_pane())
+    }
+
+    fn file_search_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let rows = self
+            .results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| self.file_search_row(index, result, cx));
+        let list_content = if self.results.is_empty() {
+            div()
+                .id("file-search-empty")
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px_3()
+                .text_size(px(12.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child("No matching files or folders")
+        } else {
+            div()
+                .id("file-search-rows")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .overflow_y_scroll()
+                .track_scroll(&self.file_scroll_handle)
+                .children(rows)
+        };
+        div()
+            .id("file-search-list")
+            .w(px(290.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(6.0))
+            .child(list_content)
+    }
+
+    fn file_search_row(
+        &self,
+        index: usize,
+        result: &SearchResult,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let selected = index == self.selected;
+        let is_folder = result.accessory.as_deref() == Some("Folder");
+        let path = result.subtitle.clone().unwrap_or_default();
+        div()
+            .id(SharedString::from(format!("file-search-row-{index}")))
+            .flex_none()
+            .w_full()
+            .h(px(48.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded_lg()
+            .cursor_pointer()
+            .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
+            .when(!selected, |row| row.hover(|style| style.bg(rgb(0x202226))))
+            .on_click(cx.listener(move |launcher, _: &ClickEvent, _window, cx| {
+                launcher.select(index, cx);
+            }))
+            .child(icons::render_phosphor_svg(
+                if is_folder {
+                    phosphor_svgs::style::fill::FOLDER
+                } else {
+                    phosphor_svgs::style::regular::FILE_TEXT
+                },
+                if is_folder {
+                    rgb(0x38bdf8)
+                } else {
+                    rgb(COLOR_TEXT_ICON)
+                },
+                18.0,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(COLOR_TEXT))
+                            .whitespace_nowrap()
+                            .text_overflow(TextOverflow::Truncate(SharedString::new_static("...")))
+                            .child(result.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .whitespace_nowrap()
+                            .text_overflow(TextOverflow::Truncate(SharedString::new_static("...")))
+                            .child(path),
+                    ),
+            )
+    }
+
+    fn file_search_preview_pane(&self) -> Stateful<Div> {
+        let content = match &self.file_preview {
+            FilePreviewState::Empty => div()
+                .id("file-preview-empty")
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child("Select a file or folder"),
+            FilePreviewState::Loading(_) => div()
+                .id("file-preview-loading")
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child("Loading preview..."),
+            FilePreviewState::Ready { path, preview } => match preview {
+                FilePreview::Folder => div()
+                    .id("file-preview-folder")
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(icons::render_phosphor_svg(
+                        phosphor_svgs::style::fill::FOLDER,
+                        rgb(0x38bdf8),
+                        64.0,
+                    ))
+                    .child(
+                        div().text_size(px(15.0)).text_color(rgb(COLOR_TEXT)).child(
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("Folder")
+                                .to_string(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(400.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(path.display().to_string()),
+                    ),
+                FilePreview::Image => div()
+                    .id("file-preview-image")
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_3()
+                    .child(img(path.clone()).max_w_full().max_h(px(300.0)).rounded_lg()),
+                FilePreview::Text(text) => div()
+                    .id("file-preview-text")
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .m_3()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(COLOR_DIVIDER))
+                    .bg(rgb(0x121315))
+                    .overflow_y_scroll()
+                    .text_size(px(11.0))
+                    .text_color(rgb(COLOR_TEXT))
+                    .font_family("Menlo")
+                    .child(text.clone()),
+                FilePreview::Unsupported => div()
+                    .id("file-preview-unsupported")
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(icons::render_phosphor_svg(
+                        phosphor_svgs::style::regular::FILE_TEXT,
+                        rgb(COLOR_TEXT_ICON),
+                        48.0,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child("Preview is not available for this file"),
+                    ),
+                FilePreview::Error(message) => div()
+                    .id("file-preview-error")
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.0))
+                    .text_color(rgb(COLOR_TEXT_DIM))
+                    .child(message.clone()),
+            },
+        };
+        div()
+            .id("file-search-preview-pane")
+            .flex_1()
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(content)
     }
 
     fn render_clipboard_text_preview(raw_text: &str) -> Stateful<Div> {
@@ -4547,7 +6941,9 @@ impl Launcher {
                     .rounded_md()
                     .cursor_pointer()
                     .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
-                    .when(!selected, |row| row.hover(|style| style.bg(rgb(COLOR_ROW_SELECTED))))
+                    .when(!selected, |row| {
+                        row.hover(|style| style.bg(rgb(COLOR_ROW_SELECTED)))
+                    })
                     .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
                         launcher.action_selected = position;
                         launcher.run_selected_action(window, cx);
@@ -4587,16 +6983,12 @@ impl Launcher {
             .bg(rgba(COLOR_MENU))
             .p_1()
             .child(
-                div()
-                    .px_2()
-                    .pt_1()
-                    .pb_1()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(COLOR_TEXT_DIM))
-                            .child(self.actions_title.clone()),
-                    ),
+                div().px_2().pt_1().pb_1().child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(self.actions_title.clone()),
+                ),
             )
             .child(
                 div()
@@ -4607,13 +6999,7 @@ impl Launcher {
                     .overflow_y_scroll()
                     .children(rows),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .mx_1()
-                    .h(px(1.0))
-                    .bg(rgb(COLOR_DIVIDER)),
-            )
+            .child(div().flex_none().mx_1().h(px(1.0)).bg(rgb(COLOR_DIVIDER)))
             .child(
                 div()
                     .flex_none()
@@ -4637,10 +7023,12 @@ impl Launcher {
             let confirming =
                 matches!(&self.uninstaller, UninstallerState::Ready(ready) if ready.confirming);
             return (
-                if confirming {
+                if confirming && cfg!(target_os = "macos") {
                     "Confirm Move to Trash"
+                } else if confirming {
+                    "Confirm Uninstall"
                 } else {
-                    "Move to Trash"
+                    "Uninstall Application"
                 },
                 "↵",
             );
@@ -4649,6 +7037,24 @@ impl Launcher {
             return ("Paste to Active App", "↵");
         }
         if let Some(result) = self.selected_result() {
+            if result.id == "brew:upgrade-all" {
+                return ("Upgrade All", "↵");
+            }
+            if result.id == "kill-process:open-ports" {
+                return ("Open Port Manager", "↵");
+            }
+            if result.id.starts_with("kill-process:open-processes") {
+                return ("Open Process List", "↵");
+            }
+            if matches!(
+                result.id.as_str(),
+                "brew:show-installed"
+                    | "brew:show-upgrades"
+                    | "brew:manage-services"
+                    | "brew:search"
+            ) {
+                return ("Open Brew Page", "↵");
+            }
             if result.id == "emoji-picker:open" || result.id == "clipboard-manager:open" {
                 return ("Open Command", "↵");
             }
@@ -4670,6 +7076,7 @@ impl Launcher {
                 "quicklinks" | "web-search-fallback" => ("Open in Browser", "↵"),
                 "system-actions" | "window-management" => ("Run Action", "↵"),
                 "file-search" => ("Open File", "↵"),
+                "brew" => ("Open Homebrew Page", "↵"),
                 _ => ("Open", "↵"),
             }
         } else {
@@ -4678,19 +7085,34 @@ impl Launcher {
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let (action_name, action_key) =
-            if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
+        let (action_name, action_key, action_is_destructive) = if self.actions_open {
+            self.selected_action()
+                .map(|action| {
+                    (
+                        action.label.clone(),
+                        "↵",
+                        action.group == corvo_core::ActionGroup::Destructive,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let (name, key) = self.primary_action_label();
+                    (name.to_string(), key, false)
+                })
+        } else if self.page == LauncherPage::Uninstaller {
+            let (name, key) = self.primary_action_label();
+            (name.to_string(), key, true)
+        } else if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
+            let target = self.previous_app_name.as_deref().unwrap_or("Active App");
+            (format!("Paste to {target}"), "↵", false)
+        } else {
+            let (name, key) = self.primary_action_label();
+            if name == "Paste to Active App" {
                 let target = self.previous_app_name.as_deref().unwrap_or("Active App");
-                (format!("Paste to {target}"), "↵")
+                (format!("Paste to {target}"), key, false)
             } else {
-                let (name, key) = self.primary_action_label();
-                if name == "Paste to Active App" {
-                    let target = self.previous_app_name.as_deref().unwrap_or("Active App");
-                    (format!("Paste to {target}"), key)
-                } else {
-                    (name.to_string(), key)
-                }
-            };
+                (name.to_string(), key, false)
+            }
+        };
 
         let bg = self.background_color;
         let fade_bg = linear_gradient(
@@ -4701,7 +7123,8 @@ impl Launcher {
 
         let show_primary = self.page != LauncherPage::Uninstaller
             || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress);
-        let show_actions = self.page != LauncherPage::Uninstaller;
+        let show_actions = self.page != LauncherPage::Uninstaller
+            || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress);
 
         div()
             .id("footer-overlay")
@@ -4710,13 +7133,7 @@ impl Launcher {
             .left_0()
             .right_0()
             .h(px(48.0))
-            .child(
-                div()
-                    .id("footer-fade")
-                    .absolute()
-                    .inset_0()
-                    .bg(fade_bg),
-            )
+            .child(div().id("footer-fade").absolute().inset_0().bg(fade_bg))
             .child(
                 div()
                     .id("footer-controls")
@@ -4807,19 +7224,28 @@ impl Launcher {
                                         .items_center()
                                         .gap_1p5()
                                         .hover(|s| s.opacity(0.85))
-                                        .on_click(cx.listener(|launcher, _: &ClickEvent, window, cx| {
-                                            cx.stop_propagation();
-                                            if launcher.page == LauncherPage::Uninstaller {
-                                                launcher.begin_uninstall(cx);
-                                            } else {
-                                                launcher.execute_selected(window, cx);
-                                            }
-                                        }))
+                                        .on_click(cx.listener(
+                                            |launcher, _: &ClickEvent, window, cx| {
+                                                cx.stop_propagation();
+                                                if launcher.actions_open {
+                                                    launcher.run_selected_action(window, cx);
+                                                } else if launcher.page == LauncherPage::Uninstaller
+                                                {
+                                                    launcher.begin_uninstall(cx);
+                                                } else {
+                                                    launcher.execute_selected(window, cx);
+                                                }
+                                            },
+                                        ))
                                         .child(
                                             div()
                                                 .text_size(px(12.5))
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(0xffffff))
+                                                .text_color(if action_is_destructive {
+                                                    rgb(COLOR_DESTRUCTIVE)
+                                                } else {
+                                                    rgb(0xffffff)
+                                                })
                                                 .child(action_name),
                                         )
                                         .child(action_keycap(action_key)),
@@ -4833,10 +7259,12 @@ impl Launcher {
                                             .items_center()
                                             .gap_1p5()
                                             .hover(|s| s.opacity(0.85))
-                                            .on_click(cx.listener(|launcher, _: &ClickEvent, _window, cx| {
-                                                cx.stop_propagation();
-                                                launcher.toggle_actions(cx);
-                                            }))
+                                            .on_click(cx.listener(
+                                                |launcher, _: &ClickEvent, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    launcher.toggle_actions(cx);
+                                                },
+                                            ))
                                             .child(
                                                 div()
                                                     .text_size(px(12.5))
@@ -5010,7 +7438,10 @@ impl Launcher {
             return self.calculator_card(index, result, cx);
         }
         let selected = index == self.selected;
-        let subtitle = if is_category_subtitle(result) {
+        let is_brew_upgrade = self.page == LauncherPage::Brew
+            && self.brew_page_mode == BrewPageMode::Upgrades
+            && result.id.starts_with("brew:outdated:");
+        let subtitle = if is_brew_upgrade || is_category_subtitle(result) {
             None
         } else {
             result.subtitle.clone()
@@ -5029,7 +7460,7 @@ impl Launcher {
             .when(selected, |row| row.bg(rgb(COLOR_ROW_SELECTED)))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(0x181b1e))))
             .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
-                launcher.select(index, cx);
+                launcher.select_result_index(index, cx);
                 launcher.execute_selected(window, cx);
             }))
             .child(icon(
@@ -5177,11 +7608,7 @@ fn action_icon(icon: &Icon, destructive: bool) -> Div {
         .justify_center();
 
     if let Some(svg_data) = icons::icon_svg_data(icon) {
-        slot.child(icons::render_phosphor_svg(
-            svg_data,
-            icon_color,
-            17.0,
-        ))
+        slot.child(icons::render_phosphor_svg(svg_data, icon_color, 17.0))
     } else if let Icon::Glyph(glyph) = icon {
         slot.text_size(px(16.0))
             .text_color(icon_color)
@@ -5244,6 +7671,10 @@ impl Render for Launcher {
         let is_root = self.page == LauncherPage::Root;
         let is_emoji = self.page == LauncherPage::Emoji;
         let is_clipboard = self.page == LauncherPage::Clipboard;
+        let is_files = self.page == LauncherPage::Files;
+        let is_brew = self.page == LauncherPage::Brew;
+        let is_ports = self.page == LauncherPage::Ports;
+        let is_processes = self.page == LauncherPage::Processes;
         let is_uninstaller = self.page == LauncherPage::Uninstaller;
         div()
             .track_focus(&self.focus_handle)
@@ -5263,7 +7694,11 @@ impl Render for Launcher {
             .border_1()
             .border_color(rgb(COLOR_DIVIDER))
             .overflow_hidden()
-            .bg(rgba(if is_collapsed { self.background_color | 0xff } else { self.background_color }))
+            .bg(rgba(if is_collapsed {
+                self.background_color | 0xff
+            } else {
+                self.background_color
+            }))
             .text_color(rgb(COLOR_TEXT))
             .font_family("Helvetica")
             .when(is_root, |view| {
@@ -5278,6 +7713,25 @@ impl Render for Launcher {
             .when(is_clipboard, |view| {
                 view.child(self.clipboard_search_row(window, cx))
                     .child(self.clipboard_split_view(cx))
+            })
+            .when(is_files, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.file_search_split_view(cx))
+            })
+            .when(is_brew, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.brew_subheader())
+                    .child(self.results_list(cx))
+            })
+            .when(is_ports, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.ports_subheader())
+                    .child(self.results_list(cx))
+            })
+            .when(is_processes, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.processes_subheader())
+                    .child(self.results_list(cx))
             })
             .when(is_uninstaller, |view| {
                 view.child(self.uninstaller_search_row(window, cx))
@@ -5391,7 +7845,10 @@ pub fn collect_hotkey_bindings(
             }
         }
         for (action_id, cfg) in &settings.window_management.command_items {
-            if corvo_window_management::WINDOW_ACTIONS.iter().any(|a| a.id == action_id) {
+            if corvo_window_management::WINDOW_ACTIONS
+                .iter()
+                .any(|a| a.id == action_id)
+            {
                 continue;
             }
             if let Some(ref hk) = cfg.hotkey {
@@ -5472,7 +7929,10 @@ pub fn collect_hotkey_bindings(
                     if item_name == "Clipboard History" {
                         bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
                     } else {
-                        bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                        bindings.push((
+                            hk.clone(),
+                            corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                        ));
                     }
                 }
             }
@@ -5486,7 +7946,10 @@ pub fn collect_hotkey_bindings(
                 if item_name == "Search Emoji & Symbols" {
                     bindings.push((hk.clone(), corvo_platform::HotkeyIntent::EmojiPicker));
                 } else {
-                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                    ));
                 }
             }
         }
@@ -5497,7 +7960,10 @@ pub fn collect_hotkey_bindings(
         for (item_name, cfg) in &settings.snippets.command_items {
             if let Some(ref hk) = cfg.hotkey {
                 if !hk.is_empty() {
-                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                    ));
                 }
             }
         }
@@ -5508,7 +7974,10 @@ pub fn collect_hotkey_bindings(
         for (item_name, cfg) in &settings.file_search.command_items {
             if let Some(ref hk) = cfg.hotkey {
                 if !hk.is_empty() {
-                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::Command(item_name.clone())));
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                    ));
                 }
             }
         }
@@ -5519,7 +7988,10 @@ pub fn collect_hotkey_bindings(
     for q in &quicklinks_file.quicklinks {
         if let Some(ref hk) = q.hotkey {
             if !hk.is_empty() && !q.url.is_empty() {
-                bindings.push((hk.clone(), corvo_platform::HotkeyIntent::OpenUrl(q.url.clone())));
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::OpenUrl(q.url.clone()),
+                ));
             }
         }
     }
@@ -5527,7 +7999,10 @@ pub fn collect_hotkey_bindings(
         if let Some(ref hk) = cfg.hotkey {
             if !hk.is_empty() {
                 if !quicklinks_file.quicklinks.iter().any(|q| &q.name == name) {
-                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::OpenUrl(name.clone())));
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::OpenUrl(name.clone()),
+                    ));
                 }
             }
         }
@@ -5540,7 +8015,10 @@ pub fn collect_hotkey_bindings(
 pub fn reload_active_hotkeys(settings: &corvo_config::Settings, cx: &mut App) {
     if let Some(handle) = cx.try_global::<HotkeyManagerGlobal>() {
         let bindings = collect_hotkey_bindings(settings);
-        handle.0.borrow_mut().update_bindings(&settings.hotkey, bindings);
+        handle
+            .0
+            .borrow_mut()
+            .update_bindings(&settings.hotkey, bindings);
     }
 }
 
@@ -5594,10 +8072,8 @@ pub fn run(
                     continue;
                 }
                 let channel = corvo_platform::UpdateChannel::parse(&settings.updates.channel);
-                let check_res = smol::unblock(move || {
-                    corvo_platform::check_for_updates(channel, false)
-                })
-                .await;
+                let check_res =
+                    smol::unblock(move || corvo_platform::check_for_updates(channel, false)).await;
 
                 match check_res {
                     Ok(Some(release)) => {
@@ -5632,7 +8108,12 @@ pub fn run(
                     corvo_platform::HotkeyIntent::TileWindow(action_id) => {
                         if let Some(layout_id) = action_id.strip_prefix("layout:") {
                             let settings = corvo_config::Settings::load();
-                            if let Some(layout) = settings.window_management.layouts.iter().find(|l| l.id == layout_id) {
+                            if let Some(layout) = settings
+                                .window_management
+                                .layouts
+                                .iter()
+                                .find(|l| l.id == layout_id)
+                            {
                                 let placements: Vec<(String, String)> = layout
                                     .placements
                                     .iter()
@@ -5700,7 +8181,11 @@ pub fn run(
 
 fn execute_system_action_intent(action_id: &str, cx: &mut App) {
     let registry = cx.global::<RegistryGlobal>().0.clone();
-    if let Some(cmd) = registry.commands().iter().find(|c| c.id() == "system-actions") {
+    if let Some(cmd) = registry
+        .commands()
+        .iter()
+        .find(|c| c.id() == "system-actions")
+    {
         let mut target_id = action_id.to_string();
         for action in corvo_system_actions::get_system_actions() {
             if action.id == action_id || action.title.eq_ignore_ascii_case(action_id) {
@@ -5712,9 +8197,31 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
         let ctx = ExecutionContext::default();
         if let Ok(action) = smol::block_on(cmd.execute(&result_id, &ctx)) {
             match action {
-                Action::RunShell(shell_cmd) => {
-                    let _ = corvo_platform::run_shell(&shell_cmd);
-                }
+                Action::RunShell(shell_cmd) => match target_id.as_str() {
+                    "volume-up" | "volume-down" => {
+                        let title = if target_id == "volume-up" {
+                            "Volume Up"
+                        } else {
+                            "Volume Down"
+                        }
+                        .to_string();
+                        let direction = target_id == "volume-up";
+                        cx.spawn(async move |cx| {
+                            let notice = run_shell_toast(
+                                shell_cmd,
+                                ToastCategory::System,
+                                title,
+                                Some(direction),
+                            )
+                            .await;
+                            cx.update(|cx| show_action_toast(notice, cx));
+                        })
+                        .detach();
+                    }
+                    _ => {
+                        let _ = corvo_platform::run_shell(&shell_cmd);
+                    }
+                },
                 Action::OpenUrl(url) => {
                     let _ = corvo_platform::open_url(&url);
                 }
@@ -5722,7 +8229,72 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
                     let _ = corvo_platform::platform_ops().open_path(&path);
                 }
                 Action::AdjustBrightness(delta) => {
-                    let _ = corvo_platform::adjust_brightness(delta);
+                    cx.spawn(async move |cx| {
+                        let result = smol::unblock(move || {
+                            corvo_platform::adjust_brightness_with_level(delta)
+                        })
+                        .await;
+                        let notice = match result {
+                            Ok(Some(percent)) => ToastNotice::success(
+                                ToastCategory::Brightness,
+                                "Display updated",
+                                if delta >= 0.0 {
+                                    "Brightness increased"
+                                } else {
+                                    "Brightness reduced"
+                                },
+                            )
+                            .with_progress(percent),
+                            Ok(None) => ToastNotice::success(
+                                ToastCategory::Brightness,
+                                "Display updated",
+                                if delta >= 0.0 {
+                                    "Brightness increased"
+                                } else {
+                                    "Brightness reduced"
+                                },
+                            ),
+                            Err(error) => ToastNotice::failure(
+                                ToastCategory::Brightness,
+                                "Could not change brightness",
+                                error.to_string(),
+                            ),
+                        };
+                        cx.update(|cx| show_action_toast(notice, cx));
+                    })
+                    .detach();
+                }
+                Action::AdjustVolume(delta) => {
+                    cx.spawn(async move |cx| {
+                        let result = smol::unblock(move || {
+                            corvo_platform::adjust_audio_output_with_level(delta)
+                        })
+                        .await;
+                        let notice = match result {
+                            Ok(Some(percent)) => ToastNotice::success(
+                                ToastCategory::System,
+                                "Output volume updated",
+                                "",
+                            )
+                            .with_progress(percent),
+                            Ok(None) => ToastNotice::success(
+                                ToastCategory::System,
+                                "Output volume updated",
+                                if delta >= 0.0 {
+                                    "Volume increased"
+                                } else {
+                                    "Volume reduced"
+                                },
+                            ),
+                            Err(error) => ToastNotice::failure(
+                                ToastCategory::System,
+                                "Could not change output volume",
+                                error.to_string(),
+                            ),
+                        };
+                        cx.update(|cx| show_action_toast(notice, cx));
+                    })
+                    .detach();
                 }
                 _ => {}
             }
@@ -5732,7 +8304,11 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
 
 fn execute_system_setting_intent(setting_id: &str, cx: &mut App) {
     let registry = cx.global::<RegistryGlobal>().0.clone();
-    if let Some(cmd) = registry.commands().iter().find(|c| c.id() == "system-actions") {
+    if let Some(cmd) = registry
+        .commands()
+        .iter()
+        .find(|c| c.id() == "system-actions")
+    {
         let mut target_id = setting_id.to_string();
         for setting in corvo_system_actions::get_system_settings() {
             if setting.id == setting_id || setting.title.eq_ignore_ascii_case(setting_id) {
@@ -5773,9 +8349,12 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
         "about-corvo" | "About Corvo" => {
             open_settings_tab(SettingsTab::About, cx);
         }
-        "export-backup" | "Export Backup"
-        | "import-backup" | "Import Backup"
-        | "import-from-raycast" | "Import from Raycast" => {
+        "export-backup"
+        | "Export Backup"
+        | "import-backup"
+        | "Import Backup"
+        | "import-from-raycast"
+        | "Import from Raycast" => {
             open_settings_tab(SettingsTab::Backup, cx);
         }
         "Create Window Layout" | "create-window-layout" => {
@@ -5833,7 +8412,7 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
             open_settings_tab(SettingsTab::Snippets, cx);
         }
         "Search Files" | "search-files" => {
-            open_launcher_with_query("", cx);
+            open_launcher_with_page(LauncherPage::Files, cx);
         }
         "define-word" | "Define Word" => {
             open_launcher_with_query("define ", cx);
@@ -5872,7 +8451,11 @@ fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
         if cx.windows().contains(&handle.into()) {
             let _ = handle.update(cx, |launcher, window, cx| match page {
                 LauncherPage::Clipboard => launcher.open_clipboard_page(window, cx),
+                LauncherPage::Files => launcher.open_files_page(window, cx),
                 LauncherPage::Emoji => launcher.open_emoji_page(window, cx),
+                LauncherPage::Brew => launcher.open_brew_page(BrewPageMode::Search, window, cx),
+                LauncherPage::Ports => launcher.open_ports_page(window, cx),
+                LauncherPage::Processes => launcher.open_processes_page("", window, cx),
                 _ => {
                     launcher.page = page;
                     launcher.refresh(cx);

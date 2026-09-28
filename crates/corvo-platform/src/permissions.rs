@@ -20,9 +20,13 @@ impl PermissionKind {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Accessibility => "Arranges application windows and pastes content directly into target apps.",
+            Self::Accessibility => {
+                "Arranges application windows and pastes content directly into target apps."
+            }
             Self::Calendars => "Reads upcoming meeting schedules and join links.",
-            Self::ScreenRecording => "Inspects window titles and captures thumbnails for window switcher.",
+            Self::ScreenRecording => {
+                "Inspects window titles and captures thumbnails for window switcher."
+            }
             Self::FullDiskAccess => "Searches files across protected system directories.",
         }
     }

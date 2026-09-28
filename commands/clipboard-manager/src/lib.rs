@@ -7,8 +7,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 use chrono::{DateTime, Local};
 
 use corvo_core::{
-    phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
-    search_match_score, Icon, SearchContext, SearchResult,
+    Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
+    SearchContext, SearchResult, phosphor_svgs, search_match_score,
 };
 
 const MAX_ENTRY_CHARS: usize = 100_000;
@@ -26,7 +26,13 @@ pub struct ClipboardPreferences {
 
 impl Default for ClipboardPreferences {
     fn default() -> Self {
-        Self { enabled: true, retention_days: 30, max_entries: 500, save_images: true, save_colors: true }
+        Self {
+            enabled: true,
+            retention_days: 30,
+            max_entries: 500,
+            save_images: true,
+            save_colors: true,
+        }
     }
 }
 
@@ -36,16 +42,28 @@ fn preferences_store() -> &'static RwLock<ClipboardPreferences> {
 }
 
 fn preferences() -> ClipboardPreferences {
-    preferences_store().read().map(|current| *current).unwrap_or_default()
+    preferences_store()
+        .read()
+        .map(|current| *current)
+        .unwrap_or_default()
 }
 
 fn current_clipboard_image() -> Option<Vec<u8>> {
-    preferences().save_images.then(corvo_platform::read_clipboard_image).flatten()
+    preferences()
+        .save_images
+        .then(corvo_platform::read_clipboard_image)
+        .flatten()
 }
 
 pub fn set_preferences(value: ClipboardPreferences) {
-    let value = ClipboardPreferences { max_entries: value.max_entries.max(1), ..value };
-    let was_enabled = preferences_store().read().map(|current| current.enabled).unwrap_or(true);
+    let value = ClipboardPreferences {
+        max_entries: value.max_entries.max(1),
+        ..value
+    };
+    let was_enabled = preferences_store()
+        .read()
+        .map(|current| current.enabled)
+        .unwrap_or(true);
     if !was_enabled && value.enabled {
         let count = corvo_platform::clipboard_change_count();
         if let Some(store) = STORE.get() {
@@ -55,7 +73,8 @@ pub fn set_preferences(value: ClipboardPreferences) {
         }
     }
     let should_prune = if let Ok(mut current) = preferences_store().write() {
-        let changed = current.retention_days != value.retention_days || current.max_entries != value.max_entries;
+        let changed = current.retention_days != value.retention_days
+            || current.max_entries != value.max_entries;
         *current = value;
         changed
     } else {
@@ -67,14 +86,12 @@ pub fn set_preferences(value: ClipboardPreferences) {
 }
 
 fn history_file_path() -> PathBuf {
-    let dirs = directories::ProjectDirs::from("", "", "corvo")
-        .expect("corvo: no home directory");
+    let dirs = directories::ProjectDirs::from("", "", "corvo").expect("corvo: no home directory");
     dirs.data_dir().join("clipboard_history.json")
 }
 
 pub fn images_dir_path() -> PathBuf {
-    let dirs = directories::ProjectDirs::from("", "", "corvo")
-        .expect("corvo: no home directory");
+    let dirs = directories::ProjectDirs::from("", "", "corvo").expect("corvo: no home directory");
     dirs.data_dir().join("clipboard_images")
 }
 
@@ -101,7 +118,9 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
         .as_secs();
     let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
 
-    let (keep, expired): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.timestamp_secs >= cutoff);
+    let (keep, expired): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|e| e.timestamp_secs >= cutoff);
     for e in expired {
         if let Some(path) = e.image_path() {
             let _ = fs::remove_file(path);
@@ -119,10 +138,13 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
     entries
 }
 
-fn save_entries_atomic(entries: &[ClipboardEntry]) {
+fn save_entries_atomic(entries: &[ClipboardEntry]) -> Result<(), String> {
     let path = history_file_path();
-    let Some(parent) = path.parent() else { return };
-    let _ = fs::create_dir_all(parent);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Clipboard history path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create clipboard history directory: {error}"))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -130,28 +152,38 @@ fn save_entries_atomic(entries: &[ClipboardEntry]) {
         .as_secs();
     let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
 
-    let (keep, expired): (Vec<_>, Vec<_>) = entries.iter().cloned().partition(|e| e.timestamp_secs >= cutoff);
-    for e in expired {
-        if let Some(path) = e.image_path() {
-            let _ = fs::remove_file(path);
-        }
-    }
+    let (keep, expired): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .cloned()
+        .partition(|e| e.timestamp_secs >= cutoff);
+    let mut cleanup_images: Vec<_> = expired
+        .iter()
+        .filter_map(ClipboardEntry::image_path)
+        .collect();
     let mut filtered = keep;
     let max_entries = preferences().max_entries;
     if filtered.len() > max_entries {
-        for e in filtered.drain(max_entries..) {
-            if let Some(path) = e.image_path() {
-                let _ = fs::remove_file(path);
-            }
-        }
+        cleanup_images.extend(
+            filtered
+                .drain(max_entries..)
+                .filter_map(|entry| entry.image_path()),
+        );
     }
 
-    let Ok(json) = serde_json::to_string_pretty(&filtered) else { return };
+    let json = serde_json::to_string_pretty(&filtered)
+        .map_err(|error| format!("Could not encode clipboard history: {error}"))?;
     let tmp_path = parent.join(format!("clipboard_history.json.tmp.{}", std::process::id()));
 
-    if fs::write(&tmp_path, json).is_ok() {
-        let _ = fs::rename(&tmp_path, &path);
+    fs::write(&tmp_path, json)
+        .map_err(|error| format!("Could not write clipboard history: {error}"))?;
+    if let Err(error) = fs::rename(&tmp_path, &path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Could not save clipboard history: {error}"));
     }
+    for image_path in cleanup_images {
+        let _ = fs::remove_file(image_path);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -182,7 +214,9 @@ impl ClipboardEntry {
     }
 
     pub fn image_path(&self) -> Option<PathBuf> {
-        self.image_file.as_ref().map(|filename| images_dir_path().join(filename))
+        self.image_file
+            .as_ref()
+            .map(|filename| images_dir_path().join(filename))
     }
 }
 
@@ -209,9 +243,10 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
 
             if let Some(png_bytes) = current_clipboard_image() {
                 let hash = simple_hash(&png_bytes);
-                let already_latest = history.entries.first().is_some_and(|first| {
-                    first.image_hash == Some(hash)
-                });
+                let already_latest = history
+                    .entries
+                    .first()
+                    .is_some_and(|first| first.image_hash == Some(hash));
                 if !already_latest {
                     if let Some(entry) = create_image_entry(png_bytes, source) {
                         history.entries.insert(0, entry);
@@ -222,7 +257,7 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                                 }
                             }
                         }
-                        save_entries_atomic(&history.entries);
+                        let _ = save_entries_atomic(&history.entries);
                     }
                 }
             } else if let Some(text) = corvo_platform::read_clipboard_text() {
@@ -243,7 +278,7 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                         if history.entries.len() > preferences().max_entries {
                             history.entries.truncate(preferences().max_entries);
                         }
-                        save_entries_atomic(&history.entries);
+                        let _ = save_entries_atomic(&history.entries);
                     }
                 }
             }
@@ -366,7 +401,9 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
     }
     let count = corvo_platform::clipboard_change_count();
     let store_arc = store();
-    let Ok(mut history) = store_arc.write() else { return };
+    let Ok(mut history) = store_arc.write() else {
+        return;
+    };
     if count == history.last_change_count {
         return;
     }
@@ -387,9 +424,10 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
     // 1. Check for image content first
     if let Some(png_bytes) = current_clipboard_image() {
         let hash = simple_hash(&png_bytes);
-        let already_latest = history.entries.first().is_some_and(|first| {
-            first.image_hash == Some(hash)
-        });
+        let already_latest = history
+            .entries
+            .first()
+            .is_some_and(|first| first.image_hash == Some(hash));
         if !already_latest {
             if let Some(entry) = create_image_entry(png_bytes, source) {
                 history.entries.insert(0, entry);
@@ -400,7 +438,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
                         }
                     }
                 }
-                save_entries_atomic(&history.entries);
+                let _ = save_entries_atomic(&history.entries);
             }
         }
         return;
@@ -430,7 +468,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
                 }
             }
         }
-        save_entries_atomic(&history.entries);
+        let _ = save_entries_atomic(&history.entries);
     }
 }
 
@@ -455,7 +493,9 @@ pub fn get_entry(id: &str) -> Option<ClipboardEntry> {
 pub fn all_entries() -> Vec<ClipboardEntry> {
     poll_clipboard();
     let store_arc = store();
-    let Ok(history) = store_arc.read() else { return Vec::new() };
+    let Ok(history) = store_arc.read() else {
+        return Vec::new();
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -501,34 +541,47 @@ fn prune_history_to_preferences() {
                 }
             }
         }
-        save_entries_atomic(&history.entries);
+        let _ = save_entries_atomic(&history.entries);
     }
 }
 
-pub fn delete_entry(id: &str) {
-    let store_arc = store();
-    if let Ok(mut history) = store_arc.write() {
-        if let Some(pos) = history.entries.iter().position(|e| e.id == id) {
-            let removed = history.entries.remove(pos);
-            if let Some(path) = removed.image_path() {
-                let _ = fs::remove_file(path);
-            }
-            save_entries_atomic(&history.entries);
-        }
+pub fn delete_entry(id: &str) -> Result<(), String> {
+    let mut history = store()
+        .write()
+        .map_err(|_| "Could not lock clipboard history".to_string())?;
+    let pos = history
+        .entries
+        .iter()
+        .position(|entry| entry.id == id)
+        .ok_or_else(|| "Clipboard item was not found".to_string())?;
+    let previous_entries = history.entries.clone();
+    let removed = history.entries.remove(pos);
+    if let Err(error) = save_entries_atomic(&history.entries) {
+        history.entries = previous_entries;
+        return Err(error);
     }
+    if let Some(path) = removed.image_path() {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
 }
 
-pub fn clear_history() {
-    let store_arc = store();
-    if let Ok(mut history) = store_arc.write() {
-        for entry in &history.entries {
-            if let Some(path) = entry.image_path() {
-                let _ = fs::remove_file(path);
-            }
-        }
-        history.entries.clear();
-        save_entries_atomic(&history.entries);
+pub fn clear_history() -> Result<(), String> {
+    let mut history = store()
+        .write()
+        .map_err(|_| "Could not lock clipboard history".to_string())?;
+    let previous_entries = history.entries.clone();
+    history.entries.clear();
+    if let Err(error) = save_entries_atomic(&history.entries) {
+        history.entries = previous_entries;
+        return Err(error);
     }
+    for entry in previous_entries {
+        if let Some(path) = entry.image_path() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
 }
 
 /// Spawns a lightweight background watcher (400ms interval) that detects
@@ -556,7 +609,11 @@ pub fn start_watcher() {
 }
 
 fn single_line_preview(text: &str) -> String {
-    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     if first.is_empty() {
         return "Empty".into();
     }
@@ -593,11 +650,16 @@ fn is_json(text: &str) -> bool {
 fn is_color_code(text: &str) -> bool {
     let value = text.trim();
     if let Some(hex) = value.strip_prefix('#') {
-        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+        return matches!(hex.len(), 3 | 4 | 6 | 8)
+            && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
     }
     let lower = value.to_ascii_lowercase();
-    let Some((name, values)) = lower.split_once('(') else { return false };
-    let Some(values) = values.strip_suffix(')') else { return false };
+    let Some((name, values)) = lower.split_once('(') else {
+        return false;
+    };
+    let Some(values) = values.strip_suffix(')') else {
+        return false;
+    };
     if !matches!(name.trim(), "rgb" | "rgba") {
         return false;
     }
@@ -605,7 +667,11 @@ fn is_color_code(text: &str) -> bool {
     let expected = if name.trim() == "rgba" { 4 } else { 3 };
     components.len() == expected
         && components.iter().all(|component| {
-            component.strip_suffix('%').unwrap_or(component).parse::<f32>().is_ok()
+            component
+                .strip_suffix('%')
+                .unwrap_or(component)
+                .parse::<f32>()
+                .is_ok()
         })
 }
 
@@ -643,7 +709,8 @@ impl Command for ClipboardManagerCommand {
 
             let mut entries = all_entries();
             match filter {
-                "text" => entries.retain(|e| e.image_path().is_none() && !is_url(&e.text) && !is_json(&e.text)),
+                "text" => entries
+                    .retain(|e| e.image_path().is_none() && !is_url(&e.text) && !is_json(&e.text)),
                 "links" => entries.retain(|e| is_url(&e.text)),
                 "images" => entries.retain(|e| e.image_path().is_some()),
                 "json" => entries.retain(|e| is_json(&e.text)),
@@ -766,7 +833,11 @@ impl Command for ClipboardManagerCommand {
         results
     }
 
-    async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(
+        &self,
+        result_id: &str,
+        _ctx: &ExecutionContext,
+    ) -> Result<Action, CommandError> {
         if result_id == "clipboard-manager:open" {
             return Ok(Action::ShowToast("Clipboard History".into()));
         }
@@ -889,7 +960,10 @@ mod tests {
     #[test]
     fn root_search_empty_returns_command() {
         let command = ClipboardManagerCommand;
-        let ctx = SearchContext { max_results: 10, store: None };
+        let ctx = SearchContext {
+            max_results: 10,
+            store: None,
+        };
         let results = smol::block_on(command.search("", &ctx));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "clipboard-manager:open");
@@ -898,7 +972,10 @@ mod tests {
     #[test]
     fn root_search_keyword_returns_command() {
         let command = ClipboardManagerCommand;
-        let ctx = SearchContext { max_results: 10, store: None };
+        let ctx = SearchContext {
+            max_results: 10,
+            store: None,
+        };
         let results = smol::block_on(command.search("clipboard", &ctx));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "clipboard-manager:open");
@@ -958,22 +1035,14 @@ mod tests {
     #[test]
     fn test_image_entry_creation_and_actions() {
         let png_bytes = vec![
-            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D,
-            b'I', b'H', b'D', b'R',
-            0x00, 0x00, 0x00, 0x01,
-            0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00,
-            0x1F, 0x15, 0xC4, 0x89,
-            0x00, 0x00, 0x00, 0x0A,
-            b'I', b'D', b'A', b'T',
-            0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
-            0x0D, 0x0A, 0x2D, 0xB4,
-            0x00, 0x00, 0x00, 0x00,
-            b'I', b'E', b'N', b'D',
-            0xAE, 0x42, 0x60, 0x82,
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, b'I', b'D', b'A', b'T', 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
         ];
-        let entry = create_image_entry(png_bytes, "Finder".into()).expect("Failed to create image entry");
+        let entry =
+            create_image_entry(png_bytes, "Finder".into()).expect("Failed to create image entry");
         assert!(entry.is_image());
         assert_eq!(entry.image_width, Some(1));
         assert_eq!(entry.image_height, Some(1));
@@ -994,7 +1063,7 @@ mod tests {
         assert_eq!(actions[1].label, "Copy Image");
         assert_eq!(actions[2].label, "Show in Finder");
 
-        delete_entry(&entry.id);
+        let _ = delete_entry(&entry.id);
         assert!(!path.exists());
     }
 
@@ -1016,9 +1085,10 @@ mod tests {
         assert_eq!(actions[1].action, Action::Copy("Hello World".into()));
 
         let ctx = ExecutionContext::default();
-        let exec_action = smol::block_on(cmd.execute(&format!("clipboard-manager:entry:{}", entry.id), &ctx));
+        let exec_action =
+            smol::block_on(cmd.execute(&format!("clipboard-manager:entry:{}", entry.id), &ctx));
         assert_eq!(exec_action, Ok(Action::PasteText("Hello World".into())));
 
-        delete_entry(&entry.id);
+        let _ = delete_entry(&entry.id);
     }
 }

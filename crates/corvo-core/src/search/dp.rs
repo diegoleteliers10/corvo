@@ -50,8 +50,16 @@ pub fn match_launcher_dp(
     }
 
     // 2. Precheck 1: Non-separator count must fit in target
-    let query_letters_count = query.units.iter().filter(|&&u| !is_unit_separator(u)).count();
-    let target_letters_count = target.units.iter().filter(|&&u| !is_unit_separator(u)).count();
+    let query_letters_count = query
+        .units
+        .iter()
+        .filter(|&&u| !is_unit_separator(u))
+        .count();
+    let target_letters_count = target
+        .units
+        .iter()
+        .filter(|&&u| !is_unit_separator(u))
+        .count();
     if query_letters_count > target_letters_count {
         return None;
     }
@@ -162,7 +170,11 @@ fn align_banded(query: &SearchText, target: &SearchText) -> Option<i32> {
                     let adjacent = prev_row[col - 1];
                     // Check previous gap match (penalty -1)
                     let gap = if col >= 2 {
-                        prev_row[..col - 1].iter().copied().max().unwrap_or(i32::MIN)
+                        prev_row[..col - 1]
+                            .iter()
+                            .copied()
+                            .max()
+                            .unwrap_or(i32::MIN)
                     } else {
                         i32::MIN
                     };
@@ -190,11 +202,7 @@ fn align_banded(query: &SearchText, target: &SearchText) -> Option<i32> {
     }
 
     let final_max = prev_row.iter().copied().max()?;
-    if final_max > 0 {
-        Some(final_max)
-    } else {
-        None
-    }
+    if final_max > 0 { Some(final_max) } else { None }
 }
 
 #[inline]
@@ -203,7 +211,10 @@ fn is_unit_separator(unit: u16) -> bool {
         return false;
     }
     let ch = unit as u8 as char;
-    matches!(ch, ' ' | '-' | '_' | '.' | '/' | '\\' | ':' | '@' | '(' | ')' | '[' | ']' | '{' | '}')
+    matches!(
+        ch,
+        ' ' | '-' | '_' | '.' | '/' | '\\' | ':' | '@' | '(' | ')' | '[' | ']' | '{' | '}'
+    )
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             keywords: "empty trash recycle bin delete cleanup",
             icon: phosphor_svgs::style::regular::TRASH,
             execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"Clear-RecycleBin -Force -ErrorAction SilentlyContinue\"".into(),
+                "powershell -NoProfile -Command \"Clear-RecycleBin -Force -ErrorAction Stop\"".into(),
             ),
         },
         SystemActionDef {
@@ -71,32 +71,28 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Volume Up",
             keywords: "volume up louder increase audio sound",
             icon: phosphor_svgs::style::regular::SPEAKER_HIGH,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]175)\"".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(0.05),
         },
         SystemActionDef {
             id: "volume-down",
             title: "Volume Down",
             keywords: "volume down quieter decrease audio sound lower",
             icon: phosphor_svgs::style::regular::SPEAKER_LOW,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]174)\"".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(-0.05),
         },
         SystemActionDef {
             id: "brightness-up",
             title: "Increase Brightness",
             keywords: "brightness up increase display screen brighter monitor",
             icon: phosphor_svgs::style::regular::SUN,
-            execution: ActionExecution::AdjustBrightness(0.1),
+            execution: ActionExecution::AdjustBrightness(0.05),
         },
         SystemActionDef {
             id: "brightness-down",
             title: "Decrease Brightness",
             keywords: "brightness down decrease display screen dimmer monitor",
             icon: phosphor_svgs::style::regular::SUN_HORIZON,
-            execution: ActionExecution::AdjustBrightness(-0.1),
+            execution: ActionExecution::AdjustBrightness(-0.05),
         },
         SystemActionDef {
             id: "hide-apps",
@@ -187,7 +183,8 @@ pub fn get_system_settings() -> Vec<SystemSettingDef> {
         SystemSettingDef {
             id: "accessibility",
             title: "Accessibility / Ease of Access Settings",
-            keywords: "accessibility vision hearing magnifier contrast narrator captions ease of access",
+            keywords:
+                "accessibility vision hearing magnifier contrast narrator captions ease of access",
             icon: phosphor_svgs::style::regular::USER_CIRCLE,
             execution: ActionExecution::OpenUrl("ms-settings:easeofaccess-display".into()),
         },
@@ -243,7 +240,8 @@ pub fn get_system_settings() -> Vec<SystemSettingDef> {
         SystemSettingDef {
             id: "privacy-security",
             title: "Privacy & Security Settings",
-            keywords: "privacy security permissions camera microphone location windows defender antivirus",
+            keywords:
+                "privacy security permissions camera microphone location windows defender antivirus",
             icon: phosphor_svgs::style::regular::SHIELD,
             execution: ActionExecution::OpenUrl("ms-settings:privacy".into()),
         },

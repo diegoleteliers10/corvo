@@ -3,6 +3,7 @@ pub enum ActionExecution {
     RunShell(String),
     OpenUrl(String),
     AdjustBrightness(f32),
+    AdjustVolume(f32),
 }
 
 pub struct SystemActionDef {

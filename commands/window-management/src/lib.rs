@@ -1,5 +1,7 @@
 //! Focus and arrange windows through native platform scripting.
 
+use std::cmp::Reverse;
+
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
     SearchContext, SearchResult, search_match_score,
@@ -238,7 +240,7 @@ impl Command for WindowManagementCommand {
         }
 
         if !q.is_empty() {
-            results.sort_by(|left, right| right.score.cmp(&left.score));
+            results.sort_by_key(|result| Reverse(result.score));
             results.truncate(ctx.max_results);
         }
         results

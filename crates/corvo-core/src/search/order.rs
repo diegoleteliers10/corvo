@@ -179,7 +179,9 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
                     let mut num_a: u64 = 0;
                     while let Some(&d) = a_chars.peek() {
                         if d.is_ascii_digit() {
-                            num_a = num_a.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            num_a = num_a
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             a_chars.next();
                         } else {
                             break;
@@ -189,7 +191,9 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
                     let mut num_b: u64 = 0;
                     while let Some(&d) = b_chars.peek() {
                         if d.is_ascii_digit() {
-                            num_b = num_b.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            num_b = num_b
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             b_chars.next();
                         } else {
                             break;

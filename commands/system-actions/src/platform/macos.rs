@@ -26,7 +26,7 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             keywords: "empty trash bin delete cleanup purge",
             icon: phosphor_svgs::style::regular::TRASH,
             execution: ActionExecution::RunShell(
-                "osascript -e 'tell application \"Finder\" to empty trash'".into(),
+                "osascript -e 'tell application \"Finder\" to empty trash' || find \"${HOME:?HOME is not set}/.Trash\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +".into(),
             ),
         },
         SystemActionDef {
@@ -151,32 +151,28 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Volume Down",
             keywords: "volume down quieter decrease audio sound lower quiet",
             icon: phosphor_svgs::style::regular::SPEAKER_LOW,
-            execution: ActionExecution::RunShell(
-                "osascript -e 'set volume output volume ((output volume of (get volume settings)) - 10)'".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(-0.05),
         },
         SystemActionDef {
             id: "volume-up",
             title: "Volume Up",
             keywords: "volume up louder increase audio sound louder raise",
             icon: phosphor_svgs::style::regular::SPEAKER_HIGH,
-            execution: ActionExecution::RunShell(
-                "osascript -e 'set volume output volume ((output volume of (get volume settings)) + 10)'".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(0.05),
         },
         SystemActionDef {
             id: "brightness-down",
             title: "Decrease Brightness",
             keywords: "brightness down decrease display screen dimmer monitor",
             icon: phosphor_svgs::style::regular::SUN_HORIZON,
-            execution: ActionExecution::AdjustBrightness(-0.0625),
+            execution: ActionExecution::AdjustBrightness(-0.05),
         },
         SystemActionDef {
             id: "brightness-up",
             title: "Increase Brightness",
             keywords: "brightness up increase display screen brighter monitor",
             icon: phosphor_svgs::style::regular::SUN,
-            execution: ActionExecution::AdjustBrightness(0.0625),
+            execution: ActionExecution::AdjustBrightness(0.05),
         },
     ]
 }

@@ -54,19 +54,46 @@ pub struct SearchResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Open(PathBuf),
-    OpenAppUninstaller { name: String, path: PathBuf },
-    SetResultFavorite { result_id: String, title: String, favorite: bool },
-    SetResultHidden { result_id: String, title: String, hidden: bool },
+    OpenAppUninstaller {
+        name: String,
+        path: PathBuf,
+    },
+    OpenFileSearch,
+    SetResultFavorite {
+        result_id: String,
+        title: String,
+        favorite: bool,
+    },
+    SetResultHidden {
+        result_id: String,
+        title: String,
+        hidden: bool,
+    },
     OpenUrl(String),
     Copy(String),
     PasteText(String),
     CopyImage(PathBuf),
     PasteImage(PathBuf),
     RunShell(String),
+    RunProcess {
+        program: String,
+        args: Vec<String>,
+        title: String,
+    },
+    ConfirmProcessTermination {
+        pid: u32,
+        start_time: u64,
+    },
+    TerminateProcess {
+        pid: u32,
+        start_time: u64,
+        force: bool,
+    },
     ShowToast(String),
     CloseWindow,
     TileWindow(String),
     AdjustBrightness(f32),
+    AdjustVolume(f32),
 }
 
 /// One entry of a result's actions menu, the ⌘K surface. `action` runs
@@ -203,7 +230,10 @@ pub struct SearchContext {
 
 impl Default for SearchContext {
     fn default() -> Self {
-        Self { max_results: DEFAULT_MAX_RESULTS, store: None }
+        Self {
+            max_results: DEFAULT_MAX_RESULTS,
+            store: None,
+        }
     }
 }
 
@@ -230,7 +260,11 @@ pub trait Command: Send + Sync {
     /// Must stay non-blocking. Slow work runs on a background task that
     /// feeds a cache; `search` reads the cache.
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult>;
-    async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError>;
+    async fn execute(
+        &self,
+        result_id: &str,
+        ctx: &ExecutionContext,
+    ) -> Result<Action, CommandError>;
     /// The ⌘K actions menu for one result. Static and cheap; the UI
     /// calls it when the menu opens.
     fn actions(&self, _result_id: &str) -> Vec<CommandAction> {

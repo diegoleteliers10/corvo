@@ -5,7 +5,9 @@ fn resolve_linux_desktop_setting(gnome_panel: &str, kde_kcm: &str) -> ActionExec
         .unwrap_or_default()
         .to_lowercase();
     if desktop.contains("kde") {
-        ActionExecution::RunShell(format!("systemsettings {kde_kcm} || systemsettings5 {kde_kcm}"))
+        ActionExecution::RunShell(format!(
+            "systemsettings {kde_kcm} || systemsettings5 {kde_kcm}"
+        ))
     } else {
         ActionExecution::RunShell(format!("gnome-control-center {gnome_panel}"))
     }
@@ -64,7 +66,7 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             keywords: "empty trash bin delete cleanup",
             icon: phosphor_svgs::style::regular::TRASH,
             execution: ActionExecution::RunShell(
-                "gio trash --empty || rm -rf ~/.local/share/Trash/*".into(),
+                "gio trash --empty || find \"${HOME:?HOME is not set}/.local/share/Trash\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +".into(),
             ),
         },
         SystemActionDef {
@@ -90,18 +92,14 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Volume Up",
             keywords: "volume up louder increase audio sound",
             icon: phosphor_svgs::style::regular::SPEAKER_HIGH,
-            execution: ActionExecution::RunShell(
-                "wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ +5% || amixer set Master 5%+".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(0.05),
         },
         SystemActionDef {
             id: "volume-down",
             title: "Volume Down",
             keywords: "volume down quieter decrease audio sound lower",
             icon: phosphor_svgs::style::regular::SPEAKER_LOW,
-            execution: ActionExecution::RunShell(
-                "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ -5% || amixer set Master 5%-".into(),
-            ),
+            execution: ActionExecution::AdjustVolume(-0.05),
         },
         SystemActionDef {
             id: "brightness-up",

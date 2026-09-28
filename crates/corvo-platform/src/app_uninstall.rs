@@ -3,10 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{AppFileEntry, AppFileScan, PlatformError, PlatformResult};
+use objc2_foundation::{NSFileManager, NSString, NSURL};
 
-const APPLE_SCRIPT: &str =
-    "on run argv\n tell application \"Finder\" to delete POSIX file (item 1 of argv)\nend run";
+use crate::{AppFileEntry, AppFileScan, PlatformError, PlatformResult};
 const MAX_SIZE_ENTRIES: usize = 100_000;
 const MAX_SCAN_ENTRIES: usize = 20_000;
 
@@ -139,12 +138,21 @@ pub(super) fn move_app_files_to_trash(app_path: &Path, paths: &[PathBuf]) -> Pla
 
     let mut canonical_paths = Vec::<PathBuf>::with_capacity(paths.len());
     for path in paths {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            PlatformError::Os(format!("could not access {}: {error}", path.display()))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(PlatformError::Os(format!(
+                "{} changed after the scan",
+                path.display()
+            )));
+        }
         let canonical = path.canonicalize().map_err(|error| {
             PlatformError::Os(format!("could not access {}: {error}", path.display()))
         })?;
-        if !safe_paths.contains(&canonical) {
+        if path != &canonical || !safe_paths.contains(&canonical) {
             return Err(PlatformError::Os(format!(
-                "{} is not an app file",
+                "{} changed after the scan",
                 path.display()
             )));
         }
@@ -153,26 +161,19 @@ pub(super) fn move_app_files_to_trash(app_path: &Path, paths: &[PathBuf]) -> Pla
     canonical_paths.sort();
     canonical_paths.dedup();
     canonical_paths.sort_by_key(|path| path == &app_path);
+    let file_manager = NSFileManager::defaultManager();
     for canonical in &canonical_paths {
-        let output = Command::new("/usr/bin/osascript")
-            .arg("-e")
-            .arg(APPLE_SCRIPT)
-            .arg(canonical)
-            .output()
+        let path = NSString::from_str(&canonical.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path);
+        file_manager
+            .trashItemAtURL_resultingItemURL_error(&url, None)
             .map_err(|error| {
                 PlatformError::Os(format!(
-                    "could not move {} to Trash: {error}",
-                    canonical.display()
+                    "could not move {} to Trash: {}",
+                    canonical.display(),
+                    error.localizedDescription()
                 ))
             })?;
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(PlatformError::Os(if error.is_empty() {
-                format!("could not move {} to Trash", canonical.display())
-            } else {
-                error
-            }));
-        }
     }
     Ok(())
 }

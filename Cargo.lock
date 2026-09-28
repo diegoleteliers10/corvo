@@ -164,6 +164,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "arboard"
+version = "3.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
+dependencies = [
+ "clipboard-win",
+ "image",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "percent-encoding",
+ "windows-sys 0.59.0",
+ "wl-clipboard-rs",
+ "x11rb",
+]
+
+[[package]]
 name = "arg_enum_proc_macro"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -809,6 +830,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard-win"
+version = "5.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+dependencies = [
+ "error-code",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1077,15 +1107,17 @@ dependencies = [
 
 [[package]]
 name = "corvo"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "corvo-app-launcher",
+ "corvo-brew",
  "corvo-calculator",
  "corvo-clipboard-manager",
  "corvo-config",
  "corvo-core",
  "corvo-emoji-picker",
  "corvo-file-search",
+ "corvo-kill-process",
  "corvo-platform",
  "corvo-quicklinks",
  "corvo-snippets",
@@ -1099,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-app-launcher"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-config",
@@ -1109,8 +1141,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvo-brew"
+version = "0.1.3"
+dependencies = [
+ "async-trait",
+ "corvo-core",
+ "serde_json",
+ "smol",
+]
+
+[[package]]
 name = "corvo-calculator"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1118,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-clipboard-manager"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1132,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-config"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "corvo-core",
  "directories",
@@ -1142,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "inventory",
@@ -1152,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-emoji-picker"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1161,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-file-search"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1169,12 +1211,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "corvo-platform"
-version = "0.1.2"
+name = "corvo-kill-process"
+version = "0.1.3"
 dependencies = [
+ "async-trait",
+ "corvo-core",
+ "corvo-platform",
+ "smol",
+]
+
+[[package]]
+name = "corvo-platform"
+version = "0.1.3"
+dependencies = [
+ "arboard",
  "directories",
  "global-hotkey",
  "hex",
+ "image",
  "libc",
  "minisign-verify",
  "objc2 0.6.4",
@@ -1185,12 +1239,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "smol",
+ "sysinfo",
  "ureq",
 ]
 
 [[package]]
 name = "corvo-quicklinks"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1198,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-snippets"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1206,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-system-actions"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-config",
@@ -1218,9 +1273,10 @@ dependencies = [
 
 [[package]]
 name = "corvo-ui"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "corvo-app-launcher",
+ "corvo-brew",
  "corvo-clipboard-manager",
  "corvo-config",
  "corvo-core",
@@ -1237,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-web-search-fallback"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1245,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-window-management"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "corvo-config",
@@ -1500,6 +1556,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1627,6 +1689,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "error-code"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "etagere"
@@ -3548,6 +3616,7 @@ dependencies = [
  "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
 
@@ -3872,6 +3941,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3955,6 +4034,17 @@ dependencies = [
  "collections",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "petgraph"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
+dependencies = [
+ "fixedbitset",
+ "hashbrown 0.15.5",
+ "indexmap",
 ]
 
 [[package]]
@@ -5690,6 +5780,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree_magic_mini"
+version = "3.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8765b90061cba6c22b5831f675da109ae5561588290f9fa2317adab2714d5a6"
+dependencies = [
+ "memchr",
+ "nom 8.0.0",
+ "petgraph",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6061,6 +6162,67 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "wayland-backend"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38a91b4eaddff87b1cd1074985e3713da4af2c49742d1b356b2c01670a67a078"
+dependencies = [
+ "cc",
+ "downcast-rs",
+ "rustix",
+ "smallvec",
+ "wayland-sys",
+]
+
+[[package]]
+name = "wayland-client"
+version = "0.31.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3c36a0f861ad76d0901f2800b46321410d9f73f2ea88aac0650d86c32688073"
+dependencies = [
+ "bitflags 2.13.2",
+ "rustix",
+ "wayland-backend",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols"
+version = "0.32.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23d0c813de3daa2ed6520af85a3bd49b0e722a3078506899aa9686fea58dc4b6"
+dependencies = [
+ "bitflags 2.13.2",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols-wlr"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb04e52f7836d7c7976c78ca0250d61e33873c34156a2a1fc9474828ec268234"
+dependencies = [
+ "bitflags 2.13.2",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-scanner"
+version = "0.31.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
+dependencies = [
+ "proc-macro2",
+ "quick-xml",
+ "quote",
 ]
 
 [[package]]
@@ -6764,6 +6926,24 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wl-clipboard-rs"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9651471a32e87d96ef3a127715382b2d11cc7c8bb9822ded8a7cc94072eb0a3"
+dependencies = [
+ "libc",
+ "log",
+ "os_pipe",
+ "rustix",
+ "thiserror 2.0.20",
+ "tree_magic_mini",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+]
 
 [[package]]
 name = "writeable"

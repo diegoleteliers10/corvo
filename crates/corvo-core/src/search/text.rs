@@ -19,7 +19,8 @@ pub fn fold(text: &str) -> String {
         };
 
         // Filter out combining diacritical marks (Unicode Mn category: 0x0300..=0x036F, 0x1DC0..=0x1DFF, 0x20D0..=0x20FF, 0xFE20..=0xFE2F)
-        if matches!(ch as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F) {
+        if matches!(ch as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+        {
             continue;
         }
 
@@ -149,16 +150,14 @@ fn extract_humps(original: &str, units: &[u16]) -> Vec<usize> {
         }
 
         // Acronym boundary: UPPER UPPER lower (e.g. `XCode` -> hump at `C`)
-        if i >= 2 && chars[i - 2].is_uppercase() && chars[i - 1].is_uppercase() && ch.is_lowercase() {
+        if i >= 2 && chars[i - 2].is_uppercase() && chars[i - 1].is_uppercase() && ch.is_lowercase()
+        {
             humps.push(i - 1);
         }
     }
 
     // Map character indices to UTF-16 code unit indices if ASCII; if non-ASCII length matches, keep
-    let valid_indices: Vec<usize> = humps
-        .into_iter()
-        .filter(|&idx| idx < units.len())
-        .collect();
+    let valid_indices: Vec<usize> = humps.into_iter().filter(|&idx| idx < units.len()).collect();
 
     let mut result = valid_indices;
     result.sort_unstable();
@@ -168,7 +167,10 @@ fn extract_humps(original: &str, units: &[u16]) -> Vec<usize> {
 
 #[inline]
 pub fn is_separator(ch: char) -> bool {
-    matches!(ch, ' ' | '-' | '_' | '.' | '/' | '\\' | ':' | '@' | '(' | ')' | '[' | ']' | '{' | '}')
+    matches!(
+        ch,
+        ' ' | '-' | '_' | '.' | '/' | '\\' | ':' | '@' | '(' | ')' | '[' | ']' | '{' | '}'
+    )
 }
 
 #[cfg(test)]

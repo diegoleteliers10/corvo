@@ -1,14 +1,13 @@
-//! Global hotkey management. macOS and Windows use the `global-hotkey` crate. Linux
-//! has no app-level global shortcut on Wayland, so users bind
-//! `corvo --toggle` in the compositor instead (SPEC §6).
+//! Global hotkey management. The `global-hotkey` crate supports macOS, Windows,
+//! and Linux X11. Wayland users bind `corvo --toggle` in the compositor.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey, Modifiers},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,7 +39,7 @@ pub fn notify_hotkeys_changed() {
 
 /// Parses a human-readable or settings hotkey string into `(Modifiers, Code)`.
 /// Supports combos like "cmd+space", "ctrl+alt+t", "opt+cmd+left", "ctrl+opt+enter", etc.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn parse_hotkey_string(hotkey: &str) -> Option<(Modifiers, Code)> {
     let mut mods = Modifiers::empty();
     let mut target_code: Option<Code> = None;
@@ -171,30 +170,40 @@ pub fn parse_hotkey_string(hotkey: &str) -> Option<(Modifiers, Code)> {
     Some((mods, code))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn parse_hotkey_string(_hotkey: &str) -> Option<()> {
     None
 }
 
 /// Hotkey manager handle that registers and dynamically reloads hotkeys.
 pub struct HotkeyManager {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     manager: Option<GlobalHotKeyManager>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     registered: Vec<HotKey>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     id_map: Arc<Mutex<HashMap<u32, HotkeyIntent>>>,
 }
 
 impl HotkeyManager {
     pub fn new(tx: smol::channel::Sender<HotkeyIntent>) -> Self {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            let manager = match GlobalHotKeyManager::new() {
-                Ok(mgr) => Some(mgr),
-                Err(err) => {
-                    eprintln!("corvo: cannot initialize GlobalHotKeyManager: {err}");
-                    None
+            let manager = if cfg!(target_os = "linux")
+                && (std::env::var_os("DISPLAY").is_none()
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some())
+            {
+                eprintln!(
+                    "corvo: bind global hotkeys in the Wayland compositor with `corvo --toggle`"
+                );
+                None
+            } else {
+                match GlobalHotKeyManager::new() {
+                    Ok(mgr) => Some(mgr),
+                    Err(err) => {
+                        eprintln!("corvo: cannot initialize GlobalHotKeyManager: {err}");
+                        None
+                    }
                 }
             };
 
@@ -210,7 +219,9 @@ impl HotkeyManager {
                         HotKeyState::Pressed => {
                             let now = std::time::Instant::now();
                             if let Some(&last_press) = pressed_keys.get(&event.id) {
-                                if now.duration_since(last_press) < std::time::Duration::from_millis(50) {
+                                if now.duration_since(last_press)
+                                    < std::time::Duration::from_millis(50)
+                                {
                                     continue;
                                 }
                             }
@@ -239,7 +250,7 @@ impl HotkeyManager {
             }
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = tx;
             Self {}
@@ -251,7 +262,7 @@ impl HotkeyManager {
         launcher_hotkey_str: &str,
         bindings: Vec<(String, HotkeyIntent)>,
     ) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let Some(ref manager) = self.manager else {
                 return;
@@ -304,7 +315,7 @@ impl HotkeyManager {
             *map_guard = new_id_map;
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (launcher_hotkey_str, bindings);
         }
@@ -313,7 +324,7 @@ impl HotkeyManager {
 
 impl Drop for HotkeyManager {
     fn drop(&mut self) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(ref manager) = self.manager {
             if !self.registered.is_empty() {
                 let _ = manager.unregister_all(&self.registered);
@@ -355,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn parses_various_hotkey_formats() {
         let (mods, code) = parse_hotkey_string("cmd+space").expect("cmd+space");
         assert!(mods.contains(Modifiers::SUPER));

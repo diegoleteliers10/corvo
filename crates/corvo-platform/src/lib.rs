@@ -13,18 +13,24 @@ pub mod updates;
 pub use hotkey::HotkeyIntent;
 pub use permissions::PermissionKind;
 pub use updates::{
-    check_for_updates, cleanup_old_installations, dismiss_version, download_and_verify,
-    install_and_restart, is_version_dismissed, UpdateChannel, UpdateError, UpdateRelease,
+    UpdateChannel, UpdateError, UpdateRelease, check_for_updates, cleanup_old_installations,
+    dismiss_version, download_and_verify, install_and_restart, is_version_dismissed,
+};
+
+mod processes;
+pub use processes::{
+    ListeningPortSnapshot, ProcessIdentity, ProcessSnapshot, TerminationMode,
+    listening_port_snapshot, process_snapshot, terminate_process,
 };
 
 #[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
 mod app_uninstall;
-#[cfg(target_os = "windows")]
-mod windows;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// A window on the desktop, as `window-management` sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +117,12 @@ pub fn make_panel_instant(_width: f64, _height: f64) {
     macos::make_panel_instant(_width, _height);
 }
 
+/// Removes the native shadow from Corvo's temporary action toast on macOS.
+pub fn remove_action_toast_shadow(_width: f64, _height: f64) {
+    #[cfg(target_os = "macos")]
+    macos::remove_action_toast_shadow(_width, _height);
+}
+
 /// Orders the launcher panel front and makes it key, synchronously.
 /// No-op outside macOS.
 pub fn order_panel_front(_width: f64, _height: f64) {
@@ -122,7 +134,7 @@ pub fn order_panel_front(_width: f64, _height: f64) {
 pub fn resize_launcher_panel(_width: f64, _height: f64) -> bool {
     #[cfg(target_os = "macos")]
     return macos::resize_launcher_panel(_width, _height);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return false;
 }
 
@@ -143,7 +155,9 @@ pub fn order_window_front(_width: f64, _height: f64) {
 pub fn frontmost_app_pid() -> Option<i32> {
     #[cfg(target_os = "macos")]
     return macos::frontmost_app_pid();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return frontmost_app_info().map(|(pid, _)| pid);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
 }
 
@@ -151,7 +165,11 @@ pub fn frontmost_app_pid() -> Option<i32> {
 pub fn frontmost_app_info() -> Option<(i32, String)> {
     #[cfg(target_os = "macos")]
     return macos::frontmost_app_info();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return windows::frontmost_app_info();
+    #[cfg(target_os = "linux")]
+    return linux::frontmost_app_info();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
 }
 
@@ -159,7 +177,9 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
 pub fn read_clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]
     return macos::read_clipboard_text();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return portable_clipboard(|clipboard| clipboard.get_text().ok());
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
 }
 
@@ -167,7 +187,34 @@ pub fn read_clipboard_text() -> Option<String> {
 pub fn clipboard_change_count() -> isize {
     #[cfg(target_os = "macos")]
     return macos::clipboard_change_count();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetClipboardSequenceNumber() -> u32;
+        }
+        return unsafe { GetClipboardSequenceNumber() as isize };
+    }
+    #[cfg(target_os = "linux")]
+    return portable_clipboard(|clipboard| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Ok(image) = clipboard.get_image() {
+            1u8.hash(&mut hasher);
+            image.width.hash(&mut hasher);
+            image.height.hash(&mut hasher);
+            image.bytes.hash(&mut hasher);
+            return hasher.finish() as isize;
+        }
+        if let Ok(text) = clipboard.get_text() {
+            2u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+            return hasher.finish() as isize;
+        }
+        0
+    })
+    .unwrap_or(0);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return 0;
 }
 
@@ -175,7 +222,7 @@ pub fn clipboard_change_count() -> isize {
 pub fn clipboard_is_concealed() -> bool {
     #[cfg(target_os = "macos")]
     return macos::clipboard_is_concealed();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return false;
 }
 
@@ -183,35 +230,113 @@ pub fn clipboard_is_concealed() -> bool {
 pub fn activate_app(_pid: i32) {
     #[cfg(target_os = "macos")]
     macos::activate_app(_pid);
+    #[cfg(target_os = "windows")]
+    let _ = windows::activate_app(_pid);
+    #[cfg(target_os = "linux")]
+    let _ = linux::activate_app(_pid);
 }
 
 /// Reads image bytes (PNG) from the system clipboard.
 pub fn read_clipboard_image() -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     return macos::read_clipboard_image();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return portable_clipboard(|clipboard| {
+        use image::ImageEncoder;
+        let image = clipboard.get_image().ok()?;
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let mut png_bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png_bytes)
+            .write_image(
+                image.bytes.as_ref(),
+                width,
+                height,
+                image::ColorType::Rgba8.into(),
+            )
+            .ok()?;
+        Some(png_bytes)
+    })
+    .flatten();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
 }
 
 /// Writes PNG image bytes to the system clipboard.
-pub fn copy_image_to_pasteboard(_png_bytes: &[u8]) {
+pub fn copy_image_to_pasteboard(_png_bytes: &[u8]) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
-    macos::copy_image_to_pasteboard(_png_bytes);
+    return macos::copy_image_to_pasteboard(_png_bytes);
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return portable_clipboard(|clipboard| {
+        let decoded = image::load_from_memory(_png_bytes)
+            .map_err(|error| {
+                PlatformError::Os(format!("could not decode clipboard image: {error}"))
+            })?
+            .to_rgba8();
+        let (width, height) = decoded.dimensions();
+        clipboard
+            .set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: decoded.into_raw().into(),
+            })
+            .map_err(|error| PlatformError::Os(format!("could not write clipboard image: {error}")))
+    })
+    .unwrap_or_else(|| Err(PlatformError::Os("clipboard is unavailable".into())));
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(PlatformError::Unsupported("image clipboard write".into()))
 }
 
 /// Parses width and height from PNG bytes.
 pub fn parse_png_dimensions(_bytes: &[u8]) -> Option<(u32, u32)> {
     #[cfg(target_os = "macos")]
     return macos::parse_png_dimensions(_bytes);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return image::load_from_memory_with_format(_bytes, image::ImageFormat::Png)
+        .ok()
+        .map(|image| (image.width(), image.height()));
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn portable_clipboard<R>(operation: impl FnOnce(&mut arboard::Clipboard) -> R) -> Option<R> {
+    use std::sync::{Mutex, OnceLock};
+
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let clipboard = CLIPBOARD.get_or_init(|| Mutex::new(None));
+    let mut clipboard = clipboard.lock().ok()?;
+    if clipboard.is_none() {
+        *clipboard = arboard::Clipboard::new().ok();
+    }
+    Some(operation(clipboard.as_mut()?))
 }
 
 /// Automatically copies image, reactivates previous app, and synthesizes Cmd+V.
 pub async fn auto_paste_image(_target_pid: i32, _png_bytes: &[u8]) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return macos::auto_paste_image(_target_pid, _png_bytes).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            copy_image_to_pasteboard(_png_bytes)?;
+            return Err(PlatformError::Unsupported(
+                "automatic paste is not available on this Wayland compositor. The image was copied to the clipboard".into(),
+            ));
+        }
+        copy_image_to_pasteboard(_png_bytes)?;
+        #[cfg(target_os = "windows")]
+        windows::activate_app(_target_pid)?;
+        #[cfg(target_os = "linux")]
+        linux::activate_app(_target_pid)?;
+        smol::Timer::after(std::time::Duration::from_millis(150)).await;
+        #[cfg(target_os = "windows")]
+        return windows::send_paste_keystroke();
+        #[cfg(target_os = "linux")]
+        return linux::send_paste_keystroke();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return Err(PlatformError::Unsupported("auto_paste_image".into()));
 }
 
@@ -219,11 +344,28 @@ pub async fn auto_paste_image(_target_pid: i32, _png_bytes: &[u8]) -> PlatformRe
 pub async fn auto_paste(_target_pid: i32, text: &str) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return macos::auto_paste(_target_pid, text).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
-        let ops = platform_ops();
-        ops.copy_text(text)
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            platform_ops().copy_text(text)?;
+            return Err(PlatformError::Unsupported(
+                "automatic paste is not available on this Wayland compositor. The text was copied to the clipboard".into(),
+            ));
+        }
+        platform_ops().copy_text(text)?;
+        #[cfg(target_os = "windows")]
+        windows::activate_app(_target_pid)?;
+        #[cfg(target_os = "linux")]
+        linux::activate_app(_target_pid)?;
+        smol::Timer::after(std::time::Duration::from_millis(150)).await;
+        #[cfg(target_os = "windows")]
+        return windows::send_paste_keystroke();
+        #[cfg(target_os = "linux")]
+        return linux::send_paste_keystroke();
     }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(PlatformError::Unsupported("auto_paste".into()))
 }
 
 /// Queries whether the process has macOS Accessibility permissions.
@@ -278,21 +420,56 @@ pub fn list_apps_in_scopes(_scopes: &[String]) -> PlatformResult<Vec<AppEntry>> 
 pub fn associated_app_files(_app_path: &std::path::Path) -> PlatformResult<AppFileScan> {
     #[cfg(target_os = "macos")]
     return app_uninstall::associated_app_files(_app_path);
-    #[cfg(not(target_os = "macos"))]
-    Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
+    #[cfg(target_os = "windows")]
+    return windows::associated_app_files(_app_path);
+    #[cfg(target_os = "linux")]
+    return linux::associated_app_files(_app_path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(PlatformError::Unsupported(
+        "app uninstall is not supported on this platform".into(),
+    ))
 }
 
 /// Moves selected app files to the system Trash after a fresh safety check.
-pub fn move_app_files_to_trash(_app_path: &std::path::Path, _paths: &[PathBuf]) -> PlatformResult<()> {
+pub fn move_app_files_to_trash(
+    _app_path: &std::path::Path,
+    _paths: &[PathBuf],
+) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return app_uninstall::move_app_files_to_trash(_app_path, _paths);
-    #[cfg(not(target_os = "macos"))]
-    Err(PlatformError::Unsupported("app uninstall is not supported on this platform".into()))
+    #[cfg(target_os = "windows")]
+    return windows::move_app_files_to_trash(_app_path, _paths);
+    #[cfg(target_os = "linux")]
+    return linux::move_app_files_to_trash(_app_path, _paths);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(PlatformError::Unsupported(
+        "app uninstall is not supported on this platform".into(),
+    ))
 }
 
 /// Whether this host can show the app uninstall action.
 pub const fn supports_app_uninstall() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    ))
+}
+
+/// Returns true when Corvo can use a native package manager to remove this app.
+pub fn supports_app_uninstall_path(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    return path.extension().is_some_and(|extension| extension == "app")
+        && !path.starts_with("/System/");
+    #[cfg(target_os = "windows")]
+    return windows::supports_app_uninstall_path(path);
+    #[cfg(target_os = "linux")]
+    return linux::supports_app_uninstall_path(path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// Renders the app bundle's icon to a cached PNG.
@@ -309,11 +486,19 @@ pub fn run_shell(cmd: &str) -> PlatformResult<()> {
     {
         let status = std::process::Command::new("cmd")
             .args(["/c", cmd])
-            .spawn();
-        if status.is_ok() {
+            .status()
+            .map_err(|error| {
+                PlatformError::Os(format!("could not start shell command: {error}"))
+            })?;
+        if status.success() {
             Ok(())
         } else {
-            Err(PlatformError::Os(format!("failed to run shell command: {cmd}")))
+            Err(PlatformError::Os(format!(
+                "shell command exited with status {}",
+                status
+                    .code()
+                    .map_or_else(|| "unknown".into(), |code| code.to_string())
+            )))
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -321,11 +506,19 @@ pub fn run_shell(cmd: &str) -> PlatformResult<()> {
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(cmd)
-            .spawn();
-        if status.is_ok() {
+            .status()
+            .map_err(|error| {
+                PlatformError::Os(format!("could not start shell command: {error}"))
+            })?;
+        if status.success() {
             Ok(())
         } else {
-            Err(PlatformError::Os(format!("failed to run shell command: {cmd}")))
+            Err(PlatformError::Os(format!(
+                "shell command exited with status {}",
+                status
+                    .code()
+                    .map_or_else(|| "unknown".into(), |code| code.to_string())
+            )))
         }
     }
 }
@@ -375,12 +568,93 @@ pub fn platform_ops() -> Arc<dyn PlatformOps> {
 
 /// Adjusts display brightness by delta (-1.0 to 1.0).
 pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
+    adjust_brightness_with_level(delta).map(|_| ())
+}
+
+/// Adjusts display brightness and returns the resulting percentage when available.
+pub fn adjust_brightness_with_level(delta: f32) -> PlatformResult<Option<f32>> {
     #[cfg(target_os = "macos")]
-    return macos::adjust_brightness(delta);
-    #[cfg(not(target_os = "macos"))]
+    return macos::adjust_brightness(delta).map(Some);
+    #[cfg(target_os = "windows")]
+    return windows::adjust_brightness_with_level(delta).map(Some);
+    #[cfg(target_os = "linux")]
+    return linux::adjust_brightness_with_level(delta).map(Some);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(PlatformError::Unsupported(
+        "display brightness control is not available on this platform".into(),
+    ))
+}
+
+/// Adjusts the default audio output by a fraction and returns the new percentage.
+pub fn adjust_audio_output_with_level(delta: f32) -> PlatformResult<Option<f32>> {
+    #[cfg(target_os = "macos")]
+    return macos::adjust_audio_output_with_level(delta).map(Some);
+    #[cfg(target_os = "windows")]
+    return windows::adjust_audio_output_with_level(delta).map(Some);
+    #[cfg(target_os = "linux")]
+    return linux::adjust_audio_output_with_level(delta).map(Some);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = delta;
-        Ok(())
+        Err(PlatformError::Unsupported(
+            "audio output control is not available on this platform".into(),
+        ))
+    }
+}
+
+/// Reads the current audio output level as a percentage when the platform exposes it.
+pub fn audio_output_level() -> Option<f32> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .args(["-e", "output volume of (get volume settings)"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|percent| percent.clamp(0.0, 100.0))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(output) = std::process::Command::new("wpctl")
+            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+        {
+            let value = String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .find_map(|part| part.parse::<f32>().ok());
+            if let Some(value) = value {
+                return Some((value * 100.0).clamp(0.0, 100.0));
+            }
+        }
+        if let Some(output) = std::process::Command::new("pactl")
+            .args(["get-sink-volume", "@DEFAULT_SINK@"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            return text
+                .split_whitespace()
+                .find_map(|part| part.strip_suffix('%')?.parse::<f32>().ok())
+                .map(|percent| percent.clamp(0.0, 100.0));
+        }
+        None
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::audio_output_level()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        None
     }
 }
 

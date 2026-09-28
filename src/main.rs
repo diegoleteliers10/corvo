@@ -16,9 +16,17 @@ fn main() {
     // `--toggle` takes the same path: when no resident answers, this
     // process becomes the resident, so a compositor-bound hotkey still
     // works after a crash or a quit.
-    if ipc::try_send_toggle() {
-        return;
+    match ipc::try_send_toggle() {
+        ipc::StartupDecision::StartResident => {}
+        ipc::StartupDecision::ToggleExisting => return,
+        ipc::StartupDecision::ExistingWithoutToggle => {
+            eprintln!("corvo: another resident is active but did not accept the toggle request");
+            return;
+        }
     }
+
+    let (ipc_tx, ipc_rx) = smol::channel::unbounded::<()>();
+    ipc::serve(ipc_tx);
 
     corvo_platform::cleanup_old_installations();
     corvo_app_launcher::warmup();
@@ -34,9 +42,6 @@ fn main() {
     });
     corvo_clipboard_manager::start_watcher();
     let store = config.shared();
-    let (ipc_tx, ipc_rx) = smol::channel::unbounded::<()>();
-    ipc::serve(ipc_tx);
-
     let (intent_tx, intent_rx) = smol::channel::unbounded::<corvo_platform::HotkeyIntent>();
 
     // Forward IPC toggles to the intent channel

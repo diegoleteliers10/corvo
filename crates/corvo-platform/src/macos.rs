@@ -1,8 +1,10 @@
 //! macOS implementation. Session control arrives in phase 4 (SPEC §11);
 //! app-launcher inputs and the agent policy are live in phase 1.
 
-use std::path::{Path, PathBuf};
 use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2::AnyThread;
 use objc2_app_kit::{
@@ -201,7 +203,9 @@ pub fn copy_to_pasteboard(text: &str) {
 pub fn read_clipboard_text() -> Option<String> {
     let pboard = NSPasteboard::generalPasteboard();
     unsafe {
-        pboard.stringForType(NSPasteboardTypeString).map(|s| s.to_string())
+        pboard
+            .stringForType(NSPasteboardTypeString)
+            .map(|s| s.to_string())
     }
 }
 
@@ -221,10 +225,9 @@ pub fn read_clipboard_image() -> Option<Vec<u8>> {
         if let Some(tiff_data) = pboard.dataForType(&tiff_type) {
             if let Some(rep) = NSBitmapImageRep::imageRepWithData(&tiff_data) {
                 let empty_props = NSDictionary::new();
-                if let Some(png_data) = rep.representationUsingType_properties(
-                    NSBitmapImageFileType::PNG,
-                    &empty_props,
-                ) {
+                if let Some(png_data) =
+                    rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty_props)
+                {
                     return Some(png_data.to_vec());
                 }
             }
@@ -235,7 +238,7 @@ pub fn read_clipboard_image() -> Option<Vec<u8>> {
 }
 
 /// Writes PNG bytes to NSPasteboard with dual PNG + TIFF types.
-pub fn copy_image_to_pasteboard(png_bytes: &[u8]) {
+pub fn copy_image_to_pasteboard(png_bytes: &[u8]) -> PlatformResult<()> {
     let pboard = NSPasteboard::generalPasteboard();
     pboard.clearContents();
 
@@ -243,13 +246,18 @@ pub fn copy_image_to_pasteboard(png_bytes: &[u8]) {
     let png_type = NSString::from_str("public.png");
     let tiff_type = NSString::from_str("public.tiff");
 
-    pboard.setData_forType(Some(&ns_data), &png_type);
+    if !pboard.setData_forType(Some(&ns_data), &png_type) {
+        return Err(PlatformError::Os(
+            "Could not write image to the clipboard".into(),
+        ));
+    }
 
     if let Some(rep) = NSBitmapImageRep::imageRepWithData(&ns_data) {
         if let Some(tiff_data) = rep.TIFFRepresentation() {
             pboard.setData_forType(Some(&tiff_data), &tiff_type);
         }
     }
+    Ok(())
 }
 
 /// Extracts (width, height) from a PNG byte slice without decoding pixels.
@@ -324,22 +332,35 @@ pub fn list_apps_in_scopes(scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
         if let Some(name) = bundle_app_name(&path) {
             if seen.insert(name.clone()) {
                 let icon_png = extract_app_icon(&path);
-                apps.push(AppEntry { name, path, icon_png });
+                apps.push(AppEntry {
+                    name,
+                    path,
+                    icon_png,
+                });
             }
             continue;
         }
 
         // If it's a directory, scan for .app bundles (1 level deep or direct)
-        let Ok(entries) = std::fs::read_dir(&path) else { continue };
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let entry_path = entry.path();
             if let Some(name) = bundle_app_name(&entry_path) {
                 if seen.insert(name.clone()) {
                     let icon_png = extract_app_icon(&entry_path);
-                    apps.push(AppEntry { name, path: entry_path, icon_png });
+                    apps.push(AppEntry {
+                        name,
+                        path: entry_path,
+                        icon_png,
+                    });
                 }
             } else if entry_path.is_dir() {
-                let file_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let file_name = entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
                 if !file_name.starts_with('.') && !file_name.ends_with(".app") {
                     if let Ok(sub_entries) = std::fs::read_dir(&entry_path) {
                         for sub in sub_entries.flatten() {
@@ -371,7 +392,11 @@ pub fn list_apps_in_scopes(scopes: &[String]) -> PlatformResult<Vec<AppEntry>> {
 fn bundle_app_name(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".app")?;
-    if stem.is_empty() { None } else { Some(stem.to_string()) }
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
 }
 
 /// Extracts a high-definition 256x256 PNG icon directly via AppKit.
@@ -414,10 +439,8 @@ fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
         NSGraphicsContext::restoreGraphicsState_class();
 
         let empty_props = NSDictionary::new();
-        let png_data = rep.representationUsingType_properties(
-            NSBitmapImageFileType::PNG,
-            &empty_props,
-        )?;
+        let png_data =
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty_props)?;
 
         std::fs::write(png_path, png_data.to_vec()).ok()?;
     }
@@ -425,37 +448,115 @@ fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
     Some(())
 }
 
-/// Renders the bundle's icon to a cached HD 256x256 PNG.
-/// First attempts native NSWorkspace extraction (high-res, handles Assets.car & system apps).
-/// Falls back to `sips` on the bundle's `.icns` file if AppKit extraction fails.
+/// Renders a bundle icon to a validated, atomically written 256x256 PNG.
+/// Read app bundle assets before querying LaunchServices for newly installed apps.
 pub(crate) fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
     let stem = bundle_app_name(bundle)?;
-    let cache_dir = std::env::temp_dir().join("corvo-icons-v3");
-    let png = cache_dir.join(format!("{stem}.png"));
-    if png.exists() {
+    let cache_dir = std::env::temp_dir().join("corvo-icons-v4");
+    let png = cache_dir.join(format!("{}.png", app_icon_cache_key(bundle, &stem)));
+    if is_valid_png(&png) {
         return Some(png);
     }
+    let _ = std::fs::remove_file(&png);
     let _ = std::fs::create_dir_all(&cache_dir);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary_png = cache_dir.join(format!(
+        "{}.{}.{}.tmp.png",
+        app_icon_cache_key(bundle, &stem),
+        std::process::id(),
+        nonce
+    ));
 
-    // Primary path: AppKit native icon extraction at 256x256 Retina resolution.
-    if extract_app_icon_appkit(bundle, &png).is_some() && png.exists() {
-        return Some(png);
+    let is_system_app = bundle.starts_with("/System/");
+    if is_system_app && extract_app_icon_appkit(bundle, &temporary_png).is_some() {
+        if let Some(path) = commit_cached_icon(&temporary_png, &png) {
+            return Some(path);
+        }
     }
 
-    // Fallback path: sips extraction from .icns.
+    // Read the bundle icon first. LaunchServices can return a generic icon
+    // while it registers a newly installed application.
     let resources = bundle.join("Contents/Resources");
     if let Some(icns) = icns_in(bundle, &resources, &stem) {
         let res = std::process::Command::new("/usr/bin/sips")
             .args(["-Z", "256", "-s", "format", "png"])
             .arg(&icns)
             .arg("--out")
-            .arg(&png)
+            .arg(&temporary_png)
             .output();
-        if res.is_ok() && png.exists() {
-            return Some(png);
+        if res.is_ok_and(|output| output.status.success()) {
+            if let Some(path) = commit_cached_icon(&temporary_png, &png) {
+                return Some(path);
+            }
         }
     }
+
+    if extract_app_icon_appkit(bundle, &temporary_png).is_some() {
+        return commit_cached_icon(&temporary_png, &png);
+    }
+    let _ = std::fs::remove_file(temporary_png);
     None
+}
+
+fn app_icon_cache_key(bundle: &Path, stem: &str) -> String {
+    let resources = bundle.join("Contents/Resources");
+    let icns = icns_in(bundle, &resources, stem);
+    let mut hasher = DefaultHasher::new();
+    bundle.hash(&mut hasher);
+    for path in [
+        Some(bundle.join("Contents/Info.plist")),
+        Some(resources.join("Assets.car")),
+        icns,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        path.hash(&mut hasher);
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            metadata.len().hash(&mut hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .hash(&mut hasher);
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn is_valid_png(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return false;
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if width == 0 || height == 0 {
+        return false;
+    }
+
+    // The PNG header alone accepts truncated files. Decode pixels before the
+    // launcher uses a cached icon so damaged cache entries get regenerated.
+    let data = NSData::with_bytes(&bytes);
+    NSBitmapImageRep::imageRepWithData(&data)
+        .is_some_and(|rep| rep.pixelsWide() > 0 && rep.pixelsHigh() > 0)
+}
+
+fn commit_cached_icon(temporary_png: &Path, png: &Path) -> Option<PathBuf> {
+    if !is_valid_png(temporary_png) {
+        let _ = std::fs::remove_file(temporary_png);
+        return None;
+    }
+    if std::fs::rename(temporary_png, png).is_err() {
+        let _ = std::fs::remove_file(temporary_png);
+    }
+    is_valid_png(png).then(|| png.to_path_buf())
 }
 
 /// Picks the bundle's highest-resolution icon file: CFBundleIconFile in Info.plist first,
@@ -581,8 +682,14 @@ fn hide_traffic_lights(panel: &objc2_app_kit::NSWindow) {
             button.setHidden(true);
             button.setAlphaValue(0.0);
             button.setFrame(objc2_foundation::NSRect {
-                origin: objc2_foundation::NSPoint { x: -1000.0, y: -1000.0 },
-                size: objc2_foundation::NSSize { width: 0.0, height: 0.0 },
+                origin: objc2_foundation::NSPoint {
+                    x: -1000.0,
+                    y: -1000.0,
+                },
+                size: objc2_foundation::NSSize {
+                    width: 0.0,
+                    height: 0.0,
+                },
             });
         }
     }
@@ -593,15 +700,15 @@ fn hide_traffic_lights(panel: &objc2_app_kit::NSWindow) {
 /// `Floating` panel instead, sets the popup level, all-spaces behavior,
 /// and turns off window animation.
 pub fn make_panel_instant(width: f64, height: f64) {
-    use objc2_app_kit::{
-        NSColor, NSWindowCollectionBehavior, NSWindowTitleVisibility,
-    };
+    use objc2_app_kit::{NSColor, NSWindowCollectionBehavior, NSWindowTitleVisibility};
     let Some(panel) = find_new_panel(width, height) else {
         eprintln!("corvo: launcher panel not found before show");
         return;
     };
     LAUNCHER_PANEL.with(|current| *current.borrow_mut() = Some(panel.clone()));
-    panel.setTitle(&objc2_foundation::NSString::from_str("corvo_launcher_panel"));
+    panel.setTitle(&objc2_foundation::NSString::from_str(
+        "corvo_launcher_panel",
+    ));
     panel.setLevel(101); // NSPopUpWindowLevel
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -613,6 +720,24 @@ pub fn make_panel_instant(width: f64, height: f64) {
     panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     panel.setTitlebarAppearsTransparent(true);
     hide_traffic_lights(&panel);
+}
+
+/// Removes the AppKit shadow from the temporary toast panel.
+pub fn remove_action_toast_shadow(width: f64, height: f64) {
+    use objc2_app_kit::NSWindowCollectionBehavior;
+
+    let Some(panel) = find_new_panel(width, height) else {
+        return;
+    };
+    panel.setTitle(&objc2_foundation::NSString::from_str("corvo_action_toast"));
+    panel.setHasShadow(false);
+    panel.invalidateShadow();
+    panel.setLevel(101);
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary,
+    );
+    panel.orderFrontRegardless();
 }
 
 /// Queries whether the process is trusted for macOS Accessibility.
@@ -645,7 +770,10 @@ pub fn is_calendar_access_granted() -> bool {
 /// 0 = NotDetermined, 1 = Restricted, 2 = Denied, 3 = FullAccess / Authorized, 4 = WriteOnly.
 pub fn calendar_authorization_status() -> isize {
     unsafe {
-        let handle = libc::dlopen(c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(), libc::RTLD_NOW);
+        let handle = libc::dlopen(
+            c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(),
+            libc::RTLD_NOW,
+        );
         if handle.is_null() {
             return 0;
         }
@@ -661,8 +789,10 @@ pub fn calendar_authorization_status() -> isize {
             return 0;
         }
 
-        type MsgSendFn = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize) -> isize;
-        let msg_send: MsgSendFn = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        type MsgSendFn =
+            unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize) -> isize;
+        let msg_send: MsgSendFn =
+            std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
         msg_send(cls, sel, 0) // 0 = EKEntityTypeEvent
     }
 }
@@ -672,7 +802,10 @@ pub fn calendar_authorization_status() -> isize {
 /// On earlier macOS versions, calls `requestAccessToEntityType:completion:`.
 pub fn request_calendar_access() {
     unsafe {
-        let handle = libc::dlopen(c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(), libc::RTLD_NOW);
+        let handle = libc::dlopen(
+            c"/System/Library/Frameworks/EventKit.framework/EventKit".as_ptr(),
+            libc::RTLD_NOW,
+        );
         if handle.is_null() {
             return;
         }
@@ -693,11 +826,20 @@ pub fn request_calendar_access() {
         let sel_full = sel_registerName(c"requestFullAccessToEventsWithCompletion:".as_ptr());
         let sel_legacy = sel_registerName(c"requestAccessToEntityType:completion:".as_ptr());
 
-        type MsgSend = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *const std::ffi::c_void;
-        type MsgSendBool = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, *const std::ffi::c_void) -> bool;
+        type MsgSend = unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        type MsgSendBool = unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *const std::ffi::c_void,
+            *const std::ffi::c_void,
+        ) -> bool;
 
-        let msg_send: MsgSend = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
-        let msg_send_bool: MsgSendBool = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        let msg_send: MsgSend =
+            std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+        let msg_send_bool: MsgSendBool =
+            std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
 
         let store_alloc = msg_send(cls, sel_alloc);
         if store_alloc.is_null() {
@@ -735,7 +877,8 @@ pub fn request_calendar_access() {
             _block: *mut BlockLiteral,
             _granted: bool,
             _err: *mut std::ffi::c_void,
-        ) {}
+        ) {
+        }
 
         extern "C" {
             static _NSConcreteGlobalBlock: [u8; 0];
@@ -753,12 +896,23 @@ pub fn request_calendar_access() {
 
         let has_full = msg_send_bool(store, sel_responds, sel_full as *const _);
         if has_full {
-            type MsgSendFull = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, *const std::ffi::c_void);
-            let msg_send_full: MsgSendFull = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            type MsgSendFull = unsafe extern "C" fn(
+                *const std::ffi::c_void,
+                *const std::ffi::c_void,
+                *const std::ffi::c_void,
+            );
+            let msg_send_full: MsgSendFull =
+                std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
             msg_send_full(store, sel_full, block_ptr);
         } else {
-            type MsgSendLegacy = unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void, isize, *const std::ffi::c_void);
-            let msg_send_legacy: MsgSendLegacy = std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
+            type MsgSendLegacy = unsafe extern "C" fn(
+                *const std::ffi::c_void,
+                *const std::ffi::c_void,
+                isize,
+                *const std::ffi::c_void,
+            );
+            let msg_send_legacy: MsgSendLegacy =
+                std::mem::transmute(libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()));
             msg_send_legacy(store, sel_legacy, 0, block_ptr);
         }
     }
@@ -779,7 +933,6 @@ pub fn request_screen_recording() -> bool {
     }
     unsafe { CGRequestScreenCaptureAccess() }
 }
-
 
 /// Synthesizes and posts a Cmd+V keystroke into the session event tap.
 pub fn post_paste_keystroke() -> PlatformResult<()> {
@@ -837,7 +990,7 @@ pub async fn auto_paste(target_pid: i32, text: &str) -> PlatformResult<()> {
 /// Automatically copies image bytes to the pasteboard, reactivates the previous app,
 /// yields for focus transfer, and posts synthetic Cmd+V.
 pub async fn auto_paste_image(target_pid: i32, png_bytes: &[u8]) -> PlatformResult<()> {
-    copy_image_to_pasteboard(png_bytes);
+    copy_image_to_pasteboard(png_bytes)?;
     activate_app(target_pid);
 
     // Yield to allow macOS WindowServer to switch focus
@@ -855,7 +1008,9 @@ pub async fn auto_paste_image(target_pid: i32, png_bytes: &[u8]) -> PlatformResu
 /// Orders the launcher panel front and makes it key, synchronously.
 pub fn order_panel_front(_width: f64, _height: f64) {
     use objc2::runtime::AnyObject;
-    let Some(panel) = find_launcher_panel() else { return };
+    let Some(panel) = find_launcher_panel() else {
+        return;
+    };
     panel.orderFront(None::<&AnyObject>);
     panel.makeKeyWindow();
 }
@@ -880,6 +1035,7 @@ fn find_new_panel(width: f64, height: f64) -> Option<objc2::rc::Retained<objc2_a
             let content = window.contentRectForFrameRect(window.frame()).size;
             window.class().name().to_string_lossy() == "GPUIPanel"
                 && window.title().to_string() != "corvo_launcher_panel"
+                && window.title().to_string() != "corvo_action_toast"
                 && (content.width - width).abs() <= 1.5
                 && (content.height - height).abs() <= 1.5
         })
@@ -908,7 +1064,10 @@ pub fn resize_launcher_panel(target_width: f64, target_height: f64) -> bool {
     let top_y = current_frame.origin.y + current_frame.size.height;
     let target_content = objc2_foundation::NSRect {
         origin: current_frame.origin,
-        size: objc2_foundation::NSSize { width: target_width, height: target_height },
+        size: objc2_foundation::NSSize {
+            width: target_width,
+            height: target_height,
+        },
     };
     let target_frame_size = panel.frameRectForContentRect(target_content).size;
     let new_origin = objc2_foundation::NSPoint {
@@ -982,7 +1141,9 @@ pub fn resize_launcher_panel(target_width: f64, target_height: f64) -> bool {
 
 /// Orders an application window matching the given dimensions front, regardless of app focus.
 pub fn order_window_front(width: f64, height: f64) {
-    let Some(marker) = MainThreadMarker::new() else { return };
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
     let app = NSApplication::sharedApplication(marker);
     let windows = app.windows();
     for index in 0..windows.len() {
@@ -1005,7 +1166,7 @@ type DisplayServicesGetBrightnessFn = unsafe extern "C" fn(u32, *mut f32) -> i32
 type DisplayServicesSetBrightnessFn = unsafe extern "C" fn(u32, f32) -> i32;
 
 /// Adjusts system display brightness by delta (-1.0 to 1.0).
-pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
+pub fn adjust_brightness(delta: f32) -> PlatformResult<f32> {
     unsafe {
         let path = std::ffi::CString::new(
             "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices",
@@ -1013,7 +1174,9 @@ pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
         .map_err(|e| PlatformError::Os(e.to_string()))?;
         let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
         if handle.is_null() {
-            return Err(PlatformError::Os("failed to load DisplayServices framework".into()));
+            return Err(PlatformError::Os(
+                "failed to load DisplayServices framework".into(),
+            ));
         }
         let get_name = std::ffi::CString::new("DisplayServicesGetBrightness")
             .map_err(|e| PlatformError::Os(e.to_string()))?;
@@ -1023,19 +1186,53 @@ pub fn adjust_brightness(delta: f32) -> PlatformResult<()> {
         let set_sym = libc::dlsym(handle, set_name.as_ptr());
         if get_sym.is_null() || set_sym.is_null() {
             libc::dlclose(handle);
-            return Err(PlatformError::Os("failed to resolve DisplayServices symbols".into()));
+            return Err(PlatformError::Os(
+                "failed to resolve DisplayServices symbols".into(),
+            ));
         }
         let get_brightness: DisplayServicesGetBrightnessFn = std::mem::transmute(get_sym);
         let set_brightness: DisplayServicesSetBrightnessFn = std::mem::transmute(set_sym);
 
         let display = CGMainDisplayID();
         let mut cur: f32 = 0.5;
-        let _ = get_brightness(display, &mut cur);
+        let get_status = get_brightness(display, &mut cur);
+        if get_status != 0 {
+            libc::dlclose(handle);
+            return Err(PlatformError::Os(format!(
+                "could not read display brightness (status {get_status})"
+            )));
+        }
         let target = (cur + delta).clamp(0.0, 1.0);
-        let _ = set_brightness(display, target);
+        let set_status = set_brightness(display, target);
         libc::dlclose(handle);
-        Ok(())
+        if set_status != 0 {
+            return Err(PlatformError::Os(format!(
+                "could not set display brightness (status {set_status})"
+            )));
+        }
+        Ok(target * 100.0)
     }
+}
+
+pub fn adjust_audio_output_with_level(delta: f32) -> PlatformResult<f32> {
+    if !delta.is_finite() {
+        return Err(PlatformError::Os("volume change must be finite".into()));
+    }
+    let current = super::audio_output_level()
+        .ok_or_else(|| PlatformError::Os("could not read the current output volume".into()))?;
+    let target = (current + delta.clamp(-1.0, 1.0) * 100.0).clamp(0.0, 100.0);
+    let script = format!("set volume output volume {:.0}", target);
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script.as_str()])
+        .output()
+        .map_err(|error| PlatformError::Os(format!("could not change output volume: {error}")))?;
+    if !output.status.success() {
+        return Err(PlatformError::Os(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    super::audio_output_level()
+        .ok_or_else(|| PlatformError::Os("could not read the resulting output volume".into()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1159,7 +1356,9 @@ fn intersection_area(r1: ScreenRect, r2: ScreenRect) -> f64 {
 /// Tiles and arranges the target application's window using native AXUIElement.
 pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> {
     if !is_accessibility_trusted(true) {
-        let _ = super::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+        let _ = super::open_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        );
         return Err(PlatformError::Os(
             "Accessibility permission required for window management. Please enable Corvo in System Settings -> Privacy & Security -> Accessibility.".into(),
         ));
@@ -1176,7 +1375,9 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
     unsafe {
         let app_ref = AXUIElementCreateApplication(pid as libc::pid_t);
         if app_ref.is_null() {
-            return Err(PlatformError::Os("failed to create AXUIElement for process".into()));
+            return Err(PlatformError::Os(
+                "failed to create AXUIElement for process".into(),
+            ));
         }
 
         // Set 50ms messaging timeout to prevent hung apps from blocking the UI thread
@@ -1189,7 +1390,8 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
             app_ref,
             &*attr_enhanced as *const _ as *const std::ffi::c_void,
             &mut original_enhanced,
-        ) == 0 && !original_enhanced.is_null();
+        ) == 0
+            && !original_enhanced.is_null();
 
         if had_enhanced && CFEqual(original_enhanced, kCFBooleanTrue) {
             AXUIElementSetAttributeValue(
@@ -1244,7 +1446,9 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                 CFRelease(original_enhanced);
             }
             CFRelease(app_ref as *const std::ffi::c_void);
-            return Err(PlatformError::Os("no accessible window found for application".into()));
+            return Err(PlatformError::Os(
+                "no accessible window found for application".into(),
+            ));
         }
 
         AXUIElementSetMessagingTimeout(window_ref as *mut _, 0.05);
@@ -1256,14 +1460,37 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         let mut cur_pos_val: *const std::ffi::c_void = std::ptr::null();
         let mut cur_size_val: *const std::ffi::c_void = std::ptr::null();
         let mut cur_pos = CGPoint { x: 0.0, y: 0.0 };
-        let mut cur_size = CGSize { width: 0.0, height: 0.0 };
+        let mut cur_size = CGSize {
+            width: 0.0,
+            height: 0.0,
+        };
 
-        if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, &mut cur_pos_val) == 0 && !cur_pos_val.is_null() {
-            AXValueGetValue(cur_pos_val, K_AX_VALUE_CGPOINT_TYPE, &mut cur_pos as *mut _ as *mut _);
+        if AXUIElementCopyAttributeValue(
+            window_ref as *mut _,
+            &*attr_pos as *const _ as *const _,
+            &mut cur_pos_val,
+        ) == 0
+            && !cur_pos_val.is_null()
+        {
+            AXValueGetValue(
+                cur_pos_val,
+                K_AX_VALUE_CGPOINT_TYPE,
+                &mut cur_pos as *mut _ as *mut _,
+            );
             CFRelease(cur_pos_val);
         }
-        if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut cur_size_val) == 0 && !cur_size_val.is_null() {
-            AXValueGetValue(cur_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut cur_size as *mut _ as *mut _);
+        if AXUIElementCopyAttributeValue(
+            window_ref as *mut _,
+            &*attr_size as *const _ as *const _,
+            &mut cur_size_val,
+        ) == 0
+            && !cur_size_val.is_null()
+        {
+            AXValueGetValue(
+                cur_size_val,
+                K_AX_VALUE_CGSIZE_TYPE,
+                &mut cur_size as *mut _ as *mut _,
+            );
             CFRelease(cur_size_val);
         }
 
@@ -1285,7 +1512,15 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                 a1.total_cmp(&a2)
             })
             .map(|(idx, &s)| (idx, s))
-            .unwrap_or((0, ScreenRect { x: 0.0, y: 25.0, width: 1440.0, height: 875.0 }));
+            .unwrap_or((
+                0,
+                ScreenRect {
+                    x: 0.0,
+                    y: 25.0,
+                    width: 1440.0,
+                    height: 875.0,
+                },
+            ));
 
         // Handle restore action or store current frame for future restore
         if action == "restore" {
@@ -1351,26 +1586,96 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         let target_rect = if gap <= 0.0 {
             match action {
                 // Halves
-                "left-half" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh },
-                "right-half" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh },
-                "top-half" => ScreenRect { x: sx, y: sy, width: sw, height: sh / 2.0 },
-                "bottom-half" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw, height: sh / 2.0 },
+                "left-half" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw / 2.0,
+                    height: sh,
+                },
+                "right-half" => ScreenRect {
+                    x: sx + sw / 2.0,
+                    y: sy,
+                    width: sw / 2.0,
+                    height: sh,
+                },
+                "top-half" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw,
+                    height: sh / 2.0,
+                },
+                "bottom-half" => ScreenRect {
+                    x: sx,
+                    y: sy + sh / 2.0,
+                    width: sw,
+                    height: sh / 2.0,
+                },
 
                 // Thirds
-                "first-third" => ScreenRect { x: sx, y: sy, width: sw / 3.0, height: sh },
-                "center-third" => ScreenRect { x: sx + sw / 3.0, y: sy, width: sw / 3.0, height: sh },
-                "last-third" => ScreenRect { x: sx + 2.0 * sw / 3.0, y: sy, width: sw / 3.0, height: sh },
-                "first-two-thirds" => ScreenRect { x: sx, y: sy, width: 2.0 * sw / 3.0, height: sh },
-                "last-two-thirds" => ScreenRect { x: sx + sw / 3.0, y: sy, width: 2.0 * sw / 3.0, height: sh },
+                "first-third" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw / 3.0,
+                    height: sh,
+                },
+                "center-third" => ScreenRect {
+                    x: sx + sw / 3.0,
+                    y: sy,
+                    width: sw / 3.0,
+                    height: sh,
+                },
+                "last-third" => ScreenRect {
+                    x: sx + 2.0 * sw / 3.0,
+                    y: sy,
+                    width: sw / 3.0,
+                    height: sh,
+                },
+                "first-two-thirds" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: 2.0 * sw / 3.0,
+                    height: sh,
+                },
+                "last-two-thirds" => ScreenRect {
+                    x: sx + sw / 3.0,
+                    y: sy,
+                    width: 2.0 * sw / 3.0,
+                    height: sh,
+                },
 
                 // Quarters
-                "top-left" => ScreenRect { x: sx, y: sy, width: sw / 2.0, height: sh / 2.0 },
-                "top-right" => ScreenRect { x: sx + sw / 2.0, y: sy, width: sw / 2.0, height: sh / 2.0 },
-                "bottom-left" => ScreenRect { x: sx, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
-                "bottom-right" => ScreenRect { x: sx + sw / 2.0, y: sy + sh / 2.0, width: sw / 2.0, height: sh / 2.0 },
+                "top-left" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw / 2.0,
+                    height: sh / 2.0,
+                },
+                "top-right" => ScreenRect {
+                    x: sx + sw / 2.0,
+                    y: sy,
+                    width: sw / 2.0,
+                    height: sh / 2.0,
+                },
+                "bottom-left" => ScreenRect {
+                    x: sx,
+                    y: sy + sh / 2.0,
+                    width: sw / 2.0,
+                    height: sh / 2.0,
+                },
+                "bottom-right" => ScreenRect {
+                    x: sx + sw / 2.0,
+                    y: sy + sh / 2.0,
+                    width: sw / 2.0,
+                    height: sh / 2.0,
+                },
 
                 // Whole Screen / Centering
-                "maximize" => ScreenRect { x: sx, y: sy, width: sw, height: sh },
+                "maximize" => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw,
+                    height: sh,
+                },
                 "almost-maximize" => {
                     let w = sw * 0.9;
                     let h = sh * 0.9;
@@ -1391,7 +1696,12 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                         height: h,
                     }
                 }
-                _ => ScreenRect { x: sx, y: sy, width: sw, height: sh },
+                _ => ScreenRect {
+                    x: sx,
+                    y: sy,
+                    width: sw,
+                    height: sh,
+                },
             }
         } else {
             let hw = (sw - 3.0 * gap).max(100.0) / 2.0;
@@ -1400,26 +1710,96 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
 
             match action {
                 // Halves with gap
-                "left-half" => ScreenRect { x: sx + gap, y: sy + gap, width: hw, height: sh - 2.0 * gap },
-                "right-half" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap, width: hw, height: sh - 2.0 * gap },
-                "top-half" => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: hh },
-                "bottom-half" => ScreenRect { x: sx + gap, y: sy + gap + hh + gap, width: sw - 2.0 * gap, height: hh },
+                "left-half" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: hw,
+                    height: sh - 2.0 * gap,
+                },
+                "right-half" => ScreenRect {
+                    x: sx + gap + hw + gap,
+                    y: sy + gap,
+                    width: hw,
+                    height: sh - 2.0 * gap,
+                },
+                "top-half" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: sw - 2.0 * gap,
+                    height: hh,
+                },
+                "bottom-half" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap + hh + gap,
+                    width: sw - 2.0 * gap,
+                    height: hh,
+                },
 
                 // Thirds with gap
-                "first-third" => ScreenRect { x: sx + gap, y: sy + gap, width: tw, height: sh - 2.0 * gap },
-                "center-third" => ScreenRect { x: sx + gap + tw + gap, y: sy + gap, width: tw, height: sh - 2.0 * gap },
-                "last-third" => ScreenRect { x: sx + gap + 2.0 * (tw + gap), y: sy + gap, width: tw, height: sh - 2.0 * gap },
-                "first-two-thirds" => ScreenRect { x: sx + gap, y: sy + gap, width: 2.0 * tw + gap, height: sh - 2.0 * gap },
-                "last-two-thirds" => ScreenRect { x: sx + gap + tw + gap, y: sy + gap, width: 2.0 * tw + gap, height: sh - 2.0 * gap },
+                "first-third" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: tw,
+                    height: sh - 2.0 * gap,
+                },
+                "center-third" => ScreenRect {
+                    x: sx + gap + tw + gap,
+                    y: sy + gap,
+                    width: tw,
+                    height: sh - 2.0 * gap,
+                },
+                "last-third" => ScreenRect {
+                    x: sx + gap + 2.0 * (tw + gap),
+                    y: sy + gap,
+                    width: tw,
+                    height: sh - 2.0 * gap,
+                },
+                "first-two-thirds" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: 2.0 * tw + gap,
+                    height: sh - 2.0 * gap,
+                },
+                "last-two-thirds" => ScreenRect {
+                    x: sx + gap + tw + gap,
+                    y: sy + gap,
+                    width: 2.0 * tw + gap,
+                    height: sh - 2.0 * gap,
+                },
 
                 // Quarters with gap
-                "top-left" => ScreenRect { x: sx + gap, y: sy + gap, width: hw, height: hh },
-                "top-right" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap, width: hw, height: hh },
-                "bottom-left" => ScreenRect { x: sx + gap, y: sy + gap + hh + gap, width: hw, height: hh },
-                "bottom-right" => ScreenRect { x: sx + gap + hw + gap, y: sy + gap + hh + gap, width: hw, height: hh },
+                "top-left" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: hw,
+                    height: hh,
+                },
+                "top-right" => ScreenRect {
+                    x: sx + gap + hw + gap,
+                    y: sy + gap,
+                    width: hw,
+                    height: hh,
+                },
+                "bottom-left" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap + hh + gap,
+                    width: hw,
+                    height: hh,
+                },
+                "bottom-right" => ScreenRect {
+                    x: sx + gap + hw + gap,
+                    y: sy + gap + hh + gap,
+                    width: hw,
+                    height: hh,
+                },
 
                 // Whole Screen / Centering with gap
-                "maximize" => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: sh - 2.0 * gap },
+                "maximize" => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: sw - 2.0 * gap,
+                    height: sh - 2.0 * gap,
+                },
                 "almost-maximize" => {
                     let w = (sw - 2.0 * gap) * 0.9;
                     let h = (sh - 2.0 * gap) * 0.9;
@@ -1440,7 +1820,12 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                         height: h,
                     }
                 }
-                _ => ScreenRect { x: sx + gap, y: sy + gap, width: sw - 2.0 * gap, height: sh - 2.0 * gap },
+                _ => ScreenRect {
+                    x: sx + gap,
+                    y: sy + gap,
+                    width: sw - 2.0 * gap,
+                    height: sh - 2.0 * gap,
+                },
             }
         };
 
@@ -1468,10 +1853,28 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                 }
             }
             "restore" => target_rect,
-            _ if matches!(action, "left-half" | "right-half" | "top-half" | "bottom-half"
-                | "first-third" | "center-third" | "last-third" | "first-two-thirds" | "last-two-thirds"
-                | "top-left" | "top-right" | "bottom-left" | "bottom-right"
-                | "maximize" | "almost-maximize" | "center") => target_rect,
+            _ if matches!(
+                action,
+                "left-half"
+                    | "right-half"
+                    | "top-half"
+                    | "bottom-half"
+                    | "first-third"
+                    | "center-third"
+                    | "last-third"
+                    | "first-two-thirds"
+                    | "last-two-thirds"
+                    | "top-left"
+                    | "top-right"
+                    | "bottom-left"
+                    | "bottom-right"
+                    | "maximize"
+                    | "almost-maximize"
+                    | "center"
+            ) =>
+            {
+                target_rect
+            }
             _ => {
                 if had_enhanced {
                     AXUIElementSetAttributeValue(
@@ -1483,7 +1886,9 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
                 }
                 CFRelease(app_ref as *const std::ffi::c_void);
                 CFRelease(window_ref);
-                return Err(PlatformError::Os(format!("unknown window action: {action}")));
+                return Err(PlatformError::Os(format!(
+                    "unknown window action: {action}"
+                )));
             }
         };
 
@@ -1496,17 +1901,38 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
         );
         if is_right_aligned {
             let mut final_size_val: *const std::ffi::c_void = std::ptr::null();
-            let mut final_size = CGSize { width: target_rect.width, height: target_rect.height };
-            if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut final_size_val) == 0 && !final_size_val.is_null() {
-                AXValueGetValue(final_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut final_size as *mut _ as *mut _);
+            let mut final_size = CGSize {
+                width: target_rect.width,
+                height: target_rect.height,
+            };
+            if AXUIElementCopyAttributeValue(
+                window_ref as *mut _,
+                &*attr_size as *const _ as *const _,
+                &mut final_size_val,
+            ) == 0
+                && !final_size_val.is_null()
+            {
+                AXValueGetValue(
+                    final_size_val,
+                    K_AX_VALUE_CGSIZE_TYPE,
+                    &mut final_size as *mut _ as *mut _,
+                );
                 CFRelease(final_size_val);
             }
             if final_size.width > target_rect.width {
                 let adjusted_x = (target_rect.x + target_rect.width) - final_size.width;
-                let adj_pt = CGPoint { x: adjusted_x, y: target_rect.y };
-                let adj_val = AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &adj_pt as *const _ as *const _);
+                let adj_pt = CGPoint {
+                    x: adjusted_x,
+                    y: target_rect.y,
+                };
+                let adj_val =
+                    AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &adj_pt as *const _ as *const _);
                 if !adj_val.is_null() {
-                    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, adj_val);
+                    AXUIElementSetAttributeValue(
+                        window_ref as *mut _,
+                        &*attr_pos as *const _ as *const _,
+                        adj_val,
+                    );
                     CFRelease(adj_val);
                 }
             }
@@ -1531,11 +1957,23 @@ pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> 
 
 /// Helper that sets window geometry using the robust size -> position -> size sequence.
 unsafe fn apply_window_frame(window_ref: *const std::ffi::c_void, rect: ScreenRect) {
-    let pt = CGPoint { x: rect.x, y: rect.y };
-    let sz = CGSize { width: rect.width, height: rect.height };
+    let pt = CGPoint {
+        x: rect.x,
+        y: rect.y,
+    };
+    let sz = CGSize {
+        width: rect.width,
+        height: rect.height,
+    };
 
-    let pos_val = AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &pt as *const _ as *const std::ffi::c_void);
-    let size_val = AXValueCreate(K_AX_VALUE_CGSIZE_TYPE, &sz as *const _ as *const std::ffi::c_void);
+    let pos_val = AXValueCreate(
+        K_AX_VALUE_CGPOINT_TYPE,
+        &pt as *const _ as *const std::ffi::c_void,
+    );
+    let size_val = AXValueCreate(
+        K_AX_VALUE_CGSIZE_TYPE,
+        &sz as *const _ as *const std::ffi::c_void,
+    );
 
     let attr_pos = NSString::from_str("AXPosition");
     let attr_size = NSString::from_str("AXSize");
@@ -1543,9 +1981,21 @@ unsafe fn apply_window_frame(window_ref: *const std::ffi::c_void, rect: ScreenRe
     // Sequence: size -> position -> size
     // macOS clamps size to current display bounds before moving across displays;
     // setting size first shrinks it, position moves it, second size applies target dimensions.
-    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const std::ffi::c_void, size_val as *const std::ffi::c_void);
-    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const std::ffi::c_void, pos_val as *const std::ffi::c_void);
-    AXUIElementSetAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const std::ffi::c_void, size_val as *const std::ffi::c_void);
+    AXUIElementSetAttributeValue(
+        window_ref as *mut _,
+        &*attr_size as *const _ as *const std::ffi::c_void,
+        size_val as *const std::ffi::c_void,
+    );
+    AXUIElementSetAttributeValue(
+        window_ref as *mut _,
+        &*attr_pos as *const _ as *const std::ffi::c_void,
+        pos_val as *const std::ffi::c_void,
+    );
+    AXUIElementSetAttributeValue(
+        window_ref as *mut _,
+        &*attr_size as *const _ as *const std::ffi::c_void,
+        size_val as *const std::ffi::c_void,
+    );
 
     if !pos_val.is_null() {
         CFRelease(pos_val as *const std::ffi::c_void);
@@ -1577,7 +2027,10 @@ pub fn open_app(name_or_path: &str) -> PlatformResult<()> {
         let clean_name = name_or_path.strip_suffix(".app").unwrap_or(name_or_path);
         if let Some(app) = apps.into_iter().find(|a| {
             a.name.eq_ignore_ascii_case(clean_name)
-                || a.path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case(clean_name))
+                || a.path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(clean_name))
         }) {
             let ns_path = NSString::from_str(&app.path.to_string_lossy());
             let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
@@ -1594,7 +2047,9 @@ pub fn open_app(name_or_path: &str) -> PlatformResult<()> {
     if status.is_ok() {
         Ok(())
     } else {
-        Err(PlatformError::Os(format!("failed to open application: {name_or_path}")))
+        Err(PlatformError::Os(format!(
+            "failed to open application: {name_or_path}"
+        )))
     }
 }
 
@@ -1620,7 +2075,10 @@ pub fn capture_current_window_layout() -> Vec<(String, String)> {
         if pid == std::process::id() as libc::pid_t {
             continue;
         }
-        let app_name = app.localizedName().map(|s| s.to_string()).unwrap_or_default();
+        let app_name = app
+            .localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         if app_name.is_empty() {
             continue;
         }
@@ -1650,16 +2108,39 @@ pub fn capture_current_window_layout() -> Vec<(String, String)> {
                 let mut cur_pos_val: *const std::ffi::c_void = std::ptr::null();
                 let mut cur_size_val: *const std::ffi::c_void = std::ptr::null();
                 let mut cur_pos = CGPoint { x: 0.0, y: 0.0 };
-                let mut cur_size = CGSize { width: 0.0, height: 0.0 };
+                let mut cur_size = CGSize {
+                    width: 0.0,
+                    height: 0.0,
+                };
 
                 let attr_pos = NSString::from_str("AXPosition");
                 let attr_size = NSString::from_str("AXSize");
-                if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_pos as *const _ as *const _, &mut cur_pos_val) == 0 && !cur_pos_val.is_null() {
-                    AXValueGetValue(cur_pos_val, K_AX_VALUE_CGPOINT_TYPE, &mut cur_pos as *mut _ as *mut _);
+                if AXUIElementCopyAttributeValue(
+                    window_ref as *mut _,
+                    &*attr_pos as *const _ as *const _,
+                    &mut cur_pos_val,
+                ) == 0
+                    && !cur_pos_val.is_null()
+                {
+                    AXValueGetValue(
+                        cur_pos_val,
+                        K_AX_VALUE_CGPOINT_TYPE,
+                        &mut cur_pos as *mut _ as *mut _,
+                    );
                     CFRelease(cur_pos_val);
                 }
-                if AXUIElementCopyAttributeValue(window_ref as *mut _, &*attr_size as *const _ as *const _, &mut cur_size_val) == 0 && !cur_size_val.is_null() {
-                    AXValueGetValue(cur_size_val, K_AX_VALUE_CGSIZE_TYPE, &mut cur_size as *mut _ as *mut _);
+                if AXUIElementCopyAttributeValue(
+                    window_ref as *mut _,
+                    &*attr_size as *const _ as *const _,
+                    &mut cur_size_val,
+                ) == 0
+                    && !cur_size_val.is_null()
+                {
+                    AXValueGetValue(
+                        cur_size_val,
+                        K_AX_VALUE_CGSIZE_TYPE,
+                        &mut cur_size as *mut _ as *mut _,
+                    );
                     CFRelease(cur_size_val);
                 }
                 CFRelease(window_ref);
@@ -1722,9 +2203,12 @@ pub fn apply_window_layout(placements: &[(String, String)]) -> PlatformResult<()
         let mut target_pid = None;
         for i in 0..running.count() {
             let app = running.objectAtIndex(i);
-            let name = app.localizedName().map(|s| s.to_string()).unwrap_or_default();
+            let name = app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             if name.eq_ignore_ascii_case(app_name) {
-                target_pid = Some(app.processIdentifier() as i32);
+                target_pid = Some(app.processIdentifier());
                 break;
             }
         }
@@ -1760,10 +2244,8 @@ mod tests {
     #[test]
     fn parses_png_dimensions_correctly() {
         let mut sample = vec![
-            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D,
-            b'I', b'H', b'D', b'R',
-            0x00, 0x00, 0x07, 0x80, // 1920
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x07, 0x80, // 1920
             0x00, 0x00, 0x04, 0x38, // 1080
         ];
         assert_eq!(super::parse_png_dimensions(&sample), Some((1920, 1080)));
@@ -1782,7 +2264,36 @@ mod tests {
             let dims = super::parse_png_dimensions(&bytes).expect("parses dimensions");
             assert_eq!(dims, (256, 256));
             // High-res icon should be richly detailed (> 15KB), not a 1.8KB blurry stub
-            assert!(bytes.len() > 15_000, "expected >15KB high res icon, got {}", bytes.len());
+            assert!(
+                bytes.len() > 15_000,
+                "expected >15KB high res icon, got {}",
+                bytes.len()
+            );
         }
+    }
+
+    #[test]
+    fn app_icon_cache_key_separates_bundles_with_the_same_name() {
+        let first = std::path::Path::new("/Applications/First/Foo.app");
+        let second = std::path::Path::new("/Applications/Second/Foo.app");
+        assert_ne!(
+            super::app_icon_cache_key(first, "Foo"),
+            super::app_icon_cache_key(second, "Foo")
+        );
+    }
+
+    #[test]
+    fn invalid_cached_png_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "corvo-invalid-icon-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"not a png").expect("writes the fixture");
+        assert!(!super::is_valid_png(&path));
+        let _ = std::fs::remove_file(path);
     }
 }

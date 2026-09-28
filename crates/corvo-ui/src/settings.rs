@@ -185,7 +185,11 @@ pub enum UpdateStatusUI {
     Checking,
     UpToDate,
     Available(Box<corvo_platform::UpdateRelease>),
-    Downloading { downloaded: u64, total: u64, percent: f32 },
+    Downloading {
+        downloaded: u64,
+        total: u64,
+        percent: f32,
+    },
     ReadyToInstall(Box<corvo_platform::UpdateRelease>, std::path::PathBuf),
     Error(String),
 }
@@ -226,7 +230,7 @@ pub struct SettingsView {
     quicklink_url_input: String,
     quicklink_active_field: usize,
     confirming_clear_clipboard: bool,
-    clipboard_cleared_feedback: bool,
+    clipboard_clear_feedback: Option<bool>,
     save_error: Option<String>,
     content_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
@@ -317,7 +321,7 @@ impl SettingsView {
             quicklink_url_input: String::new(),
             quicklink_active_field: 0,
             confirming_clear_clipboard: false,
-            clipboard_cleared_feedback: false,
+            clipboard_clear_feedback: None,
             save_error: None,
             content_scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -453,7 +457,7 @@ impl SettingsView {
         self.adding_quicklink = false;
         self.editing_quicklink_index = None;
         self.confirming_clear_clipboard = false;
-        self.clipboard_cleared_feedback = false;
+        self.clipboard_clear_feedback = None;
         self.content_scroll_handle
             .set_offset(gpui::point(px(0.0), px(0.0)));
         if tab == SettingsTab::Applications {
@@ -1195,7 +1199,7 @@ impl SettingsView {
                                                     rgb(0xef4444)
                                                 },
                                                 15.0,
-                                             ))
+                                            ))
                                             .child(
                                                 div()
                                                     .text_size(px(12.5))
@@ -4747,6 +4751,7 @@ impl SettingsView {
                                                         .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
                                                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                                             this.confirming_clear_clipboard = false;
+                                                            this.clipboard_clear_feedback = None;
                                                             cx.notify();
                                                         }))
                                                         .child("Cancel"),
@@ -4764,9 +4769,9 @@ impl SettingsView {
                                                         .text_color(rgb(0xffffff))
                                                         .hover(|s| s.bg(rgb(0xdc2626)))
                                                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                            corvo_clipboard_manager::clear_history();
+                                                            let succeeded = corvo_clipboard_manager::clear_history().is_ok();
                                                             this.confirming_clear_clipboard = false;
-                                                            this.clipboard_cleared_feedback = true;
+                                                            this.clipboard_clear_feedback = Some(succeeded);
                                                             cx.notify();
                                                         }))
                                                         .child("Delete All"),
@@ -4797,8 +4802,8 @@ impl SettingsView {
                                                 ),
                                         )
                                         .child(
-                                            if self.clipboard_cleared_feedback {
-                                                div()
+                                            match self.clipboard_clear_feedback {
+                                                Some(true) => div()
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
@@ -4809,9 +4814,20 @@ impl SettingsView {
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(rgb(COLOR_ACCENT))
                                                     .child("History Cleared ✓")
-                                                    .into_any_element()
-                                            } else {
-                                                div()
+                                                    .into_any_element(),
+                                                Some(false) => div()
+                                                    .px_3()
+                                                    .py_1p5()
+                                                    .rounded_md()
+                                                    .bg(rgb(0x3a1e20))
+                                                    .border_1()
+                                                    .border_color(rgb(0xef4444))
+                                                    .text_size(px(12.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(0xef4444))
+                                                    .child("Could not clear history")
+                                                    .into_any_element(),
+                                                None => div()
                                                     .id("trigger-clear-clipboard-btn")
                                                     .px_3()
                                                     .py_1p5()
@@ -4826,10 +4842,11 @@ impl SettingsView {
                                                     .hover(|s| s.bg(rgb(0x3a1e20)).border_color(rgb(0x7f1d1d)))
                                                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                                         this.confirming_clear_clipboard = true;
+                                                        this.clipboard_clear_feedback = None;
                                                         cx.notify();
                                                     }))
                                                     .child("Clear History...")
-                                                    .into_any_element()
+                                                    .into_any_element(),
                                             },
                                         )
                                 },
@@ -7576,9 +7593,11 @@ impl SettingsView {
                         .text_color(rgb(0xffffff))
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.85))
-                        .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _window, cx| {
-                            this.start_download(rel_clone.clone(), cx);
-                        }))
+                        .on_click(cx.listener(
+                            move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                                this.start_download(rel_clone.clone(), cx);
+                            },
+                        ))
                         .child("Download & Install")
                         .into_any_element(),
                 )
@@ -7620,9 +7639,11 @@ impl SettingsView {
                         .text_color(rgb(0xffffff))
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.85))
-                        .on_click(cx.listener(move |_this: &mut Self, _: &ClickEvent, _window, _cx| {
-                            let _ = corvo_platform::install_and_restart(&staged_clone);
-                        }))
+                        .on_click(cx.listener(
+                            move |_this: &mut Self, _: &ClickEvent, _window, _cx| {
+                                let _ = corvo_platform::install_and_restart(&staged_clone);
+                            },
+                        ))
                         .child("Relaunch Corvo")
                         .into_any_element(),
                 )
@@ -7738,26 +7759,25 @@ impl SettingsView {
                             .child(rel.release_notes.clone()),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .id("btn-skip-version")
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(COLOR_TEXT_MUTED))
-                                    .hover(|s| s.text_color(rgb(COLOR_TEXT)))
-                                    .on_click({
-                                        let tag = rel.tag_name.clone();
-                                        cx.listener(move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                        div().flex().justify_end().child(
+                            div()
+                                .id("btn-skip-version")
+                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .text_color(rgb(COLOR_TEXT_MUTED))
+                                .hover(|s| s.text_color(rgb(COLOR_TEXT)))
+                                .on_click({
+                                    let tag = rel.tag_name.clone();
+                                    cx.listener(
+                                        move |this: &mut Self, _: &ClickEvent, _window, cx| {
                                             corvo_platform::dismiss_version(&tag);
                                             this.update_status = UpdateStatusUI::Idle;
                                             cx.notify();
-                                        })
-                                    })
-                                    .child("Skip this version (Later)"),
-                            ),
+                                        },
+                                    )
+                                })
+                                .child("Skip this version (Later)"),
+                        ),
                     ),
             )
         } else {
@@ -8179,7 +8199,11 @@ impl SettingsView {
             ),
             ActiveDropdown::UpdateChannel => (
                 420.0,
-                if self.settings.updates.channel.to_lowercase() == "beta" { 1 } else { 0 },
+                if self.settings.updates.channel.to_lowercase() == "beta" {
+                    1
+                } else {
+                    0
+                },
                 &["Stable", "Beta (Prereleases)"],
                 "update-channel",
             ),
@@ -8375,8 +8399,7 @@ impl SettingsView {
                                     })
                                     .hover(|s| {
                                         if !active {
-                                            s.bg(rgb(COLOR_CONTROL_BG))
-                                                .text_color(rgb(COLOR_TEXT))
+                                            s.bg(rgb(COLOR_CONTROL_BG)).text_color(rgb(COLOR_TEXT))
                                         } else {
                                             s
                                         }
@@ -8389,11 +8412,7 @@ impl SettingsView {
                                         },
                                     ))
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(label),
+                                        div().flex().items_center().justify_center().child(label),
                                     )
                             }),
                     ),

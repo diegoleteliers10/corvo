@@ -18,17 +18,12 @@ use sha2::{Digest, Sha256};
 pub const DEFAULT_GITHUB_REPO: &str = "diegoleteliers10/corvo";
 pub const MINISIGN_PUBKEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
+    #[default]
     Stable,
     Beta,
-}
-
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 impl UpdateChannel {
@@ -40,21 +35,11 @@ impl UpdateChannel {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UpdateCheckState {
     pub last_checked_at: u64,
     pub latest_seen: Option<String>,
     pub dismissed_version: Option<String>,
-}
-
-impl Default for UpdateCheckState {
-    fn default() -> Self {
-        Self {
-            last_checked_at: 0,
-            latest_seen: None,
-            dismissed_version: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +97,9 @@ impl std::fmt::Display for UpdateError {
             Self::ChecksumMismatch { expected, actual } => {
                 write!(f, "Checksum mismatch (expected {expected}, got {actual})")
             }
-            Self::SignatureVerificationFailed(msg) => write!(f, "Signature verification failed: {msg}"),
+            Self::SignatureVerificationFailed(msg) => {
+                write!(f, "Signature verification failed: {msg}")
+            }
             Self::Translocated(msg) => write!(f, "App is translocated: {msg}"),
             Self::PermissionDenied(msg) => write!(f, "Permission denied: {msg}"),
             Self::Cancelled => write!(f, "Update cancelled"),
@@ -157,7 +144,9 @@ pub fn load_check_state() -> UpdateCheckState {
 }
 
 pub fn save_check_state(state: &UpdateCheckState) {
-    let Some(path) = state_file_path() else { return };
+    let Some(path) = state_file_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -204,7 +193,10 @@ fn match_target_asset(assets: &[ReleaseAsset]) -> Result<ReleaseAsset, UpdateErr
         }
 
         // Fallback for macOS zip
-        if let Some(asset) = assets.iter().find(|a| a.name.ends_with(".zip") && a.name.contains("darwin")) {
+        if let Some(asset) = assets
+            .iter()
+            .find(|a| a.name.ends_with(".zip") && a.name.contains("darwin"))
+        {
             return Ok(asset.clone());
         }
     }
@@ -212,10 +204,16 @@ fn match_target_asset(assets: &[ReleaseAsset]) -> Result<ReleaseAsset, UpdateErr
     #[cfg(target_os = "windows")]
     {
         let exact_triple = "x86_64-pc-windows-msvc";
-        if let Some(asset) = assets.iter().find(|a| a.name.contains(exact_triple) && a.name.ends_with(".zip")) {
+        if let Some(asset) = assets
+            .iter()
+            .find(|a| a.name.contains(exact_triple) && a.name.ends_with(".zip"))
+        {
             return Ok(asset.clone());
         }
-        if let Some(asset) = assets.iter().find(|a| a.name.ends_with(".zip") && a.name.contains("windows")) {
+        if let Some(asset) = assets
+            .iter()
+            .find(|a| a.name.ends_with(".zip") && a.name.contains("windows"))
+        {
             return Ok(asset.clone());
         }
     }
@@ -229,7 +227,10 @@ fn match_target_asset(assets: &[ReleaseAsset]) -> Result<ReleaseAsset, UpdateErr
             }
         }
         let exact_triple = "x86_64-unknown-linux-gnu";
-        if let Some(asset) = assets.iter().find(|a| a.name.contains(exact_triple) && a.name.ends_with(".tar.gz")) {
+        if let Some(asset) = assets
+            .iter()
+            .find(|a| a.name.contains(exact_triple) && a.name.ends_with(".tar.gz"))
+        {
             return Ok(asset.clone());
         }
         if let Some(asset) = assets.iter().find(|a| a.name.ends_with(".AppImage")) {
@@ -237,9 +238,9 @@ fn match_target_asset(assets: &[ReleaseAsset]) -> Result<ReleaseAsset, UpdateErr
         }
     }
 
-    Err(UpdateError::NoMatchingAsset(format!(
-        "No matching asset found for target OS/Arch in release assets"
-    )))
+    Err(UpdateError::NoMatchingAsset(
+        "No matching asset found for target OS/Arch in release assets".to_owned(),
+    ))
 }
 
 /// Cuts release notes at the `<!-- corvo:install -->` or `<!-- tinycast:install -->` marker.
@@ -280,9 +281,9 @@ pub fn check_for_updates(
         .call()
         .map_err(|e| UpdateError::Network(format!("GitHub API request failed: {e}")))?;
 
-    let releases: Vec<GitHubRelease> = response
-        .into_json()
-        .map_err(|e| UpdateError::Serialization(format!("Failed to parse GitHub releases JSON: {e}")))?;
+    let releases: Vec<GitHubRelease> = response.into_json().map_err(|e| {
+        UpdateError::Serialization(format!("Failed to parse GitHub releases JSON: {e}"))
+    })?;
 
     // Record check timestamp
     state.last_checked_at = now;
@@ -339,13 +340,18 @@ pub fn check_for_updates(
         .find(|a| a.name == signature_name)
         .map(|a| a.browser_download_url.clone());
 
-    let notes = latest_rel.body.as_deref().unwrap_or("No release notes provided.");
+    let notes = latest_rel
+        .body
+        .as_deref()
+        .unwrap_or("No release notes provided.");
     let clean_notes = clean_release_notes(notes);
 
     Ok(Some(UpdateRelease {
         version: latest_ver,
         tag_name: latest_tag,
-        title: latest_rel.name.unwrap_or_else(|| format!("Version {}", latest_rel.tag_name)),
+        title: latest_rel
+            .name
+            .unwrap_or_else(|| format!("Version {}", latest_rel.tag_name)),
         release_notes: clean_notes,
         published_at: latest_rel.published_at.unwrap_or_default(),
         asset: target_asset,
@@ -457,11 +463,13 @@ pub fn download_and_verify(
         let mut sig_str = String::new();
         sig_resp.into_reader().read_to_string(&mut sig_str)?;
 
-        let pubkey = minisign_verify::PublicKey::from_base64(MINISIGN_PUBKEY)
-            .map_err(|e| UpdateError::SignatureVerificationFailed(format!("Invalid public key: {e}")))?;
+        let pubkey = minisign_verify::PublicKey::from_base64(MINISIGN_PUBKEY).map_err(|e| {
+            UpdateError::SignatureVerificationFailed(format!("Invalid public key: {e}"))
+        })?;
 
-        let sig = minisign_verify::Signature::decode(&sig_str)
-            .map_err(|e| UpdateError::SignatureVerificationFailed(format!("Invalid signature format: {e}")))?;
+        let sig = minisign_verify::Signature::decode(&sig_str).map_err(|e| {
+            UpdateError::SignatureVerificationFailed(format!("Invalid signature format: {e}"))
+        })?;
 
         let file_bytes = fs::read(&dest_path)?;
         if let Err(e) = pubkey.verify(&file_bytes, &sig, false) {
@@ -494,7 +502,9 @@ pub fn install_and_restart(staged_archive: &Path) -> Result<(), UpdateError> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(UpdateError::UnsupportedPlatform("Self-update not implemented for this OS".into()))
+        Err(UpdateError::UnsupportedPlatform(
+            "Self-update not implemented for this OS".into(),
+        ))
     }
 }
 
@@ -525,7 +535,9 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
     }
 
     let Some(install_parent) = bundle_dir.parent() else {
-        return Err(UpdateError::PermissionDenied("Cannot determine parent directory of Corvo.app".into()));
+        return Err(UpdateError::PermissionDenied(
+            "Cannot determine parent directory of Corvo.app".into(),
+        ));
     };
 
     let staging_app = install_parent.join("Corvo.app.staging");
@@ -557,8 +569,7 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
             .status()?;
         if !status.success() {
             let _ = fs::remove_dir_all(&temp_staging_dir);
-            return Err(UpdateError::Io(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(UpdateError::Io(io::Error::other(
                 "Failed to extract update bundle",
             )));
         }
@@ -568,17 +579,16 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
     let extracted_app = temp_staging_dir.join("Corvo.app");
     if !extracted_app.exists() {
         let _ = fs::remove_dir_all(&temp_staging_dir);
-        return Err(UpdateError::NoMatchingAsset("Corvo.app not found inside update archive".into()));
+        return Err(UpdateError::NoMatchingAsset(
+            "Corvo.app not found inside update archive".into(),
+        ));
     }
 
     fs::rename(&extracted_app, &staging_app)?;
     let _ = fs::remove_dir_all(&temp_staging_dir);
 
     // Strip quarantine on staging bundle
-    let _ = Command::new("xattr")
-        .arg("-cr")
-        .arg(&staging_app)
-        .status();
+    let _ = Command::new("xattr").arg("-cr").arg(&staging_app).status();
 
     if !staging_app.exists() {
         return Err(UpdateError::Io(io::Error::new(
@@ -602,10 +612,7 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
          rm -rf \"{target}.old\""
     );
 
-    Command::new("sh")
-        .arg("-c")
-        .arg(script)
-        .spawn()?;
+    Command::new("sh").arg("-c").arg(script).spawn()?;
 
     std::process::exit(0);
 }
@@ -614,7 +621,9 @@ fn install_macos(archive_path: &Path) -> Result<(), UpdateError> {
 fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
     let current_exe = std::env::current_exe()?;
     let Some(target_dir) = current_exe.parent() else {
-        return Err(UpdateError::PermissionDenied("Cannot determine executable directory".into()));
+        return Err(UpdateError::PermissionDenied(
+            "Cannot determine executable directory".into(),
+        ));
     };
 
     let temp_staging_dir = target_dir.join(".corvo_staging_temp");
@@ -642,7 +651,9 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
 
     if !extracted_exe.exists() {
         let _ = fs::remove_dir_all(&temp_staging_dir);
-        return Err(UpdateError::NoMatchingAsset("corvo.exe not found in extracted archive".into()));
+        return Err(UpdateError::NoMatchingAsset(
+            "corvo.exe not found in extracted archive".into(),
+        ));
     }
 
     let _ = fs::remove_file(&staging_exe);
@@ -669,10 +680,7 @@ fn install_windows(archive_path: &Path) -> Result<(), UpdateError> {
          start \"\" \"{target_str}\""
     );
 
-    Command::new("cmd")
-        .arg("/c")
-        .arg(script)
-        .spawn()?;
+    Command::new("cmd").arg("/c").arg(script).spawn()?;
 
     std::process::exit(0);
 }
@@ -688,7 +696,9 @@ fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {
     };
 
     let Some(parent) = target_path.parent() else {
-        return Err(UpdateError::PermissionDenied("Cannot determine target directory".into()));
+        return Err(UpdateError::PermissionDenied(
+            "Cannot determine target directory".into(),
+        ));
     };
 
     if let Ok(metadata) = fs::metadata(parent) {
@@ -727,7 +737,9 @@ fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {
         let extracted_bin = temp_staging_dir.join("corvo");
         if !extracted_bin.exists() {
             let _ = fs::remove_dir_all(&temp_staging_dir);
-            return Err(UpdateError::NoMatchingAsset("corvo binary not found in update archive".into()));
+            return Err(UpdateError::NoMatchingAsset(
+                "corvo binary not found in update archive".into(),
+            ));
         }
 
         fs::copy(&extracted_bin, &staged_file)?;
@@ -756,10 +768,7 @@ fn install_linux(archive_path: &Path) -> Result<(), UpdateError> {
          \"{target_str}\" &"
     );
 
-    Command::new("sh")
-        .arg("-c")
-        .arg(script)
-        .spawn()?;
+    Command::new("sh").arg("-c").arg(script).spawn()?;
 
     std::process::exit(0);
 }

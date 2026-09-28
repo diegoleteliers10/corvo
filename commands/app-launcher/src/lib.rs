@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use corvo_core::{
     Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    search_match_score, SearchContext, SearchResult,
+    SearchContext, SearchResult, search_match_score,
 };
 use corvo_platform::AppEntry;
 
@@ -70,11 +70,7 @@ impl Command for AppLauncherCommand {
                     id: format!("app-launcher:{}", entry.path.display()),
                     title: entry.name.clone(),
                     subtitle: None,
-                    icon: entry
-                        .icon_png
-                        .clone()
-                        .map(Icon::Image)
-                        .unwrap_or(Icon::App),
+                    icon: entry.icon_png.clone().map(Icon::Image).unwrap_or(Icon::App),
                     score: 1100,
                     accessory: Some("Application".into()),
                 })
@@ -102,11 +98,7 @@ impl Command for AppLauncherCommand {
                         id: format!("app-launcher:{}", entry.path.display()),
                         title: entry.name.clone(),
                         subtitle: None,
-                        icon: entry
-                            .icon_png
-                            .clone()
-                            .map(Icon::Image)
-                            .unwrap_or(Icon::App),
+                        icon: entry.icon_png.clone().map(Icon::Image).unwrap_or(Icon::App),
                         score,
                         accessory: Some("Application".into()),
                     }
@@ -115,7 +107,11 @@ impl Command for AppLauncherCommand {
         }
     }
 
-    async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(
+        &self,
+        result_id: &str,
+        _ctx: &ExecutionContext,
+    ) -> Result<Action, CommandError> {
         let path = result_id
             .strip_prefix("app-launcher:recent:")
             .or_else(|| result_id.strip_prefix("app-launcher:"))
@@ -146,14 +142,11 @@ impl Command for AppLauncherCommand {
                 label: "Show in Finder".into(),
                 action: Action::RunShell(format!("open -R \"{}\"", path.to_string_lossy())),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::FOLDER),
-                group: ActionGroup::Standard,
+                group: ActionGroup::Primary,
                 hotkey: Some("⌘↵"),
             },
         ];
-        if corvo_platform::supports_app_uninstall()
-            && path.extension().is_some_and(|extension| extension == "app")
-            && !path.starts_with("/System/")
-        {
+        if corvo_platform::supports_app_uninstall_path(&path) {
             actions.push(CommandAction {
                 id: "app-launcher-action:uninstall".into(),
                 label: "Uninstall application".into(),
@@ -163,7 +156,7 @@ impl Command for AppLauncherCommand {
                 },
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TRASH),
                 group: ActionGroup::Destructive,
-                hotkey: None,
+                hotkey: Some("↵"),
             });
         }
         actions
@@ -181,12 +174,14 @@ fn app_name_for_path(path: &std::path::Path) -> String {
 /// read whatever is present and never block.
 fn corpus() -> &'static RwLock<CorpusState> {
     static CORPUS: OnceLock<RwLock<CorpusState>> = OnceLock::new();
-    CORPUS.get_or_init(|| RwLock::new(CorpusState {
-        apps: Vec::new(),
-        scopes: Vec::new(),
-        scanned_at: None,
-        scanning: false,
-    }))
+    CORPUS.get_or_init(|| {
+        RwLock::new(CorpusState {
+            apps: Vec::new(),
+            scopes: Vec::new(),
+            scanned_at: None,
+            scanning: false,
+        })
+    })
 }
 
 struct CorpusState {
@@ -201,7 +196,9 @@ pub fn warmup() {
 }
 
 fn ensure_corpus() {
-    let mut state = corpus().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let settings = corvo_config::Settings::load();
     let scan_is_fresh = state
         .scanned_at
@@ -209,16 +206,20 @@ fn ensure_corpus() {
     if scan_is_fresh && state.scopes == settings.applications.search_scopes {
         return;
     }
-    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes).unwrap_or_default();
+    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes)
+        .unwrap_or_default();
     state.scopes = settings.applications.search_scopes;
     state.scanned_at = Some(Instant::now());
     state.scanning = false;
 }
 
 pub fn reload_corpus() {
-    let mut state = corpus().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let settings = corvo_config::Settings::load();
-    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes).unwrap_or_default();
+    state.apps = corvo_platform::list_apps_in_scopes(&settings.applications.search_scopes)
+        .unwrap_or_default();
     state.scopes = settings.applications.search_scopes;
     state.scanned_at = Some(Instant::now());
     state.scanning = false;
@@ -240,7 +241,9 @@ fn frequencies() -> &'static Mutex<HashMap<String, (u64, u64)>> {
 }
 
 fn bump_frequency(path: &str) {
-    let mut frequencies = frequencies().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut frequencies = frequencies()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -248,6 +251,15 @@ fn bump_frequency(path: &str) {
     let entry = frequencies.entry(path.to_string()).or_insert((0, 0));
     entry.0 += 1;
     entry.1 = now;
+}
+
+pub fn record_launch(result_id: &str) {
+    if let Some(path) = result_id
+        .strip_prefix("app-launcher:recent:")
+        .or_else(|| result_id.strip_prefix("app-launcher:"))
+    {
+        bump_frequency(path);
+    }
 }
 
 fn ensure_seed_frequencies(frequencies: &mut HashMap<String, (u64, u64)>) {
@@ -286,8 +298,9 @@ fn rank<'a>(
             })
             .collect();
         ranked.sort_by(|a, b| {
-            b.1 .0.cmp(&a.1 .0)
-                .then_with(|| b.1 .1.cmp(&a.1 .1))
+            b.1.0
+                .cmp(&a.1.0)
+                .then_with(|| b.1.1.cmp(&a.1.1))
                 .then_with(|| corvo_core::search::natural_cmp(&a.0.name, &b.0.name))
         });
         return ranked.into_iter().map(|(entry, _)| entry).collect();
@@ -334,7 +347,11 @@ mod tests {
     use super::*;
 
     fn app(name: &str, path: &str) -> AppEntry {
-        AppEntry { name: name.into(), path: PathBuf::from(path), icon_png: None }
+        AppEntry {
+            name: name.into(),
+            path: PathBuf::from(path),
+            icon_png: None,
+        }
     }
 
     #[test]

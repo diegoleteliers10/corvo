@@ -1,5 +1,6 @@
 //! Persistent frecency store with anchor decay math and learned query terms.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -199,13 +200,17 @@ fn migrate_recent_app_entries(data: &mut FrecencyData, now: i64) {
         if let Some(current) = data.entries.get_mut(&canonical_key) {
             let score = [current.anchor, recent.anchor]
                 .into_iter()
-                .map(|anchor| (DECAY_RATE * (anchor - now) as f64).min(EXP_MAX_CEILING).exp())
+                .map(|anchor| {
+                    (DECAY_RATE * (anchor - now) as f64)
+                        .min(EXP_MAX_CEILING)
+                        .exp()
+                })
                 .sum::<f64>()
                 .max(1.0);
             current.anchor = now + (score.ln() / DECAY_RATE).round() as i64;
             current.opened_at = current.opened_at.max(recent.opened_at);
             current.terms.extend(recent.terms);
-            current.terms.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            current.terms.sort_by_key(|term| Reverse(term.updated_at));
             let mut seen = HashSet::new();
             current.terms.retain(|term| seen.insert(term.query.clone()));
             current.terms.truncate(3);
@@ -278,7 +283,10 @@ mod tests {
             FrecencyEntry {
                 anchor: now + 1000,
                 opened_at: now,
-                terms: vec![LearnedTerm { query: "browser".into(), updated_at: now }],
+                terms: vec![LearnedTerm {
+                    query: "browser".into(),
+                    updated_at: now,
+                }],
             },
         );
 
@@ -287,7 +295,10 @@ mod tests {
         assert!(!data.entries.contains_key("app-launcher:recent:/Safari"));
         let entry = data.entries.get("app-launcher:/Safari");
         assert_eq!(entry.map(|entry| entry.anchor), Some(now + 1000));
-        assert_eq!(entry.map(|entry| entry.terms[0].query.as_str()), Some("browser"));
+        assert_eq!(
+            entry.map(|entry| entry.terms[0].query.as_str()),
+            Some("browser")
+        );
     }
 
     #[test]
@@ -299,7 +310,10 @@ mod tests {
             FrecencyEntry {
                 anchor: now + 1000,
                 opened_at: now - 10,
-                terms: vec![LearnedTerm { query: "browser".into(), updated_at: now - 10 }],
+                terms: vec![LearnedTerm {
+                    query: "browser".into(),
+                    updated_at: now - 10,
+                }],
             },
         );
         data.entries.insert(
@@ -307,7 +321,10 @@ mod tests {
             FrecencyEntry {
                 anchor: now + 2000,
                 opened_at: now,
-                terms: vec![LearnedTerm { query: "safari".into(), updated_at: now }],
+                terms: vec![LearnedTerm {
+                    query: "safari".into(),
+                    updated_at: now,
+                }],
             },
         );
 

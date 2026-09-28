@@ -1,9 +1,11 @@
 pub mod platform;
-pub use platform::{get_system_actions, get_system_settings, ActionExecution, SystemActionDef, SystemSettingDef};
+pub use platform::{
+    get_system_actions, get_system_settings, ActionExecution, SystemActionDef, SystemSettingDef,
+};
 
 use corvo_core::{
-    Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult, search_match_score,
+    search_match_score, Action, ActionGroup, Command, CommandAction, CommandError,
+    ExecutionContext, Icon, SearchContext, SearchResult,
 };
 
 #[derive(Default)]
@@ -16,6 +18,7 @@ fn map_execution_to_action(exec: &ActionExecution) -> Action {
         ActionExecution::RunShell(cmd) => Action::RunShell(cmd.clone()),
         ActionExecution::OpenUrl(url) => Action::OpenUrl(url.clone()),
         ActionExecution::AdjustBrightness(delta) => Action::AdjustBrightness(*delta),
+        ActionExecution::AdjustVolume(delta) => Action::AdjustVolume(*delta),
     }
 }
 
@@ -27,8 +30,21 @@ impl Command for SystemActionsCommand {
 
     fn keywords(&self) -> &'static [&'static str] {
         &[
-            "system", "settings", "preferences", "lock", "sleep", "shutdown", "restart",
-            "trash", "dark", "mute", "volume", "brightness", "wifi", "bluetooth", "display",
+            "system",
+            "settings",
+            "preferences",
+            "lock",
+            "sleep",
+            "shutdown",
+            "restart",
+            "trash",
+            "dark",
+            "mute",
+            "volume",
+            "brightness",
+            "wifi",
+            "bluetooth",
+            "display",
         ]
     }
 
@@ -125,9 +141,16 @@ impl Command for SystemActionsCommand {
         results
     }
 
-    async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(
+        &self,
+        result_id: &str,
+        _ctx: &ExecutionContext,
+    ) -> Result<Action, CommandError> {
         if let Some(setting_id) = result_id.strip_prefix("system-actions:setting:") {
-            if let Some(setting) = get_system_settings().into_iter().find(|s| s.id == setting_id) {
+            if let Some(setting) = get_system_settings()
+                .into_iter()
+                .find(|s| s.id == setting_id)
+            {
                 return Ok(map_execution_to_action(&setting.execution));
             }
         } else if let Some(action_id) = result_id.strip_prefix("system-actions:action:") {
@@ -140,7 +163,10 @@ impl Command for SystemActionsCommand {
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
         if let Some(setting_id) = result_id.strip_prefix("system-actions:setting:") {
-            if let Some(setting) = get_system_settings().into_iter().find(|s| s.id == setting_id) {
+            if let Some(setting) = get_system_settings()
+                .into_iter()
+                .find(|s| s.id == setting_id)
+            {
                 return vec![CommandAction {
                     id: "system-actions:open-setting".into(),
                     label: "Open Setting".into(),
@@ -173,7 +199,10 @@ mod tests {
     #[test]
     fn finds_action_by_keyword() {
         let cmd = SystemActionsCommand;
-        let ctx = SearchContext { max_results: 10, store: None };
+        let ctx = SearchContext {
+            max_results: 10,
+            store: None,
+        };
         let results = smol::block_on(cmd.search("lock", &ctx));
         assert!(results.iter().any(|r| r.id == "system-actions:action:lock"));
     }
@@ -181,9 +210,14 @@ mod tests {
     #[test]
     fn finds_setting_by_name() {
         let cmd = SystemActionsCommand;
-        let ctx = SearchContext { max_results: 10, store: None };
+        let ctx = SearchContext {
+            max_results: 10,
+            store: None,
+        };
         let results = smol::block_on(cmd.search("displays", &ctx));
-        assert!(results.iter().any(|r| r.id == "system-actions:setting:displays"));
+        assert!(results
+            .iter()
+            .any(|r| r.id == "system-actions:setting:displays"));
     }
 
     #[test]
@@ -201,7 +235,8 @@ mod tests {
     fn execute_returns_run_shell_for_action() {
         let cmd = SystemActionsCommand;
         let ctx = ExecutionContext::default();
-        let action = smol::block_on(cmd.execute("system-actions:action:empty-trash", &ctx)).unwrap();
+        let action =
+            smol::block_on(cmd.execute("system-actions:action:empty-trash", &ctx)).unwrap();
         match action {
             Action::RunShell(cmd) => assert!(!cmd.is_empty()),
             _ => panic!("expected RunShell"),
