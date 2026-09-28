@@ -134,7 +134,7 @@ pub fn order_panel_front(_width: f64, _height: f64) {
 pub fn resize_launcher_panel(_width: f64, _height: f64) -> bool {
     #[cfg(target_os = "macos")]
     return macos::resize_launcher_panel(_width, _height);
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(target_os = "macos"))]
     return false;
 }
 
@@ -178,7 +178,7 @@ pub fn read_clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]
     return macos::read_clipboard_text();
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    return portable_clipboard(|clipboard| clipboard.get_text().ok());
+    return portable_clipboard(|clipboard| clipboard.get_text().ok()).flatten();
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return None;
 }
@@ -222,7 +222,7 @@ pub fn clipboard_change_count() -> isize {
 pub fn clipboard_is_concealed() -> bool {
     #[cfg(target_os = "macos")]
     return macos::clipboard_is_concealed();
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(target_os = "macos"))]
     return false;
 }
 

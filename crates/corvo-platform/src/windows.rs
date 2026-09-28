@@ -622,7 +622,7 @@ Add-Type -MemberDefinition $signature -Name Foreground -Namespace Corvo
 $processId = [uint32]0
 [void][Corvo.Foreground]::GetWindowThreadProcessId([Corvo.Foreground]::GetForegroundWindow(), [ref]$processId)
 $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-if ($process -and $process.Id -ne {}) {{ [Console]::Write("{0}|{1}" -f $process.Id, $process.ProcessName) }}
+if ($process -and $process.Id -ne {}) {{ [Console]::Write("{{0}}|{{1}}" -f $process.Id, $process.ProcessName) }}
 "#,
         std::process::id()
     );

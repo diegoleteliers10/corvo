@@ -1287,7 +1287,7 @@ fn resolve_desktop_icon(icon: &str) -> Option<PathBuf> {
     let themes = icon_themes();
 
     for root in &roots {
-        for theme in &themes {
+        for theme in themes {
             for size in [
                 "48x48", "64x64", "128x128", "256x256", "32x32", "scalable", "24x24", "16x16",
             ] {
@@ -1310,7 +1310,7 @@ fn resolve_desktop_icon(icon: &str) -> Option<PathBuf> {
     }
 
     for root in &roots {
-        for theme in &themes {
+        for theme in themes {
             for size in [
                 "48x48", "64x64", "128x128", "256x256", "32x32", "scalable", "24x24", "16x16",
             ] {

@@ -230,7 +230,9 @@ pub fn serve(tx: smol::channel::Sender<()>) {
                 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
             if connected {
                 let tx = tx.clone();
+                let pipe = pipe as usize;
                 std::thread::spawn(move || {
+                    let pipe = pipe as Handle;
                     let mut buffer = [0u8; 64];
                     let mut bytes_read = 0;
                     let deadline =
