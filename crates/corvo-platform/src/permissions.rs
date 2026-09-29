@@ -76,6 +76,9 @@ pub fn request(kind: PermissionKind) {
                 super::macos::is_accessibility_trusted(true);
             }
             PermissionKind::ScreenRecording => {
+                if !super::macos::is_screen_recording_granted() {
+                    super::macos::arm_screen_recording_relaunch_watchdog();
+                }
                 super::macos::request_screen_recording();
             }
             PermissionKind::Calendars => {

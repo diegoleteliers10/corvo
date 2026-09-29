@@ -3,6 +3,7 @@
 
 mod icons;
 mod settings;
+mod onboarding;
 
 pub use settings::{
     open_settings, open_settings_tab, open_settings_tab_with_update_check,
@@ -8443,7 +8444,20 @@ pub fn run(
         })
         .detach();
 
-        open_launcher(cx);
+        // First launch: guide instead of summoning the launcher. The marker
+        // is written at show-time, so the wizard stays one-time even if the
+        // user quits mid-flow.
+        let first_run = !initial_settings.onboarding.shown;
+        if first_run {
+            // Marked only after the window exists: a failed open must leave
+            // the wizard pending instead of burning the one-time flow.
+            if onboarding::open_welcome(cx) {
+                onboarding::mark_shown();
+            }
+        }
+        if !first_run {
+            open_launcher(cx);
+        }
     });
 }
 
@@ -8640,6 +8654,7 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
             open_settings(cx);
         }
         "quit-corvo" | "Quit Corvo" => {
+            corvo_platform::clear_screen_recording_relaunch_marker();
             cx.quit();
         }
         "check-for-updates" | "Check for Updates" => {
@@ -8821,7 +8836,7 @@ fn toggle(cx: &mut App) {
     open_launcher(cx);
 }
 
-fn active_display_id() -> Option<gpui::DisplayId> {
+pub(crate) fn active_display_id() -> Option<gpui::DisplayId> {
     corvo_platform::active_display_id().map(|id| gpui::DisplayId::new(id as u64))
 }
 
@@ -8838,6 +8853,27 @@ fn set_windows_launcher_visible(window: &Window, visible: bool) {
 
 fn open_launcher(cx: &mut App) {
     open_launcher_for(LauncherPage::Root, String::new(), cx);
+}
+
+/// Brings the launcher on screen after onboarding, on every platform:
+/// Windows keeps its panel resident and hidden, while macOS and Linux
+/// remove the window on dismiss.
+pub(crate) fn present_launcher(cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    {
+        open_launcher_with_query("", cx);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let alive = cx
+            .try_global::<LauncherWindow>()
+            .map(|g| g.0)
+            .is_some_and(|handle| cx.windows().contains(&handle.into()));
+        if !alive {
+            open_launcher(cx);
+        }
+    }
 }
 
 fn sync_launcher_preferences(cx: &mut App) {

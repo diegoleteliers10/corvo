@@ -352,7 +352,7 @@ fn result_identity(result_id: &str) -> &str {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Onboarding {
-    pub accessibility_granted: bool,
+    pub shown: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

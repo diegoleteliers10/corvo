@@ -6,22 +6,22 @@ use gpui::{
 };
 
 // Corvo Settings Palette — Deep dark graphite aesthetic with emerald accents and crisp optical contrast
-const COLOR_BG: u32 = 0x17181a;
-const COLOR_SIDEBAR_BG: u32 = 0x131416;
-const COLOR_CARD_BG: u32 = 0x1d1e22;
-const COLOR_DIVIDER: u32 = 0x282a2d;
-const COLOR_BORDER_SUBTLE: u32 = 0x242629;
-const COLOR_ROW_SELECTED: u32 = 0x1a3329; // Subtle dark emerald tint
-const COLOR_ROW_HOVER: u32 = 0x202226;
-const COLOR_TEXT: u32 = 0xffffff;
-const COLOR_TEXT_MUTED: u32 = 0xd1d5db;
-const COLOR_TEXT_DIM: u32 = 0x8e8e93;
-const COLOR_ACCENT: u32 = 0x34d399; // Corvo Emerald Accent
-const COLOR_TOGGLE_OFF: u32 = 0x32353b;
-const COLOR_CONTROL_BG: u32 = 0x222428;
-const COLOR_CONTROL_HOVER: u32 = 0x2c2f35;
-const COLOR_CONTROL_BORDER: u32 = 0x33363c;
-const COLOR_DESTRUCTIVE: u32 = 0xef4444;
+pub(crate) const COLOR_BG: u32 = 0x17181a;
+pub(crate) const COLOR_SIDEBAR_BG: u32 = 0x131416;
+pub(crate) const COLOR_CARD_BG: u32 = 0x1d1e22;
+pub(crate) const COLOR_DIVIDER: u32 = 0x282a2d;
+pub(crate) const COLOR_BORDER_SUBTLE: u32 = 0x242629;
+pub(crate) const COLOR_ROW_SELECTED: u32 = 0x1a3329; // Subtle dark emerald tint
+pub(crate) const COLOR_ROW_HOVER: u32 = 0x202226;
+pub(crate) const COLOR_TEXT: u32 = 0xffffff;
+pub(crate) const COLOR_TEXT_MUTED: u32 = 0xd1d5db;
+pub(crate) const COLOR_TEXT_DIM: u32 = 0x8e8e93;
+pub(crate) const COLOR_ACCENT: u32 = 0x34d399; // Corvo Emerald Accent
+pub(crate) const COLOR_TOGGLE_OFF: u32 = 0x32353b;
+pub(crate) const COLOR_CONTROL_BG: u32 = 0x222428;
+pub(crate) const COLOR_CONTROL_HOVER: u32 = 0x2c2f35;
+pub(crate) const COLOR_CONTROL_BORDER: u32 = 0x33363c;
+pub(crate) const COLOR_DESTRUCTIVE: u32 = 0xef4444;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -246,7 +246,7 @@ pub struct SettingsView {
     cancel_update_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-fn format_hotkey_keycaps(hotkey: &str) -> Vec<String> {
+pub(crate) fn format_hotkey_keycaps(hotkey: &str) -> Vec<String> {
     hotkey
         .split('+')
         .filter_map(|token| {
@@ -289,14 +289,21 @@ fn format_hotkey_keycaps(hotkey: &str) -> Vec<String> {
 }
 
 impl SettingsView {
-    pub fn new(cx: &mut Context<Self>, store: std::sync::Arc<dyn corvo_core::DataStore>) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        store: std::sync::Arc<dyn corvo_core::DataStore>,
+        window: &mut Window,
+    ) -> Self {
         let settings = corvo_config::Settings::load();
         let quicklinks_file = corvo_config::QuicklinksFile::load();
         let snippets_file = corvo_config::SnippetsFile::load();
         let app_updates = corvo_app_launcher::subscribe_corpus_changes();
         let release_updates = app_updates.clone();
-        cx.on_release(move |_, _| {
+        cx.on_release(move |_, cx| {
             release_updates.close();
+            if let Some(global) = cx.try_global::<crate::HotkeyManagerGlobal>() {
+                global.0.borrow_mut().set_suppressed(false);
+            }
         })
         .detach();
         cx.spawn(async move |this, cx| {
@@ -358,6 +365,15 @@ impl SettingsView {
             update_status: UpdateStatusUI::Idle,
             cancel_update_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
+        // Every edit saves immediately, so reloading the snapshot when this
+        // window regains focus picks up writes made elsewhere (the onboarding
+        // wizard, the updater) instead of reverting them on the next save.
+        let focus_handle = view.focus_handle.clone();
+        cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
+            view.settings = corvo_config::Settings::load();
+            cx.notify();
+        })
+        .detach();
         // A background check may have found a newer release before this
         // window opened. Show its changelog with Skip / Download buttons
         // right away instead of an empty update section.
@@ -423,6 +439,22 @@ impl SettingsView {
                 );
             }
             Err(error) => self.save_error = Some(format!("Could not save Snippets: {error}")),
+        }
+    }
+
+    /// Routes recorder state through one helper so the global hotkeys are
+    /// unregistered exactly while a binding is being recorded.
+    fn set_recording_hotkey_item(
+        &mut self,
+        item: Option<(SettingsTab, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.recording_hotkey_item = item;
+        if let Some(global) = cx.try_global::<crate::HotkeyManagerGlobal>() {
+            global
+                .0
+                .borrow_mut()
+                .set_suppressed(self.recording_hotkey_item.is_some());
         }
     }
 
@@ -501,7 +533,7 @@ impl SettingsView {
         self.selected_tab = tab;
         self.active_dropdown = None;
         self.editing_alias_item = None;
-        self.recording_hotkey_item = None;
+        self.set_recording_hotkey_item(None, cx);
         self.adding_scope = false;
         self.adding_file_scope = false;
         self.adding_ignore_pattern = false;
@@ -965,8 +997,8 @@ impl SettingsView {
                                         .when(cfg!(target_os = "windows"), |b| {
                                             b.window_control_area(WindowControlArea::Close)
                                         })
-                                        .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
-                                            close_settings_window(window);
+                                        .on_mouse_down(MouseButton::Left, |_ev, window, cx| {
+                                            close_settings_window(window, cx);
                                         })
                                         .child(crate::icons::render_phosphor_svg(
                                             phosphor_svgs::style::regular::X,
@@ -1157,6 +1189,11 @@ impl SettingsView {
                 ],
             ));
 
+        pane = pane.child(self.section_group(
+            "Onboarding",
+            vec![self.onboarding_rerun_row(cx)],
+        ));
+
         if let Some(active) = self.active_dropdown {
             pane = pane
                 .child(
@@ -1173,6 +1210,51 @@ impl SettingsView {
         }
 
         pane
+    }
+
+    fn onboarding_rerun_row(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .h(px(54.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(COLOR_TEXT))
+                            .child("Run first-launch setup"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child("Shortcut, permissions, and the welcome tour."),
+                    ),
+            )
+            .child(
+                div()
+                    .id("onboarding-rerun-open")
+                    .cursor_pointer()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(COLOR_CONTROL_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(COLOR_TEXT))
+                    .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {
+                        crate::onboarding::open_welcome(cx);
+                    }))
+                    .child("Open"),
+            )
     }
 
     fn permission_card(
@@ -1373,7 +1455,7 @@ impl SettingsView {
                         return;
                     }
                     "w" => {
-                        close_settings_window(window);
+                        close_settings_window(window, cx);
                         return;
                     }
                     _ => {}
@@ -1438,7 +1520,7 @@ impl SettingsView {
         // Recording hotkey for an item (App, System Setting, System Action, Command, Quicklink, Snippets, FileSearch, WindowManagement, Navigation, Emojis)
         if let Some((tab, item_key)) = self.recording_hotkey_item.clone() {
             if keystroke.key == "escape" {
-                self.recording_hotkey_item = None;
+                self.set_recording_hotkey_item(None, cx);
                 cx.notify();
                 return;
             }
@@ -1578,7 +1660,7 @@ impl SettingsView {
                     }
                     _ => {}
                 }
-                self.recording_hotkey_item = None;
+                self.set_recording_hotkey_item(None, cx);
                 cx.notify();
                 return;
             }
@@ -1743,7 +1825,7 @@ impl SettingsView {
                 }
                 _ => {}
             }
-            self.recording_hotkey_item = None;
+            self.set_recording_hotkey_item(None, cx);
             cx.notify();
             return;
         }
@@ -2995,7 +3077,7 @@ impl SettingsView {
             }
             _ => {}
         }
-        self.recording_hotkey_item = None;
+        self.set_recording_hotkey_item(None, cx);
         cx.notify();
     }
 
@@ -3041,7 +3123,7 @@ impl SettingsView {
                 .on_click(cx.listener({
                     let key = key_for_click.clone();
                     move |this, _: &ClickEvent, _window, cx| {
-                        this.recording_hotkey_item = Some((tab, key.clone()));
+                        this.set_recording_hotkey_item(Some((tab, key.clone())), cx);
                         cx.notify();
                     }
                 }))
@@ -3125,7 +3207,7 @@ impl SettingsView {
                 .on_click(cx.listener({
                     let key = key_for_click.clone();
                     move |this, _: &ClickEvent, _window, cx| {
-                        this.recording_hotkey_item = Some((tab, key.clone()));
+                        this.set_recording_hotkey_item(Some((tab, key.clone())), cx);
                         cx.notify();
                     }
                 }))
@@ -8683,7 +8765,22 @@ impl Render for SettingsView {
 struct SettingsWindow(WindowHandle<SettingsView>);
 impl Global for SettingsWindow {}
 
-fn close_settings_window(window: &mut Window) {
+/// Stops any pending hotkey recording. On Windows the Settings window
+/// outlives its close button (hidden, not removed), so without this a
+/// recording would keep every global hotkey unregistered.
+fn stop_hotkey_recording(cx: &mut App) {
+    if let Some(handle) = cx.try_global::<SettingsWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |view, _window, cx| {
+                view.set_recording_hotkey_item(None, cx);
+            });
+        }
+    }
+}
+
+/// Closes (or hides on Windows) the Settings window.
+fn close_settings_window(window: &mut Window, cx: &mut App) {
+    stop_hotkey_recording(cx);
     #[cfg(target_os = "windows")]
     set_settings_window_visible(window, false);
     #[cfg(not(target_os = "windows"))]
@@ -8708,8 +8805,9 @@ fn set_settings_window_visible(window: &Window, visible: bool) {
 
 #[cfg(target_os = "windows")]
 fn keep_settings_window_alive(window: &mut Window, cx: &mut App) {
-    window.on_window_should_close(cx, |window, _| {
-        close_settings_window(window);
+    window.on_window_should_close(cx, |window, cx| {
+        stop_hotkey_recording(cx);
+        set_settings_window_visible(window, false);
         false
     });
 }
@@ -8756,7 +8854,7 @@ pub fn prewarm_settings_window(cx: &mut App) {
     let store = cx.global::<crate::StoreGlobal>().0.clone();
     if let Ok(handle) = cx.open_window(options, move |window, cx| {
         keep_settings_window_alive(window, cx);
-        cx.new(|cx| SettingsView::new(cx, store))
+        cx.new(|cx| SettingsView::new(cx, store, window))
     }) {
         cx.set_global(SettingsWindow(handle));
     }
@@ -8802,11 +8900,11 @@ pub fn open_settings_tab(tab: SettingsTab, cx: &mut App) {
     };
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
-    let opened = cx.open_window(options, move |_window, cx| {
+    let opened = cx.open_window(options, move |window, cx| {
         #[cfg(target_os = "windows")]
-        keep_settings_window_alive(_window, cx);
+        keep_settings_window_alive(window, cx);
         cx.new(|cx| {
-            let mut view = SettingsView::new(cx, store);
+            let mut view = SettingsView::new(cx, store, window);
             if tab != SettingsTab::General {
                 view.navigate_to_tab(tab, cx);
             }
@@ -8871,11 +8969,11 @@ pub fn open_settings_tab_with_update_check(tab: SettingsTab, cx: &mut App) {
     };
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
-    let opened = cx.open_window(options, move |_window, cx| {
+    let opened = cx.open_window(options, move |window, cx| {
         #[cfg(target_os = "windows")]
-        keep_settings_window_alive(_window, cx);
+        keep_settings_window_alive(window, cx);
         cx.new(|cx| {
-            let mut view = SettingsView::new(cx, store);
+            let mut view = SettingsView::new(cx, store, window);
             if tab != SettingsTab::General {
                 view.navigate_to_tab(tab, cx);
             }
@@ -8965,11 +9063,11 @@ fn show_update_window(
     };
 
     let store = cx.global::<crate::StoreGlobal>().0.clone();
-    let opened = cx.open_window(options, move |_window, cx| {
+    let opened = cx.open_window(options, move |window, cx| {
         #[cfg(target_os = "windows")]
-        keep_settings_window_alive(_window, cx);
+        keep_settings_window_alive(window, cx);
         cx.new(|cx| {
-            let mut view = SettingsView::new(cx, store);
+            let mut view = SettingsView::new(cx, store, window);
             view.navigate_to_tab(SettingsTab::About, cx);
             if !matches!(
                 view.update_status,

@@ -2345,6 +2345,59 @@ fn find_corvo_app_path() -> Option<PathBuf> {
     None
 }
 
+/// Marker that tells a running relaunch watchdog this process exited
+/// cleanly. The watchdog relaunches only while the marker exists, so a
+/// normal Quit inside the watch window is honored.
+fn screen_recording_relaunch_marker() -> PathBuf {
+    std::env::temp_dir().join("sh.corvo.corvo.relaunch")
+}
+
+/// Marks a clean exit. Call before quitting Corvo while a watchdog may run.
+pub fn clear_screen_recording_relaunch_marker() {
+    let _ = std::fs::remove_file(screen_recording_relaunch_marker());
+}
+
+/// Granting Screen Recording only takes effect after the process dies: macOS
+/// kills the app ("Quit & Reopen" in System Settings). Arms a detached
+/// watcher that relaunches Corvo the moment this process disappears, turning
+/// the forced quit into a background restart. Gives up silently if the
+/// process survives two minutes (grant cancelled) or exits cleanly.
+pub fn arm_screen_recording_relaunch_watchdog() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let marker = screen_recording_relaunch_marker();
+    if std::fs::write(&marker, b"").is_err() {
+        return;
+    }
+    let pid = std::process::id();
+    // The path travels as a positional argument, never as script text, so a
+    // quote in the install path cannot break the script.
+    let (relaunch, target) = match find_corvo_app_path() {
+        Some(app) if exe.starts_with(&app) => ("exec open \"$1\"", app.display().to_string()),
+        _ => ("nohup \"$1\" >/dev/null 2>&1 &", exe.display().to_string()),
+    };
+    let script = format!(
+        "i=0\n\
+         while kill -0 {pid} 2>/dev/null; do\n\
+         \x20 i=$((i+1))\n\
+         \x20 if [ $i -gt 240 ]; then rm -f \"$2\"; exit 0; fi\n\
+         \x20 sleep 0.5\n\
+         done\n\
+         [ -e \"$2\" ] || exit 0\n\
+         rm -f \"$2\"\n\
+         sleep 1\n\
+         {relaunch}"
+    );
+    let _ = std::process::Command::new("sh")
+        .args(["-c", &script, "corvo-watchdog", &target])
+        .arg(&marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn unimplemented_os(what: &str) -> PlatformError {
     PlatformError::Unsupported(format!("macos {what} arrives in phase 4"))
 }

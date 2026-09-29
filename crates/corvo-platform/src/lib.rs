@@ -520,6 +520,13 @@ pub fn is_launch_at_login_enabled() -> bool {
 }
 
 /// Enables or disables launch at login on the host platform.
+/// Marks a clean exit so a Screen Recording relaunch watchdog stands down
+/// instead of bringing Corvo back.
+pub fn clear_screen_recording_relaunch_marker() {
+    #[cfg(target_os = "macos")]
+    macos::clear_screen_recording_relaunch_marker();
+}
+
 pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return macos::set_launch_at_login(enabled);
