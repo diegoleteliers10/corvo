@@ -183,6 +183,8 @@ pub struct HotkeyManager {
     registered: Vec<HotKey>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     id_map: Arc<Mutex<HashMap<u32, HotkeyIntent>>>,
+    last_bindings: Option<(String, Vec<(String, HotkeyIntent)>)>,
+    suppressed: bool,
 }
 
 impl HotkeyManager {
@@ -247,13 +249,18 @@ impl HotkeyManager {
                 manager,
                 registered: Vec::new(),
                 id_map,
+                last_bindings: None,
+                suppressed: false,
             }
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = tx;
-            Self {}
+            Self {
+                last_bindings: None,
+                suppressed: false,
+            }
         }
     }
 
@@ -262,6 +269,8 @@ impl HotkeyManager {
         launcher_hotkey_str: &str,
         bindings: Vec<(String, HotkeyIntent)>,
     ) {
+        self.last_bindings = Some((launcher_hotkey_str.to_string(), bindings.clone()));
+
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let Some(ref manager) = self.manager else {
@@ -318,6 +327,41 @@ impl HotkeyManager {
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (launcher_hotkey_str, bindings);
+        }
+    }
+
+    /// While suppressed, every registered global hotkey is unregistered, so
+    /// the OS delivers those keystrokes to the focused window instead of the
+    /// hotkey worker. In-app hotkey recorders use this: rebinding the toggle
+    /// key cannot fire the launcher mid-recording, and the recorder can
+    /// capture even the currently bound combination. Unsuplicing re-registers
+    /// the last known binding set.
+    pub fn set_suppressed(&mut self, suppressed: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            if suppressed == self.suppressed {
+                return;
+            }
+            self.suppressed = suppressed;
+            let Some(ref manager) = self.manager else {
+                return;
+            };
+            if suppressed {
+                if !self.registered.is_empty() {
+                    let _ = manager.unregister_all(&self.registered);
+                    self.registered.clear();
+                }
+                if let Ok(mut id_map) = self.id_map.lock() {
+                    id_map.clear();
+                }
+            } else if let Some((launcher, bindings)) = self.last_bindings.clone() {
+                self.update_bindings(&launcher, bindings);
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = (self, suppressed);
         }
     }
 }

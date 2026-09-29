@@ -1,3 +1,32 @@
+# Corvo 0.3.0
+
+## First-launch setup
+
+- Corvo opens a welcome window on the first start instead of showing the launcher. The window has the steps that apply: the launcher shortcut, macOS Accessibility, and a final step that shows the recorded shortcut and opens the launcher.
+- The window runs once. The `shown` flag in `settings.toml` is written when the window opens, so quitting in the middle does not bring it back.
+- Settings > General has "Run first-launch setup" to run it again on every platform.
+- Windows and Linux run the two steps that apply to them. They have no system grant like macOS Accessibility, so their wizard does not ask for one.
+
+## Hotkey recording
+
+- Recording a shortcut in the welcome window or in Settings unregisters every global hotkey while you record. The previous binding can no longer fire the launcher over the recorder, and the recorder can capture the combination that is already bound.
+- Recording stops when the window closes on every platform, including the Windows path where Settings keeps its window open.
+
+## Screen Recording on macOS
+
+- macOS kills Corvo when you grant Screen Recording. A detached watcher now relaunches Corvo the moment the process disappears, so the grant becomes a background restart.
+- Quitting Corvo on purpose still quits. The watcher stands down when the exit is clean, and the updater stands it down too.
+
+## Permissions
+
+- The welcome window asks only for Accessibility, which is what window tiling needs. Calendars, Screen Recording, and Full Disk Access stay in Settings > Permissions.
+- Both places read the grant state live from the system. macOS keeps the grants across updates because they belong to the signed app, not to a version.
+
+## Notes
+
+- The welcome window embeds the app icon, so every platform binary is about 160 KB larger.
+- Users who already have Corvo installed see the welcome window once after this update.
+
 # Corvo 0.2.0
 
 ## Updates

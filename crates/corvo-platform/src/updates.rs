@@ -553,6 +553,9 @@ pub fn install_and_restart(staged_archive: &Path) -> Result<(), UpdateError> {
         )));
     }
     let _ = fs::remove_file(install_error_path()?);
+    // The update replaces this process; a Screen Recording watchdog must not
+    // relaunch on top of the updater's own restart.
+    super::clear_screen_recording_relaunch_marker();
     #[cfg(target_os = "macos")]
     {
         install_macos(staged_archive)

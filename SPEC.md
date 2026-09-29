@@ -237,12 +237,24 @@ Polling, where unavoidable, runs on a low-priority background thread.
 
 ## 9. Onboarding
 
-First-run flow requests OS permissions up front rather than failing
-silently later:
-- **macOS:** Accessibility permission (`AXUIElement`), required for
-  `window-management`
-- Flags for what's been granted live in `settings.toml` under
-  `[onboarding]`
+First-run flow opens a dedicated welcome window instead of dropping the
+user into an unconfigured launcher:
+
+- **Trigger:** on launch, when `[onboarding] shown` is still false in
+  `settings.toml`. The flag is written at show-time, so the wizard runs
+  once even if the user quits mid-flow. Re-runnable from
+  Settings › General ("Run first-launch setup").
+- **Steps:** shortcut (toggle hotkey recorder + launch-at-login toggle),
+  then macOS-only Accessibility permission with a live granted badge,
+  then a ready step that shows the final keycaps and opens the launcher.
+  Windows and Linux have no equivalent system grant, so their wizard
+  runs the two steps that apply.
+- **Hotkey recorder:** while recording, every global hotkey is
+  unregistered, so the OS delivers those keystrokes to the recorder
+  window instead of firing the launcher mid-capture.
+- **Screen Recording:** macOS kills the app when it is granted, so
+  `corvo-platform::permissions::request` arms a detached watchdog that
+  relaunches Corvo the moment the process disappears.
 - Raycast config import is explicitly NOT part of onboarding for now
   (see §2)
 
