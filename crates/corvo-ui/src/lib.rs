@@ -9192,7 +9192,7 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
     // Center on the height the window will actually open at. Centering on
     // the full height and then overwriting the height leaves a compact
     // window sitting well above the middle of the screen.
-    let initial_bounds = centered_bounds(size(px(window_width), px(initial_height)), cx);
+    let initial_bounds = launcher_bounds(size(px(window_width), px(initial_height)), cx);
     let display_id = active_display_id();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(initial_bounds)),
@@ -9269,6 +9269,42 @@ fn launcher_background(transparency_level: usize) -> u32 {
 
 fn centered_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
     Bounds::centered(active_display_id(), window_size, cx)
+}
+
+/// Where the middle of the launcher panel sits, as a fraction from the top
+/// of the usable display area. Half is dead center, which puts the panel
+/// low and forces the eye down to read it. A third lands it in the upper
+/// half with the first result rows near eye level.
+const LAUNCHER_CENTER_FRACTION: f32 = 0.30;
+
+/// Smallest gap kept between the launcher panel and the top of the usable
+/// display area, so a tall panel on a short screen never sits off-screen.
+const LAUNCHER_TOP_MARGIN: f32 = 24.0;
+
+/// Where the launcher panel opens.
+///
+/// The panel changes height between compact and expanded, so the position
+/// is derived from where the middle of the panel should sit rather than
+/// from a fixed offset. A fixed offset puts a short compact panel near the
+/// top and leaves a tall expanded panel low on the screen.
+fn launcher_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let display_id = active_display_id();
+    let mut bounds = Bounds::centered(display_id, window_size, cx);
+    let display = cx
+        .displays()
+        .into_iter()
+        .find(|display| Some(display.id()) == display_id)
+        .or_else(|| cx.primary_display());
+    if let Some(display) = display {
+        // `Bounds::centered` works from the visible bounds, which leave
+        // out the menu bar, so this has to use the same rect.
+        let visible = display.visible_bounds();
+        let target_center =
+            visible.origin.y + visible.size.height * LAUNCHER_CENTER_FRACTION;
+        bounds.origin.y = (target_center - window_size.height / 2.0)
+            .max(visible.origin.y + px(LAUNCHER_TOP_MARGIN));
+    }
+    bounds
 }
 
 /// Wayland compositors get a centered overlay through layer shell (SPEC

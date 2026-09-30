@@ -61,6 +61,23 @@ fn write_cached_corpus(scopes: &[String], apps: &[AppEntry]) {
     let _ = std::fs::write(path, bytes);
 }
 
+/// An entry the scanner found but whose icon is still being decoded, so it
+/// is not ready to publish yet.
+///
+/// A `shell:AppsFolder` entry is a Store app, and that path is not a file
+/// on disk, so it cannot be checked with `is_file`. Store apps are
+/// re-derived from `Get-StartApps` on every scan, so they are always
+/// current and never need carrying forward.
+#[cfg(target_os = "windows")]
+fn is_pending_icon_decode(app: &AppEntry) -> bool {
+    app.icon_png.is_none() && !is_store_app_entry(app)
+}
+
+#[cfg(target_os = "windows")]
+fn is_store_app_entry(app: &AppEntry) -> bool {
+    app.path.to_string_lossy().starts_with("shell:AppsFolder\\")
+}
+
 #[cfg(target_os = "windows")]
 fn publish_ready_apps(scopes: &[String], apps: &[AppEntry]) {
     let mut ready = apps
@@ -75,11 +92,16 @@ fn publish_ready_apps(scopes: &[String], apps: &[AppEntry]) {
         .iter()
         .map(|app| app.path.clone())
         .collect::<std::collections::HashSet<_>>();
+    // Carry forward only the entries the scanner found but could not show
+    // yet, and only while they are still installed. Carrying forward every
+    // known app kept an uninstalled one in the list forever, because a
+    // missing app is exactly what the scan stops reporting.
     ready.extend(
         state
             .apps
             .iter()
             .filter(|app| !ready_paths.contains(&app.path))
+            .filter(|app| is_pending_icon_decode(app))
             .cloned(),
     );
     state.apps = ready;
@@ -384,27 +406,16 @@ fn start_scan(force: bool) {
         {
             let previous_apps = corpus_apps();
             let mut apps = match scanned {
-                Ok(mut apps) => {
-                    let shortcut_names: std::collections::HashSet<String> = apps
-                        .iter()
-                        .map(|app| app.name.trim().to_lowercase())
-                        .collect();
-                    apps.extend(
-                        previous_apps
-                            .iter()
-                            .filter(|app| {
-                                app.path.to_string_lossy().starts_with("shell:AppsFolder\\")
-                                    && !shortcut_names.contains(&app.name.trim().to_lowercase())
-                            })
-                            .cloned(),
-                    );
-                    apps
-                }
+                Ok(apps) => apps,
                 Err(error) => {
                     eprintln!("corvo: could not scan applications: {error}");
                     previous_apps
                 }
             };
+            // Store apps are not carried forward from the previous scan.
+            // `append_start_apps` re-reads them from `Get-StartApps` below,
+            // which is authoritative, and re-adding the old ones kept an
+            // uninstalled Store app in the list forever.
             publish_ready_apps(&scopes, &apps);
             notify_corpus_subscribers();
             corvo_platform::hydrate_shortcut_icons(&mut apps);
@@ -687,5 +698,28 @@ mod tests {
         let caps = corvo_core::shortcut::keycaps(reveal_hotkey());
         let expected_primary = corvo_core::Primary::current().keycap_label();
         assert_eq!(caps, vec![expected_primary.to_string(), "↵".to_string()]);
+    }
+
+    /// An app that was uninstalled stops being reported by the scan, and
+    /// that is the only signal that it is gone. Carrying the previous
+    /// entry forward re-added it, so it stayed in the launcher forever.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn an_uninstalled_store_app_is_not_carried_forward() {
+        let uninstalled = app("Gone", r"shell:AppsFolder\Microsoft.Gone_8wekyb3d8bbwe!App");
+        // A Store app that has no decoded icon is not "pending", it is
+        // simply gone. `Get-StartApps` is the authority on what is
+        // installed, and it no longer lists this one.
+        assert!(!is_pending_icon_decode(&uninstalled));
+    }
+
+    /// A shortcut whose icon has not been decoded yet has to survive the
+    /// intermediate publishes, otherwise every app blinks out while the
+    /// icons stream in.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_shortcut_waiting_for_its_icon_is_carried_forward() {
+        let pending = app("Pending", r"C:\Program Files\Pending\Pending.lnk");
+        assert!(is_pending_icon_decode(&pending));
     }
 }
