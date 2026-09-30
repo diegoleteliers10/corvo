@@ -1,3 +1,27 @@
+# Corvo 0.3.2
+
+This release makes 0.3.1 installable on Windows. The 0.3.1 build fails to
+compile, so the Windows fixes it described never reached a binary. Nine
+compile errors are repaired here, and the Windows build is now checked
+against the real Windows target before a release is tagged.
+
+- Two PowerShell scripts were held in `format!` calls whose braces were
+  no longer escaped. A `format!` macro reads a `{` as the start of a
+  placeholder, so the first PowerShell brace opened an argument that
+  swallowed the rest of the crate. This is the error that stopped the
+  build. Both scripts are plain strings now, with the shortcut path
+  substituted into a single token.
+- A closure body reads `unsafe { .. }` as a statement, which left the
+  theme toggle's success check as a stray token.
+- The media key action named a type that does not exist, two volume calls
+  read a COM vtable pointer without a dereference, and two imports were
+  unused.
+- The launcher re-clipped its window after a resize through a call that
+  took one argument too many, and the file preview returned a different
+  element type on Windows than on the other platforms.
+- The unused Windows declarations left over from the disk eject work are
+  gone.
+
 # Corvo 0.3.1
 
 This release repairs Windows. Every item below was broken on Windows and
