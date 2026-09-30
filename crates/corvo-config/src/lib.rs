@@ -128,9 +128,12 @@ pub struct ApplicationsSettings {
 
 impl Default for ApplicationsSettings {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            search_scopes: vec![
+        // Only macOS reads this list: `list_apps_in_scopes` discards it
+        // elsewhere and scans the platform's own locations. Showing the
+        // macOS folders on Windows and Linux put dead rows in the
+        // settings pane, so keep the list empty off macOS.
+        let search_scopes = if cfg!(target_os = "macos") {
+            vec![
                 "/Applications".into(),
                 "/Applications/Utilities".into(),
                 "/System/Applications".into(),
@@ -139,7 +142,13 @@ impl Default for ApplicationsSettings {
                 "/System/Volumes/Preboot/Cryptexes/App/System/Applications".into(),
                 "/System/Library/CoreServices/Finder.app".into(),
                 "~/Applications".into(),
-            ],
+            ]
+        } else {
+            Vec::new()
+        };
+        Self {
+            enabled: true,
+            search_scopes,
             app_configs: std::collections::HashMap::new(),
         }
     }
@@ -165,24 +174,85 @@ impl Default for QuicklinksSettings {
     }
 }
 
+/// Builds a default hotkey string for the running platform.
+///
+/// A shortcut is written once in macOS terms, for example `cmd+shift+v`.
+/// Off macOS the primary modifier is Control, so `cmd` becomes `ctrl`. A
+/// shortcut that already carries both `ctrl` and `cmd` becomes
+/// `ctrl+alt` instead, because a platform cannot produce the same key
+/// twice.
+fn default_hotkey(shortcut: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return shortcut.to_string();
+    }
+    let mut modifiers: Vec<String> = Vec::new();
+    let mut key = String::new();
+    for token in shortcut
+        .split('+')
+        .map(|token| token.trim().to_ascii_lowercase())
+    {
+        match token.as_str() {
+            "cmd" | "command" | "super" | "win" => {
+                if !modifiers.iter().any(|value| value == "ctrl") {
+                    modifiers.push("ctrl".into());
+                }
+            }
+            "ctrl" | "control" => {
+                // The primary modifier is already Control off macOS, so a
+                // second request for it becomes Alt.
+                if modifiers.iter().any(|value| value == "ctrl") {
+                    if !modifiers.iter().any(|value| value == "alt") {
+                        modifiers.push("alt".into());
+                    }
+                } else {
+                    modifiers.push("ctrl".into());
+                }
+            }
+            "alt" | "opt" | "option" => {
+                if !modifiers.iter().any(|value| value == "alt") {
+                    modifiers.push("alt".into());
+                }
+            }
+            "shift" => {
+                if !modifiers.iter().any(|value| value == "shift") {
+                    modifiers.push("shift".into());
+                }
+            }
+            other => key = other.to_string(),
+        }
+    }
+    modifiers.push(key);
+    modifiers.join("+")
+}
+
+/// The launcher hotkey for the running platform.
+///
+/// Windows keeps Alt+Space, which the desktop also uses for the window
+/// system menu, because a launcher that owns it can still be reached by
+/// its tray icon. Linux uses Super+Space, the desktop convention there.
+pub fn default_launcher_hotkey() -> String {
+    if cfg!(target_os = "macos") {
+        "cmd+space".into()
+    } else if cfg!(target_os = "linux") {
+        "super+space".into()
+    } else {
+        "alt+space".into()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: if cfg!(target_os = "macos") {
-                "cmd+space"
-            } else {
-                "alt+space"
-            }
-            .into(),
+            hotkey: default_launcher_hotkey(),
             theme: "system".into(),
             launch_at_login: true,
             show_menu_bar: true,
             compact_mode: false,
-            pop_to_root_option: 1, // After 90 seconds
+            pop_to_root_option: 1,     // After 90 seconds
             escape_behavior_option: 0, // Navigate back or close window
-            auto_switch_input: 0, // None
-            theme_option: 0, // System
-            interface_size_option: 1, // Medium
+            auto_switch_input: 0,      // None
+            theme_option: 0,           // System
+            interface_size_option: 1,  // Medium
             transparency_level: 2,
             applications: ApplicationsSettings::default(),
             system_settings: SectionConfig::default(),
@@ -220,11 +290,11 @@ impl Settings {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let dirs = ProjectDirs::from("", "", "corvo")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
+        let dirs = ProjectDirs::from("", "", "corvo").ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory")
+        })?;
         let path = dirs.config_dir().join("settings.toml");
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let toml_str = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -375,7 +445,7 @@ impl Default for ClipboardSettings {
             "Clipboard History".into(),
             AppConfig {
                 alias: None,
-                hotkey: Some("cmd+shift+v".into()),
+                hotkey: Some(default_hotkey("cmd+shift+v")),
                 hidden: false,
             },
         );
@@ -455,17 +525,37 @@ impl Default for FileSearchSettings {
                 hidden: false,
             },
         );
+        // A home directory walk is depth limited, and the first folders
+        // it reaches decide what the user sees. Listing the everyday
+        // folders first keeps the page useful on a large profile, where
+        // a bare `~` scope spends its whole budget inside AppData.
+        let search_scopes = vec![
+            "~/Desktop".into(),
+            "~/Documents".into(),
+            "~/Downloads".into(),
+            "~".into(),
+        ];
+        let mut ignore_patterns = vec![
+            "node_modules".into(),
+            "build".into(),
+            "dist".into(),
+            "target".into(),
+            ".git".into(),
+            ".venv".into(),
+            "venv".into(),
+        ];
+        if cfg!(target_os = "macos") {
+            ignore_patterns.push("DerivedData".into());
+            ignore_patterns.push("Pods".into());
+        }
+        if cfg!(target_os = "windows") {
+            ignore_patterns.push("AppData".into());
+            ignore_patterns.push("Application Data".into());
+        }
         Self {
             enabled: true,
-            search_scopes: vec!["~".into()],
-            ignore_patterns: vec![
-                "node_modules".into(),
-                "DerivedData".into(),
-                "build".into(),
-                "dist".into(),
-                "target".into(),
-                "Pods".into(),
-            ],
+            search_scopes,
+            ignore_patterns,
             command_items,
         }
     }
@@ -608,7 +698,7 @@ impl Default for EmojisSettings {
             "Search Emoji & Symbols".into(),
             AppConfig {
                 alias: None,
-                hotkey: Some("ctrl+cmd+space".into()),
+                hotkey: Some(default_hotkey("cmd+alt+space")),
                 hidden: false,
             },
         );
@@ -644,11 +734,11 @@ impl SnippetsFile {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let dirs = ProjectDirs::from("", "", "corvo")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
+        let dirs = ProjectDirs::from("", "", "corvo").ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory")
+        })?;
         let path = dirs.config_dir().join("snippets.toml");
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let toml_str = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -708,11 +798,11 @@ impl QuicklinksFile {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let dirs = ProjectDirs::from("", "", "corvo")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory"))?;
+        let dirs = ProjectDirs::from("", "", "corvo").ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No home directory")
+        })?;
         let path = dirs.config_dir().join("quicklinks.toml");
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let toml_str = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -760,25 +850,38 @@ impl ConfigService {
         self.replace_clipboard_auto_paste(settings.clipboard.auto_paste);
         self.replace_file_search_options(file_search_options(&settings.file_search));
         self.replace_escape_behavior(settings.escape_behavior_option == 1);
-        self.replace_interface_appearance(settings.interface_size_option, settings.transparency_level);
+        self.replace_interface_appearance(
+            settings.interface_size_option,
+            settings.transparency_level,
+        );
         self.replace_compact_mode(settings.compact_mode);
         self.replace_update_settings(update_settings(&settings.updates));
         Ok(())
     }
 
     pub fn save_snippets(&mut self, snippets: Vec<SnippetEntry>) -> std::io::Result<()> {
-        SnippetsFile { snippets: snippets.clone() }.save()?;
+        SnippetsFile {
+            snippets: snippets.clone(),
+        }
+        .save()?;
         self.replace_snippets(
             snippets
                 .into_iter()
-                .map(|snippet| Snippet { name: snippet.name, keyword: snippet.keyword, body: snippet.body })
+                .map(|snippet| Snippet {
+                    name: snippet.name,
+                    keyword: snippet.keyword,
+                    body: snippet.body,
+                })
                 .collect(),
         );
         Ok(())
     }
 
     pub fn save_quicklinks(&mut self, quicklinks: Vec<QuicklinkEntry>) -> std::io::Result<()> {
-        QuicklinksFile { quicklinks: quicklinks.clone() }.save()?;
+        QuicklinksFile {
+            quicklinks: quicklinks.clone(),
+        }
+        .save()?;
         self.replace_quicklinks(
             quicklinks
                 .into_iter()
@@ -852,7 +955,10 @@ where
 
 impl DataStore for ConfigService {
     fn snippets(&self) -> Vec<Snippet> {
-        self.snippets.read().map(|items| items.clone()).unwrap_or_default()
+        self.snippets
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default()
             .iter()
             .map(|s| Snippet {
                 name: s.name.clone(),
@@ -863,7 +969,10 @@ impl DataStore for ConfigService {
     }
 
     fn quicklinks(&self) -> Vec<Quicklink> {
-        self.quicklinks.read().map(|items| items.clone()).unwrap_or_default()
+        self.quicklinks
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default()
             .iter()
             .map(|q| Quicklink {
                 name: q.name.clone(),
@@ -907,7 +1016,12 @@ impl DataStore for ConfigService {
         self.command_availability
             .read()
             .ok()
-            .and_then(|items| items.iter().find(|item| item.command_id == command_id).map(|item| item.enabled))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.command_id == command_id)
+                    .map(|item| item.enabled)
+            })
             .unwrap_or(true)
     }
 
@@ -916,7 +1030,10 @@ impl DataStore for ConfigService {
             .read()
             .ok()
             .and_then(|items| {
-                items.iter().find(|item| item.command_id == command_id).map(|item| item.show_in_launcher)
+                items
+                    .iter()
+                    .find(|item| item.command_id == command_id)
+                    .map(|item| item.show_in_launcher)
             })
             .unwrap_or(true)
     }
@@ -928,11 +1045,19 @@ impl DataStore for ConfigService {
     }
 
     fn emoji_column_count(&self) -> usize {
-        self.emoji_preferences.read().map(|preferences| preferences.0).unwrap_or(8).clamp(6, 10)
+        self.emoji_preferences
+            .read()
+            .map(|preferences| preferences.0)
+            .unwrap_or(8)
+            .clamp(6, 10)
     }
 
     fn emoji_skin_tone(&self) -> usize {
-        self.emoji_preferences.read().map(|preferences| preferences.1).unwrap_or(0).min(5)
+        self.emoji_preferences
+            .read()
+            .map(|preferences| preferences.1)
+            .unwrap_or(0)
+            .min(5)
     }
 
     fn replace_emoji_preferences(&self, column_count: usize, skin_tone: usize) {
@@ -942,7 +1067,10 @@ impl DataStore for ConfigService {
     }
 
     fn clipboard_auto_paste(&self) -> bool {
-        self.clipboard_auto_paste.read().map(|enabled| *enabled).unwrap_or(true)
+        self.clipboard_auto_paste
+            .read()
+            .map(|enabled| *enabled)
+            .unwrap_or(true)
     }
 
     fn replace_clipboard_auto_paste(&self, enabled: bool) {
@@ -952,7 +1080,10 @@ impl DataStore for ConfigService {
     }
 
     fn file_search_options(&self) -> FileSearchOptions {
-        self.file_search_options.read().map(|options| options.clone()).unwrap_or_default()
+        self.file_search_options
+            .read()
+            .map(|options| options.clone())
+            .unwrap_or_default()
     }
 
     fn replace_file_search_options(&self, options: FileSearchOptions) {
@@ -962,7 +1093,10 @@ impl DataStore for ConfigService {
     }
 
     fn escape_closes_window(&self) -> bool {
-        self.escape_closes_window.read().map(|value| *value).unwrap_or(false)
+        self.escape_closes_window
+            .read()
+            .map(|value| *value)
+            .unwrap_or(false)
     }
 
     fn replace_escape_behavior(&self, close_window: bool) {
@@ -972,11 +1106,19 @@ impl DataStore for ConfigService {
     }
 
     fn interface_size_option(&self) -> usize {
-        self.interface_appearance.read().map(|value| value.0).unwrap_or(1).min(2)
+        self.interface_appearance
+            .read()
+            .map(|value| value.0)
+            .unwrap_or(1)
+            .min(2)
     }
 
     fn transparency_level(&self) -> usize {
-        self.interface_appearance.read().map(|value| value.1).unwrap_or(2).min(4)
+        self.interface_appearance
+            .read()
+            .map(|value| value.1)
+            .unwrap_or(2)
+            .min(4)
     }
 
     fn replace_interface_appearance(&self, size_option: usize, transparency_level: usize) {
@@ -986,7 +1128,10 @@ impl DataStore for ConfigService {
     }
 
     fn compact_mode(&self) -> bool {
-        self.compact_mode.read().map(|enabled| *enabled).unwrap_or(false)
+        self.compact_mode
+            .read()
+            .map(|enabled| *enabled)
+            .unwrap_or(false)
     }
 
     fn replace_compact_mode(&self, enabled: bool) {
@@ -1008,16 +1153,56 @@ impl DataStore for ConfigService {
 
 pub fn command_availability(settings: &Settings) -> Vec<CommandAvailability> {
     vec![
-        CommandAvailability { command_id: "app-launcher".into(), enabled: settings.applications.enabled, show_in_launcher: true },
-        CommandAvailability { command_id: "system-actions".into(), enabled: settings.system_actions.enabled, show_in_launcher: true },
-        CommandAvailability { command_id: "clipboard-manager".into(), enabled: settings.clipboard.enabled, show_in_launcher: true },
-        CommandAvailability { command_id: "quicklinks".into(), enabled: settings.quicklinks.enabled, show_in_launcher: settings.quicklinks.show_in_launcher },
-        CommandAvailability { command_id: "snippets".into(), enabled: settings.snippets.enabled, show_in_launcher: settings.snippets.show_in_launcher },
-        CommandAvailability { command_id: "file-search".into(), enabled: settings.file_search.enabled, show_in_launcher: true },
-        CommandAvailability { command_id: "window-management".into(), enabled: settings.window_management.enabled, show_in_launcher: settings.window_management.show_in_launcher },
-        CommandAvailability { command_id: "emoji-picker".into(), enabled: true, show_in_launcher: true },
-        CommandAvailability { command_id: "calculator".into(), enabled: true, show_in_launcher: true },
-        CommandAvailability { command_id: "web-search-fallback".into(), enabled: true, show_in_launcher: true },
+        CommandAvailability {
+            command_id: "app-launcher".into(),
+            enabled: settings.applications.enabled,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "system-actions".into(),
+            enabled: settings.system_actions.enabled,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "clipboard-manager".into(),
+            enabled: settings.clipboard.enabled,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "quicklinks".into(),
+            enabled: settings.quicklinks.enabled,
+            show_in_launcher: settings.quicklinks.show_in_launcher,
+        },
+        CommandAvailability {
+            command_id: "snippets".into(),
+            enabled: settings.snippets.enabled,
+            show_in_launcher: settings.snippets.show_in_launcher,
+        },
+        CommandAvailability {
+            command_id: "file-search".into(),
+            enabled: settings.file_search.enabled,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "window-management".into(),
+            enabled: settings.window_management.enabled,
+            show_in_launcher: settings.window_management.show_in_launcher,
+        },
+        CommandAvailability {
+            command_id: "emoji-picker".into(),
+            enabled: true,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "calculator".into(),
+            enabled: true,
+            show_in_launcher: true,
+        },
+        CommandAvailability {
+            command_id: "web-search-fallback".into(),
+            enabled: true,
+            show_in_launcher: true,
+        },
     ]
 }
 
