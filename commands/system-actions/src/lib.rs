@@ -19,6 +19,7 @@ fn map_execution_to_action(exec: &ActionExecution) -> Action {
         ActionExecution::OpenUrl(url) => Action::OpenUrl(url.clone()),
         ActionExecution::AdjustBrightness(delta) => Action::AdjustBrightness(*delta),
         ActionExecution::AdjustVolume(delta) => Action::AdjustVolume(*delta),
+        ActionExecution::Native(action) => Action::RunNative(*action),
     }
 }
 
@@ -173,7 +174,7 @@ impl Command for SystemActionsCommand {
                     action: map_execution_to_action(&setting.execution),
                     icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::GEAR),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 }];
             }
         } else if let Some(action_id) = result_id.strip_prefix("system-actions:action:") {
@@ -184,7 +185,7 @@ impl Command for SystemActionsCommand {
                     action: map_execution_to_action(&action.execution),
                     icon: Icon::Svg(action.icon),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 }];
             }
         }
@@ -256,7 +257,8 @@ mod tests {
                 }
                 ActionExecution::OpenUrl(_) => {}
                 ActionExecution::AdjustBrightness(_)
-                | ActionExecution::AdjustVolume(_) => {}
+                | ActionExecution::AdjustVolume(_)
+                | ActionExecution::Native(_) => {}
             }
         }
         for setting in get_system_settings() {
@@ -274,6 +276,65 @@ mod tests {
                 | ActionExecution::AdjustVolume(_) => {
                     panic!("setting {} must open a page, not adjust hardware", setting.id)
                 }
+                ActionExecution::Native(_) => {}
+            }
+        }
+    }
+
+    /// A Windows shell action must survive `cmd /c`.
+    ///
+    /// `cmd.exe` does not treat a backslash as an escape character, so a
+    /// PowerShell one-liner written with `\"` around the script reached
+    /// PowerShell with literal backslashes and mangled quotes, and none
+    /// of the eleven affected actions ran at all. Any remaining shell
+    /// action must avoid embedded double quotes.
+    ///
+    /// This is Windows-only because macOS and Linux run through `/bin/sh`,
+    /// where the same quoting is fine.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_shell_actions_avoid_embedded_double_quotes() {
+        for action in get_system_actions() {
+            if let ActionExecution::RunShell(cmd) = &action.execution {
+                assert!(
+                    !cmd.contains('"'),
+                    "action {} embeds a double quote, which cmd /c will mangle: {cmd}",
+                    action.id
+                );
+            }
+        }
+        for setting in get_system_settings() {
+            if let ActionExecution::RunShell(cmd) = &setting.execution {
+                assert!(
+                    !cmd.contains('"'),
+                    "setting {} embeds a double quote, which cmd /c will mangle: {cmd}",
+                    setting.id
+                );
+            }
+        }
+    }
+
+    /// Every action must do something, not report a no-op as done.
+    ///
+    /// A `RunShell` action that Windows cannot run returns success while
+    /// doing nothing, which showed the user a success toast. Native
+    /// actions report a real error instead.
+    #[test]
+    fn every_action_is_backed_by_an_implementation() {
+        for action in get_system_actions() {
+            match &action.execution {
+                ActionExecution::RunShell(cmd) => {
+                    assert!(!cmd.trim().is_empty(), "{} is empty", action.id)
+                }
+                ActionExecution::OpenUrl(url) => {
+                    assert!(!url.trim().is_empty(), "{} is empty", action.id)
+                }
+                ActionExecution::Native(native) => {
+                    // A native action must round-trip through the UI layer.
+                    let mapped = map_execution_to_action(&action.execution);
+                    assert_eq!(mapped, Action::RunNative(*native));
+                }
+                _ => {}
             }
         }
     }

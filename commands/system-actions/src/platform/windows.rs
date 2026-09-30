@@ -7,34 +7,33 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Dismiss Notifications",
             keywords: "dismiss notifications close clear banners alerts action center",
             icon: phosphor_svgs::style::regular::BELL_SLASH,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"[Windows.UI.Notifications.ToastNotificationManager]::History.Clear()\"".into(),
-            ),
+            // There is no Win32 API that clears the Action Center.
+            // ToastNotificationManager.History.Clear() only removes the
+            // calling app's own toasts, so from an unpackaged desktop app
+            // it cannot clear the user's notifications at all. Open the
+            // page where they can do it instead.
+            execution: ActionExecution::OpenUrl("ms-settings:notifications".into()),
         },
         SystemActionDef {
             id: "eject-all-disks",
             title: "Eject All Disks",
             keywords: "eject all disks unmount usb drives volumes removable safely remove",
             icon: phosphor_svgs::style::regular::EJECT,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"$vols = Get-CimInstance Win32_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 2 -and $_.DriveLetter }; foreach ($v in $vols) { (New-Object -ComObject Shell.Application).Namespace(17).ParseName($v.DriveLetter).InvokeVerb('Eject') }\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::EjectRemovableDisks),
         },
         SystemActionDef {
             id: "lock",
             title: "Lock Screen",
             keywords: "lock screen display security sleep workstation",
             icon: phosphor_svgs::style::regular::LOCK,
-            execution: ActionExecution::RunShell("rundll32.exe user32.dll,LockWorkStation".into()),
+            execution: ActionExecution::Native(corvo_core::NativeAction::LockWorkstation),
         },
         SystemActionDef {
             id: "sleep",
             title: "Sleep",
             keywords: "sleep suspend system power stand by",
             icon: phosphor_svgs::style::regular::MOON,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::Suspend),
         },
         SystemActionDef {
             id: "restart",
@@ -62,27 +61,21 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Empty Recycle Bin",
             keywords: "empty trash recycle bin delete cleanup",
             icon: phosphor_svgs::style::regular::TRASH,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"Clear-RecycleBin -Force -ErrorAction Stop\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::EmptyRecycleBin),
         },
         SystemActionDef {
             id: "toggle-appearance",
             title: "Toggle System Appearance",
             keywords: "toggle dark mode light mode appearance theme switch personalize",
             icon: phosphor_svgs::style::regular::SUN,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"$p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize'; $v=(Get-ItemProperty -Path $p -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme; $n=if($v -eq 1){0}else{1}; Set-ItemProperty -Path $p -Name AppsUseLightTheme -Value $n; Set-ItemProperty -Path $p -Name SystemUsesLightTheme -Value $n\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::ToggleDarkMode),
         },
         SystemActionDef {
             id: "toggle-mute",
             title: "Toggle Mute",
             keywords: "toggle mute audio sound volume silence",
             icon: phosphor_svgs::style::regular::SPEAKER_SLASH,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]173)\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::ToggleMute),
         },
         SystemActionDef {
             id: "volume-up",
@@ -117,52 +110,45 @@ pub fn get_system_actions() -> Vec<SystemActionDef> {
             title: "Next Track",
             keywords: "next track song forward music skip player audio",
             icon: phosphor_svgs::style::regular::SKIP_FORWARD,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]176)\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::MediaNextTrack),
         },
         SystemActionDef {
             id: "open-trash",
             title: "Open Trash",
             keywords: "open trash recycle bin folder deleted items",
             icon: phosphor_svgs::style::regular::TRASH,
-            execution: ActionExecution::RunShell("explorer.exe shell:RecycleBinFolder".into()),
+            // explorer.exe exits non-zero even when it opened the
+            // window, which surfaced as a false error. The shell
+            // namespace moniker reports success honestly.
+            execution: ActionExecution::Native(corvo_core::NativeAction::OpenRecycleBin),
         },
         SystemActionDef {
             id: "play-pause",
             title: "Play / Pause",
             keywords: "play pause music audio song player toggle",
             icon: phosphor_svgs::style::regular::PLAY_PAUSE,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]179)\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::MediaPlayPause),
         },
         SystemActionDef {
             id: "previous-track",
             title: "Previous Track",
             keywords: "previous track song back music rewind player audio",
             icon: phosphor_svgs::style::regular::SKIP_BACK,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject WScript.Shell).SendKeys([char]177)\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::MediaPreviousTrack),
         },
         SystemActionDef {
             id: "hide-apps",
             title: "Hide All Applications",
             keywords: "hide all minimize desktop show desktop",
             icon: phosphor_svgs::style::regular::EYE_SLASH,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"(New-Object -ComObject Shell.Application).MinimizeAll()\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::ShowDesktop),
         },
         SystemActionDef {
             id: "quit-all",
             title: "Quit All Applications",
             keywords: "quit all applications apps terminate close everything",
             icon: phosphor_svgs::style::regular::X_CIRCLE,
-            execution: ActionExecution::RunShell(
-                "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -notin @('corvo','explorer') } | ForEach-Object { $_.CloseMainWindow() }\"".into(),
-            ),
+            execution: ActionExecution::Native(corvo_core::NativeAction::QuitAllApplications),
         },
     ]
 }

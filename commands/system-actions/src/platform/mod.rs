@@ -4,6 +4,10 @@ pub enum ActionExecution {
     OpenUrl(String),
     AdjustBrightness(f32),
     AdjustVolume(f32),
+    /// A platform API call. Preferred over `RunShell` when the platform
+    /// has a real API: a shell one-liner has to survive another layer's
+    /// quoting rules, and on Windows it did not.
+    Native(corvo_core::NativeAction),
 }
 
 pub struct SystemActionDef {
