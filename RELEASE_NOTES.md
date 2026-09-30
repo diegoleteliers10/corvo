@@ -1,3 +1,25 @@
+# Corvo 0.3.3
+
+This release repairs the software update relaunch on macOS. Every update
+refused to install with a signature error, even when the downloaded app
+was correctly signed.
+
+- Relaunch reported "Cannot read the macOS app code requirement" on
+  every attempt. `codesign -dr -` sends the `designated =>` line to
+  stdout and the `Executable=` line to stderr. Corvo read stderr only, so
+  it never found a requirement and rejected its own download before it
+  compared anything. The reader checks both streams now.
+- The error was raised ahead of the identity comparison, so it hid the
+  real state of the update and gave nothing to act on.
+- A local build signed ad-hoc has no identifier, and the tool comments
+  the designated line out with a leading `# `. That marker is handled
+  too, so an unsigned build reports an unexpected signing identity
+  instead of a read failure.
+
+The update card also grew past its own rounded edge when the status
+message was long. The status row now fills the card and the action
+button keeps its width.
+
 # Corvo 0.3.2
 
 This release makes 0.3.1 installable on Windows. The 0.3.1 build fails to
