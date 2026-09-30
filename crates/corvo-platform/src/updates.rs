@@ -774,21 +774,44 @@ fn macos_has_adhoc_signature(app: &Path) -> Result<bool, UpdateError> {
         .any(|line| line.trim() == "Signature=adhoc"))
 }
 
+/// Reads the designated requirement of a signed app bundle.
+///
+/// `codesign -dr -` splits its output across both streams: the
+/// `designated =>` line goes to stdout, while the `Executable=` line goes
+/// to stderr. Reading stderr alone finds no requirement, so every relaunch
+/// of a correctly signed build failed with "Cannot read the macOS app code
+/// requirement". The version that moved the scripts from `cmd /c` to a
+/// direct call exposed this.
+///
+/// An ad-hoc signature has no identifier, so the tool comments the line
+/// out with a leading `# `. The caller rejects an ad-hoc build through
+/// `macos_has_adhoc_signature`, which reports the real reason, so the
+/// marker is stripped here rather than turned into a read failure.
 #[cfg(target_os = "macos")]
 fn macos_designated_requirement(app: &Path) -> Result<String, UpdateError> {
+    const PREFIX: &str = "designated => ";
     let output = Command::new("codesign")
         .args(["-dr", "-"])
         .arg(app)
         .output()?;
-    let requirement = String::from_utf8_lossy(&output.stderr)
-        .lines()
-        .find_map(|line| line.strip_prefix("designated => ").map(str::to_owned));
-    if !output.status.success() || requirement.is_none() {
-        return Err(UpdateError::SignatureVerificationFailed(
+    // Search stdout first, then stderr, because some macOS releases
+    // print the requirement to stderr instead.
+    let requirement = [&output.stdout, &output.stderr].into_iter().find_map(|stream| {
+        String::from_utf8_lossy(stream).lines().find_map(|line| {
+            line.trim_start()
+                .strip_prefix('#')
+                .unwrap_or(line.trim_start())
+                .trim_start()
+                .strip_prefix(PREFIX)
+                .map(str::to_owned)
+        })
+    });
+    match requirement {
+        Some(requirement) if output.status.success() => Ok(requirement),
+        _ => Err(UpdateError::SignatureVerificationFailed(
             "Cannot read the macOS app code requirement".into(),
-        ));
+        )),
     }
-    Ok(requirement.unwrap_or_default())
 }
 
 #[cfg(target_os = "windows")]
@@ -1076,6 +1099,84 @@ rm -f "$old"
         .spawn()?;
 
     std::process::exit(0);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::macos_designated_requirement;
+    use std::path::Path;
+
+    /// `codesign -dr -` writes the requirement to stdout and the
+    /// `Executable=` line to stderr. A reader that looks at stderr alone
+    /// reports that it cannot read the code requirement, so every relaunch
+    /// of a correctly signed build fails. This runs against the app that
+    /// is actually installed, so the assertion holds only when the parsing
+    /// matches the real tool output.
+    #[test]
+    fn reads_the_requirement_of_the_installed_app() {
+        let app = Path::new("/Applications/Corvo.app");
+        if !app.exists() {
+            return;
+        }
+        let requirement = macos_designated_requirement(app)
+            .expect("the installed app must have a readable requirement");
+        assert!(
+            requirement.starts_with("identifier \"sh.corvo.corvo\""),
+            "unexpected requirement: {requirement}"
+        );
+    }
+
+    /// The requirement read from the installed app has to match the one
+    /// the release pipeline signs with, or every update is rejected as an
+    /// unexpected signing identity.
+    #[test]
+    fn installed_requirement_matches_the_release_asset() {
+        let app = Path::new("/Applications/Corvo.app");
+        if !app.exists() {
+            return;
+        }
+        let expected = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/macos-signing-requirement.txt"
+        ))
+        .trim();
+        let requirement = macos_designated_requirement(app).expect("requirement");
+        assert_eq!(requirement, expected);
+    }
+
+    /// An ad-hoc signature has no identifier, so `codesign` comments the
+    /// designated line out with a leading `# `. The requirement still has
+    /// to parse, because the caller reads it before it checks for an ad-hoc
+    /// build. Without stripping the marker, a local build reported "cannot
+    /// read the code requirement" instead of "unexpected signing identity",
+    /// which points the user at the wrong problem.
+    #[test]
+    fn reads_the_requirement_of_an_adhoc_build() {
+        use std::process::Command as Cmd;
+
+        let dir = std::env::temp_dir().join("corvo-adhoc-requirement-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let bundle = dir.join("Adhoc.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).expect("bundle layout");
+        std::fs::copy("/bin/echo", bundle.join("Contents/MacOS/adhoc")).expect("binary");
+        let signed = Cmd::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&bundle)
+            .output()
+            .expect("codesign runs");
+        assert!(
+            signed.status.success(),
+            "could not ad-hoc sign the test bundle: {}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+
+        let requirement = macos_designated_requirement(&bundle).expect("requirement");
+        assert!(
+            requirement.starts_with("cdhash "),
+            "an ad-hoc requirement names a cdhash: {requirement}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Cleans up any leftover `.old` executables or staging bundles on startup.

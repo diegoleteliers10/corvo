@@ -7811,6 +7811,9 @@ impl SettingsView {
                         .px_3()
                         .py_1p5()
                         .rounded_md()
+                        // Keep the label whole when the status text beside
+                        // it needs the room.
+                        .flex_shrink_0()
                         .bg(rgb(COLOR_ACCENT))
                         .text_size(px(12.0))
                         .font_weight(FontWeight::MEDIUM)
@@ -8015,6 +8018,11 @@ impl SettingsView {
                             .flex()
                             .items_center()
                             .justify_between()
+                            // Without a full width this row sizes to its
+                            // content, so a long status message makes it
+                            // wider than the card and pushes the action
+                            // button outside the card's rounded edge.
+                            .w_full()
                             .child(
                                 div()
                                     .flex()
