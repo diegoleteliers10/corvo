@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -82,12 +82,26 @@ pub fn parse_hotkey_string(hotkey: &str) -> Option<(Modifiers, Code)> {
             "ctrl" | "control" => mods |= Modifiers::CONTROL,
             "alt" | "opt" | "option" => mods |= Modifiers::ALT,
             "shift" => mods |= Modifiers::SHIFT,
-            "cmd" | "command" | "super" | "win" => mods |= Modifiers::SUPER,
+            // `cmd` is the primary modifier: Command on macOS, Control
+            // elsewhere. `super`, `win`, and `meta` always mean the
+            // physical Windows or Super key.
+            "cmd" | "command" => {
+                if cfg!(target_os = "macos") {
+                    mods |= Modifiers::SUPER;
+                } else {
+                    mods |= Modifiers::CONTROL;
+                }
+            }
+            "super" | "win" | "meta" => mods |= Modifiers::SUPER,
 
             // Navigation and editing
             "space" | " " => target_code = Some(Code::Space),
             "↵" | "enter" | "return" => target_code = Some(Code::Enter),
-            "⌫" | "backspace" | "delete" => target_code = Some(Code::Backspace),
+            "⌫" | "backspace" => target_code = Some(Code::Backspace),
+            // Delete is a separate key from Backspace on Windows and
+            // Linux. Collapsing the two made Ctrl+Delete fire the
+            // delete-to-start-of-line binding.
+            "delete" | "del" | "⌦" | "forwarddelete" => target_code = Some(Code::Delete),
             "⎋" | "esc" | "escape" => target_code = Some(Code::Escape),
             "⇥" | "tab" => target_code = Some(Code::Tab),
             "←" | "left" | "arrowleft" | "arrow_left" => target_code = Some(Code::ArrowLeft),
@@ -394,11 +408,7 @@ pub fn setup_with_bindings(
 pub fn setup(tx: smol::channel::Sender<()>) -> Option<HotkeyGuard> {
     let (intent_tx, intent_rx) = smol::channel::unbounded::<HotkeyIntent>();
     let guard = setup_with_bindings(
-        if cfg!(target_os = "macos") {
-            "cmd+space"
-        } else {
-            "alt+space"
-        },
+        &corvo_config::default_launcher_hotkey(),
         Vec::new(),
         intent_tx,
     )?;
@@ -437,5 +447,40 @@ mod tests {
         let (mods, code) = parse_hotkey_string("f12").expect("f12");
         assert!(mods.is_empty());
         assert_eq!(code, Code::F12);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn cmd_means_the_platform_primary_modifier() {
+        // `cmd` is the primary modifier. Mapping it to SUPER everywhere
+        // bound the Windows key on Windows and the Super key on Linux, so
+        // none of the launcher's shortcuts fired.
+        let (mods, _) = parse_hotkey_string("cmd+k").expect("cmd+k");
+        if cfg!(target_os = "macos") {
+            assert!(mods.contains(Modifiers::SUPER), "macOS uses Command");
+        } else {
+            assert!(
+                mods.contains(Modifiers::CONTROL),
+                "Windows and Linux use Control"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn super_is_always_the_physical_key() {
+        let (mods, _) = parse_hotkey_string("super+space").expect("super+space");
+        assert!(mods.contains(Modifiers::SUPER));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn delete_is_not_backspace() {
+        // Delete and Backspace are different keys on Windows and Linux.
+        // Collapsing them made Ctrl+Delete run delete-to-start-of-line.
+        let (_, code) = parse_hotkey_string("ctrl+delete").expect("ctrl+delete");
+        assert_eq!(code, Code::Delete);
+        let (_, code) = parse_hotkey_string("ctrl+backspace").expect("ctrl+backspace");
+        assert_eq!(code, Code::Backspace);
     }
 }

@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+corvo-config = { workspace = true }
 directories = { workspace = true }
 global-hotkey = "0.8"
 hex = { workspace = true }

@@ -13,7 +13,9 @@ use std::sync::Arc;
 pub const DEFAULT_MAX_RESULTS: usize = 20;
 
 pub mod search;
+pub mod shortcut;
 pub use search::search_match_score;
+pub use shortcut::Primary;
 
 pub use phosphor_svgs;
 
@@ -50,6 +52,39 @@ pub struct SearchResult {
     pub accessory: Option<String>,
 }
 
+/// A system operation performed through the platform's own API.
+///
+/// Each variant maps to one documented call on at least one platform. A
+/// platform with no implementation returns `Unsupported` rather than
+/// silently doing nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeAction {
+    /// Lock the workstation.
+    LockWorkstation,
+    /// Suspend to memory.
+    Suspend,
+    /// Empty every Recycle Bin on every drive.
+    EmptyRecycleBin,
+    /// Open the Recycle Bin window.
+    OpenRecycleBin,
+    /// Minimize every window, showing the desktop.
+    ShowDesktop,
+    /// Ask every other application to close.
+    QuitAllApplications,
+    /// Switch the system between the light and dark theme.
+    ToggleDarkMode,
+    /// Mute or unmute the default output device.
+    ToggleMute,
+    /// Skip to the next track in the active media player.
+    MediaNextTrack,
+    /// Go back to the previous track.
+    MediaPreviousTrack,
+    /// Play or pause the active media player.
+    MediaPlayPause,
+    /// Safely eject every removable drive.
+    EjectRemovableDisks,
+}
+
 /// What the launcher does after the user picks a result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -75,6 +110,13 @@ pub enum Action {
     CopyImage(PathBuf),
     PasteImage(PathBuf),
     RunShell(String),
+    /// A system operation the platform performs through its own API.
+    ///
+    /// Commands use this instead of a shell string when the platform has a
+    /// real API for the job. A shell one-liner has to survive the quoting
+    /// rules of whatever runs it, and the Windows one-liners did not: every
+    /// embedded quote was mangled before PowerShell saw it.
+    RunNative(NativeAction),
     RunProcess {
         program: String,
         args: Vec<String>,
@@ -96,8 +138,9 @@ pub enum Action {
     AdjustVolume(f32),
 }
 
-/// One entry of a result's actions menu, the ⌘K surface. `action` runs
-/// as if the command had returned it from `execute`.
+/// One entry of a result's actions menu, the surface the primary modifier
+/// plus K opens. `action` runs as if the command had returned it from
+/// `execute`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandAction {
     pub id: String,
@@ -107,8 +150,11 @@ pub struct CommandAction {
     /// Menu section the action belongs to; sections render apart with a
     /// divider between them.
     pub group: ActionGroup,
-    /// Display hint for the shortcut that triggers the action, for
-    /// example "↵" or "⌘↵".
+    /// Shortcut that triggers the action, written with `shortcut` tokens,
+    /// for example "enter" or "cmd+enter". `cmd` means the platform's
+    /// primary modifier, so the same value renders as Command+Enter on
+    /// macOS and Ctrl+Enter on Windows and Linux. Pass `None` to draw no
+    /// hint.
     pub hotkey: Option<&'static str>,
 }
 
@@ -265,8 +311,8 @@ pub trait Command: Send + Sync {
         result_id: &str,
         ctx: &ExecutionContext,
     ) -> Result<Action, CommandError>;
-    /// The ⌘K actions menu for one result. Static and cheap; the UI
-    /// calls it when the menu opens.
+    /// The actions menu for one result. Static and cheap; the UI calls it
+    /// when the menu opens.
     fn actions(&self, _result_id: &str) -> Vec<CommandAction> {
         Vec::new()
     }
