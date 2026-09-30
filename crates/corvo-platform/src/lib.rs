@@ -555,7 +555,6 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 /// implementation reports `Unsupported` rather than doing nothing, so a
 /// missing capability is visible instead of silent.
 pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<String> {
-    use corvo_core::NativeAction;
     #[cfg(target_os = "windows")]
     {
         use corvo_core::NativeAction as A;
@@ -576,6 +575,8 @@ pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<Str
     }
     #[cfg(not(target_os = "windows"))]
     {
+        use corvo_core::NativeAction;
+
         // macOS and Linux express these actions as AppleScript or as
         // desktop-specific commands, which the command layer already
         // sends as a shell string.

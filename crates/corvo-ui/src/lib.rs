@@ -1511,13 +1511,18 @@ impl Launcher {
                 // window region set now would be one size behind. Re-clip
                 // on the next tick, once the resize has landed.
                 #[cfg(target_os = "windows")]
-                cx.spawn(async move |this, cx| {
-                    this.update(cx, |_launcher, window, _| {
-                        apply_windows_launcher_region(window);
+                {
+                    let hwnd = windows_hwnd(window);
+                    let radius =
+                        launcher_corner_radius() * window.scale_factor();
+                    cx.spawn(async move |this, cx| {
+                        this.update(cx, |_launcher, _| {
+                            corvo_platform::set_launcher_window_region(hwnd, radius);
+                        })
+                        .ok();
                     })
-                    .ok();
-                })
-                .detach();
+                    .detach();
+                }
             }
         }
     }
@@ -7836,23 +7841,25 @@ fn file_manager_label(prefix: &str) -> String {
 /// icon path already swaps the channels; reuse it here so both surfaces
 /// decode the same way.
 fn file_preview_image(path: std::path::PathBuf) -> impl IntoElement {
+    // A Windows icon is decoded on a worker thread, so the first frame
+    // after a cache miss has no pixels yet. Draw the cached one when it
+    // is there, and ask for a decode on every miss.
     #[cfg(target_os = "windows")]
-    {
-        match windows_cached_render_icon(&path) {
-            Some(decoded) => {
-                return img(decoded)
-                    .max_w_full()
-                    .max_h(px(300.0))
-                    .rounded_lg()
-                    .into_any_element();
-            }
-            None => {
-                // Decode on a worker thread, then redraw when it lands.
-                windows_request_render_icon(&path);
-            }
-        }
+    if let Some(decoded) = windows_cached_render_icon(&path) {
+        return img(decoded)
+            .max_w_full()
+            .max_h(px(300.0))
+            .rounded_lg()
+            .into_any_element();
+    } else {
+        windows_request_render_icon(&path);
     }
-    img(path).max_w_full().max_h(px(300.0)).rounded_lg()
+
+    img(path)
+        .max_w_full()
+        .max_h(px(300.0))
+        .rounded_lg()
+        .into_any_element()
 }
 
 /// Renders a result accessory for display.
@@ -9103,18 +9110,25 @@ fn set_windows_launcher_visible(window: &Window, visible: bool) {
 /// not follow the window bounds.
 #[cfg(target_os = "windows")]
 fn apply_windows_launcher_region(window: &Window) {
+    corvo_platform::set_launcher_window_region(
+        windows_hwnd(window),
+        launcher_corner_radius() * window.scale_factor(),
+    );
+}
+
+/// The Win32 handle behind a GPUI window, or 0 when the platform window
+/// is not a Win32 one.
+#[cfg(target_os = "windows")]
+fn windows_hwnd(window: &Window) -> isize {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
+        return 0;
     };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    corvo_platform::set_launcher_window_region(
-        handle.hwnd.get(),
-        launcher_corner_radius() * window.scale_factor(),
-    );
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+        _ => 0,
+    }
 }
 
 fn open_launcher(cx: &mut App) {

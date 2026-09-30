@@ -243,10 +243,9 @@ fn msi_record_for_shortcut(path: &Path) -> PlatformResult<Option<MsiUninstallRec
     }
     let path_bytes = path.to_string_lossy().as_bytes().to_vec();
     let encoded_path = base64_encode(&path_bytes);
-    let script = format!(
-        r#"
+    let script = r#"
 $ErrorActionPreference = 'Stop'
-$shortcutPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}'))
+$shortcutPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$CorvoShortcutPath'))
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $target = [Environment]::ExpandEnvironmentVariables([string]$shortcut.TargetPath)
@@ -299,9 +298,8 @@ $records = @(
     }
 )
 ConvertTo-Json -InputObject $records -Compress -Depth 3
-"#,
-        encoded_path
-    );
+"#
+    .replace("$CorvoShortcutPath", &encoded_path);
     let output = powershell_output(&script)?;
     let records = parse_json_array(&output, "MSI uninstall records")?;
     let mut records = records
@@ -387,8 +385,7 @@ fn quiet_uninstall_record_for_shortcut(
         return Ok(None);
     }
     let encoded_path = base64_encode(path.to_string_lossy().as_bytes());
-    let script = format!(
-        r#"
+    let script = r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -435,7 +432,7 @@ public static class CorvoUninstallInterop {
     }
 }
 '@
-$shortcutPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}'))
+$shortcutPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$CorvoShortcutPath'))
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $target = [Environment]::ExpandEnvironmentVariables([string]$shortcut.TargetPath)
@@ -494,9 +491,8 @@ $matches = @(
     }
 )
 ConvertTo-Json -InputObject $matches -Compress -Depth 4
-"#,
-        encoded_path
-    );
+"#
+    .replace("$CorvoShortcutPath", &encoded_path);
     let output = powershell_output(&script)?;
     let records = parse_json_array(&output, "Win32 uninstall records")?
         .into_iter()
@@ -844,12 +840,6 @@ unsafe extern "system" {
     ) -> i32;
     fn ShowWindowAsync(window: isize, command: i32) -> i32;
     fn IsIconic(window: isize) -> i32;
-}
-
-#[repr(C)]
-struct WinPoint {
-    x: i32,
-    y: i32,
 }
 
 #[repr(C)]
@@ -1310,8 +1300,6 @@ fn process_id_for_window_title(name: &str) -> Option<u32> {
 
 /// The executable name of a process, without its extension.
 fn window_process_name(pid: u32) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     #[allow(non_snake_case)]
     #[link(name = "kernel32")]
@@ -1719,7 +1707,7 @@ fn default_endpoint_volume() -> PlatformResult<ComPtr> {
         let mut device = 0isize;
         let hr = unsafe {
             let get_default: unsafe extern "system" fn(isize, i32, i32, *mut isize) -> i32 =
-                std::mem::transmute(device_vtbl.get_default_audio_endpoint);
+                std::mem::transmute((*device_vtbl).get_default_audio_endpoint);
             get_default(enumerator.0, ERENDER, ECONSOLE, &mut device)
         };
         if hr != 0 || device == 0 {
@@ -1735,7 +1723,7 @@ fn default_endpoint_volume() -> PlatformResult<ComPtr> {
                 u32,
                 isize,
                 *mut isize,
-            ) -> i32 = std::mem::transmute(vtbl.activate);
+            ) -> i32 = std::mem::transmute((*vtbl).activate);
             activate(
                 device.0,
                 &IID_AUDIO_ENDPOINT_VOLUME,
@@ -2957,8 +2945,8 @@ pub fn toggle_dark_mode() -> PlatformResult<String> {
         (ok == ERROR_SUCCESS && kind == REG_DWORD).then_some(value)
     };
     let write = |key: isize, name: &[u16], value: u32| {
-        let mut raw = value;
-        unsafe {
+        let raw = value;
+        let ok = unsafe {
             RegSetValueExW(
                 key,
                 name.as_ptr(),
@@ -2967,7 +2955,8 @@ pub fn toggle_dark_mode() -> PlatformResult<String> {
                 &raw as *const u32 as *const u8,
                 std::mem::size_of::<u32>() as u32,
             )
-        } == ERROR_SUCCESS
+        };
+        ok == ERROR_SUCCESS
     };
 
     // `SystemUsesLightTheme` is the shell's own setting. The old script
@@ -3014,7 +3003,7 @@ fn send_media_key(virtual_key: u16) -> PlatformResult<()> {
     #[allow(non_snake_case)]
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn SendInput(count: u32, inputs: *const KeybdInputRecord, size: i32) -> u32;
+        fn SendInput(count: u32, inputs: *const InputRecord, size: i32) -> u32;
     }
 
     const INPUT_KEYBOARD: u32 = 1;
@@ -3117,8 +3106,6 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
     const CR_SUCCESS: u32 = 0;
     const CR_NO_SUCH_DEVNODE: u32 = 0x0000_000D;
     const INVALID_HANDLE_VALUE: isize = -1;
-    const CM_DEVCAP_SURPRISEREMOVALOK: u32 = 0x0000_0080;
-    const CM_DRP_CAPABILITIES: u32 = 0x0000_0002;
     const CM_LOCATE_DEVNODE_NORMAL: u32 = 0;
     const MAX_PATH: u32 = 260;
     const DRIVE_REMOVABLE: u32 = 2;
@@ -3181,15 +3168,6 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
         fn CM_Locate_DevNodeW(
             dev_inst: *mut u32,
             device_id: *const u16,
-            flags: u32,
-        ) -> u32;
-        fn CM_Get_Parent(dev_inst: *mut u32, child: u32, flags: u32) -> u32;
-        fn CM_Get_DevNode_Registry_PropertyW(
-            dev_inst: u32,
-            property: u32,
-            kind: *mut u32,
-            buffer: *mut u8,
-            length: *mut u32,
             flags: u32,
         ) -> u32;
         fn CM_Request_Device_EjectW(
