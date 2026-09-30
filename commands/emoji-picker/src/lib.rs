@@ -1128,7 +1128,7 @@ impl Command for EmojiPickerCommand {
                 subtitle: Some("Commands".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
                 score: 1000,
-                accessory: Some("⌃⌘Space".into()),
+                accessory: Some("cmd+alt+space".into()),
             }];
         }
 
@@ -1143,7 +1143,7 @@ impl Command for EmojiPickerCommand {
                 subtitle: Some("Commands".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
                 score: score + 120,
-                accessory: Some("⌃⌘Space".into()),
+                accessory: Some("cmd+alt+space".into()),
             });
         }
         results
@@ -1172,7 +1172,7 @@ impl Command for EmojiPickerCommand {
                     action: Action::ShowToast("Search Emoji & Symbols".into()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 },
             ];
         }
@@ -1189,7 +1189,7 @@ impl Command for EmojiPickerCommand {
                 action: Action::PasteText(glyph.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             CommandAction {
                 id: "emoji-picker-action:copy".into(),
@@ -1197,7 +1197,7 @@ impl Command for EmojiPickerCommand {
                 action: Action::Copy(glyph.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

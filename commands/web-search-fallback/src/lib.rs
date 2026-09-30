@@ -58,7 +58,7 @@ impl Command for WebSearchFallbackCommand {
                 action: Action::OpenUrl(url.clone()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_UP_RIGHT),
                 group: corvo_core::ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             corvo_core::CommandAction {
                 id: "web-search-fallback:copy".into(),
@@ -66,7 +66,7 @@ impl Command for WebSearchFallbackCommand {
                 action: Action::ShowToast(format!("copy:{url}")),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                 group: corvo_core::ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

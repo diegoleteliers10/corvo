@@ -85,7 +85,7 @@ impl Command for CalculatorCommand {
                 action: Action::Copy(value.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             }];
         }
 
@@ -96,7 +96,7 @@ impl Command for CalculatorCommand {
                 action: Action::Copy(value.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             CommandAction {
                 id: "calculator:paste".into(),
@@ -104,7 +104,7 @@ impl Command for CalculatorCommand {
                 action: Action::PasteText(value.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

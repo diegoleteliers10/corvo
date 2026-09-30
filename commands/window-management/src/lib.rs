@@ -21,28 +21,28 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "Left Half",
         keywords: "left half tile window 50% split",
         icon: phosphor_svgs::style::regular::SIDEBAR_SIMPLE,
-        hotkey: Some("⌥⌘←"),
+        hotkey: Some("alt+cmd+←"),
     },
     WindowActionDef {
         id: "right-half",
         title: "Right Half",
         keywords: "right half tile window 50% split",
         icon: phosphor_svgs::style::regular::SIDEBAR_SIMPLE,
-        hotkey: Some("⌥⌘→"),
+        hotkey: Some("alt+cmd+→"),
     },
     WindowActionDef {
         id: "top-half",
         title: "Top Half",
         keywords: "top half tile window 50% split",
         icon: phosphor_svgs::style::regular::ROWS,
-        hotkey: Some("⌥⌘↑"),
+        hotkey: Some("alt+cmd+↑"),
     },
     WindowActionDef {
         id: "bottom-half",
         title: "Bottom Half",
         keywords: "bottom half tile window 50% split",
         icon: phosphor_svgs::style::regular::ROWS,
-        hotkey: Some("⌥⌘↓"),
+        hotkey: Some("alt+cmd+↓"),
     },
     // Thirds
     WindowActionDef {
@@ -50,35 +50,35 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "First Third",
         keywords: "first third left 33% tile window column",
         icon: phosphor_svgs::style::regular::COLUMNS,
-        hotkey: Some("⌃⌥D"),
+        hotkey: Some("ctrl+alt+D"),
     },
     WindowActionDef {
         id: "center-third",
         title: "Center Third",
         keywords: "center third middle 33% tile window column",
         icon: phosphor_svgs::style::regular::COLUMNS,
-        hotkey: Some("⌃⌥F"),
+        hotkey: Some("ctrl+alt+F"),
     },
     WindowActionDef {
         id: "last-third",
         title: "Last Third",
         keywords: "last third right 33% tile window column",
         icon: phosphor_svgs::style::regular::COLUMNS,
-        hotkey: Some("⌃⌥G"),
+        hotkey: Some("ctrl+alt+G"),
     },
     WindowActionDef {
         id: "first-two-thirds",
         title: "First Two Thirds",
         keywords: "first two thirds 66% wide left tile window",
         icon: phosphor_svgs::style::regular::COLUMNS,
-        hotkey: Some("⌃⌥E"),
+        hotkey: Some("ctrl+alt+E"),
     },
     WindowActionDef {
         id: "last-two-thirds",
         title: "Last Two Thirds",
         keywords: "last two thirds 66% wide right tile window",
         icon: phosphor_svgs::style::regular::COLUMNS,
-        hotkey: Some("⌃⌥T"),
+        hotkey: Some("ctrl+alt+T"),
     },
     // Quarters
     WindowActionDef {
@@ -86,28 +86,28 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "Top Left Quarter",
         keywords: "top left quarter 25% corner corner tile",
         icon: phosphor_svgs::style::regular::SQUARES_FOUR,
-        hotkey: Some("⌃⌥U"),
+        hotkey: Some("ctrl+alt+U"),
     },
     WindowActionDef {
         id: "top-right",
         title: "Top Right Quarter",
         keywords: "top right quarter 25% corner corner tile",
         icon: phosphor_svgs::style::regular::SQUARES_FOUR,
-        hotkey: Some("⌃⌥I"),
+        hotkey: Some("ctrl+alt+I"),
     },
     WindowActionDef {
         id: "bottom-left",
         title: "Bottom Left Quarter",
         keywords: "bottom left quarter 25% corner corner tile",
         icon: phosphor_svgs::style::regular::SQUARES_FOUR,
-        hotkey: Some("⌃⌥J"),
+        hotkey: Some("ctrl+alt+J"),
     },
     WindowActionDef {
         id: "bottom-right",
         title: "Bottom Right Quarter",
         keywords: "bottom right quarter 25% corner corner tile",
         icon: phosphor_svgs::style::regular::SQUARES_FOUR,
-        hotkey: Some("⌃⌥K"),
+        hotkey: Some("ctrl+alt+K"),
     },
     // Whole Screen & Centering
     WindowActionDef {
@@ -115,7 +115,7 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "Maximize",
         keywords: "maximize full zoom window 100% fullscreen",
         icon: phosphor_svgs::style::regular::ARROWS_OUT,
-        hotkey: Some("⌃⌥↵"),
+        hotkey: Some("ctrl+alt+enter"),
     },
     WindowActionDef {
         id: "almost-maximize",
@@ -129,14 +129,14 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "Center Window",
         keywords: "center window middle screen align",
         icon: phosphor_svgs::style::regular::FRAME_CORNERS,
-        hotkey: Some("⌥⌘C"),
+        hotkey: Some("alt+cmd+C"),
     },
     WindowActionDef {
         id: "restore",
         title: "Restore Previous Size",
         keywords: "restore previous window size undo revert frame",
         icon: phosphor_svgs::style::regular::ARROW_COUNTER_CLOCKWISE,
-        hotkey: Some("⌃⌥⌫"),
+        hotkey: Some("ctrl+alt+backspace"),
     },
     // Multi-Display
     WindowActionDef {
@@ -144,14 +144,14 @@ pub const WINDOW_ACTIONS: &[WindowActionDef] = &[
         title: "Move to Next Display",
         keywords: "next display monitor screen move window switch",
         icon: phosphor_svgs::style::regular::DESKTOP,
-        hotkey: Some("⌃⌥⌘→"),
+        hotkey: Some("ctrl+alt+cmd+→"),
     },
     WindowActionDef {
         id: "prev-display",
         title: "Move to Previous Display",
         keywords: "previous prev display monitor screen move window switch",
         icon: phosphor_svgs::style::regular::DESKTOP,
-        hotkey: Some("⌃⌥⌘←"),
+        hotkey: Some("ctrl+alt+cmd+←"),
     },
 ];
 
@@ -292,7 +292,7 @@ impl Command for WindowManagementCommand {
                     action: Action::TileWindow(format!("layout:{}", layout.id)),
                     icon: Icon::Svg(phosphor_svgs::style::regular::SQUARES_FOUR),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 }];
             }
         }
@@ -303,7 +303,7 @@ impl Command for WindowManagementCommand {
                 action: Action::TileWindow(action.id.to_string()),
                 icon: Icon::Svg(action.icon),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             }]
         } else {
             Vec::new()

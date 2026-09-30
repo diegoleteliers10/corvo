@@ -347,7 +347,7 @@ impl Command for KillProcessCommand {
                 },
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::STOP),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             CommandAction {
                 id: "kill-process:force-terminate".into(),
@@ -366,7 +366,7 @@ impl Command for KillProcessCommand {
                 action: Action::Copy(identity.pid.to_string()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

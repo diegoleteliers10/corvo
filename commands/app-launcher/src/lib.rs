@@ -205,24 +205,24 @@ impl Command for AppLauncherCommand {
         else {
             return Vec::new();
         };
-        let mut actions = vec![
-            CommandAction {
-                id: "app-launcher-action:open".into(),
-                label: "Open Application".into(),
-                action: Action::Open(path.clone()),
-                icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::APP_WINDOW),
-                group: ActionGroup::Primary,
-                hotkey: Some("↵"),
-            },
-            CommandAction {
+        let mut actions = vec![CommandAction {
+            id: "app-launcher-action:open".into(),
+            label: "Open Application".into(),
+            action: Action::Open(path.clone()),
+            icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::APP_WINDOW),
+            group: ActionGroup::Primary,
+            hotkey: Some("enter"),
+        }];
+        if can_reveal(&path) {
+            actions.push(CommandAction {
                 id: "app-launcher-action:reveal".into(),
-                label: "Show in Finder".into(),
-                action: Action::RunShell(format!("open -R \"{}\"", path.to_string_lossy())),
+                label: reveal_label().into(),
+                action: reveal_action(&path),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::FOLDER),
                 group: ActionGroup::Primary,
-                hotkey: Some("⌘↵"),
-            },
-        ];
+                hotkey: Some(reveal_hotkey()),
+            });
+        }
         if corvo_platform::supports_app_uninstall_path(&path) {
             actions.push(CommandAction {
                 id: "app-launcher-action:uninstall".into(),
@@ -233,11 +233,59 @@ impl Command for AppLauncherCommand {
                 },
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TRASH),
                 group: ActionGroup::Destructive,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             });
         }
         actions
     }
+}
+
+/// A Start app id has no file on disk, so there is nothing to reveal.
+fn can_reveal(path: &std::path::Path) -> bool {
+    !path.to_string_lossy().starts_with("shell:AppsFolder\\")
+}
+
+/// Reveal runs the secondary action, which the launcher binds to the
+/// platform's primary modifier plus Enter. Written once and translated
+/// when drawn, so Windows and Linux read `Ctrl+Enter`.
+fn reveal_hotkey() -> &'static str {
+    "cmd+enter"
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_label() -> &'static str {
+    "Show in Finder"
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_label() -> &'static str {
+    "Show in Explorer"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_label() -> &'static str {
+    "Show in Files"
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_action(path: &std::path::Path) -> Action {
+    Action::RunShell(format!("open -R \"{}\"", path.to_string_lossy()))
+}
+
+/// `explorer /select` highlights the file and opens its folder in one step.
+#[cfg(target_os = "windows")]
+fn reveal_action(path: &std::path::Path) -> Action {
+    Action::RunShell(format!(
+        "explorer.exe /select,\"{}\"",
+        path.to_string_lossy()
+    ))
+}
+
+/// No file manager on Linux takes a reveal argument, so open the folder.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_action(path: &std::path::Path) -> Action {
+    let folder = path.parent().unwrap_or(path);
+    Action::RunShell(format!("xdg-open \"{}\"", folder.to_string_lossy()))
 }
 
 fn app_name_for_path(path: &std::path::Path) -> String {
@@ -589,5 +637,55 @@ mod tests {
     fn query_with_no_match_is_empty() {
         let apps = vec![app("Safari", "/Safari")];
         assert!(rank(&apps, "zzz", &HashMap::new(), &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn reveal_is_hidden_for_start_apps() {
+        // A Start app id has no file on disk, so a file manager cannot
+        // reveal it. The action must not appear rather than fail at run
+        // time.
+        assert!(!can_reveal(std::path::Path::new(
+            r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+        )));
+        assert!(can_reveal(std::path::Path::new(
+            r"C:\Program Files\7-Zip\7zFM.exe"
+        )));
+    }
+
+    #[test]
+    fn reveal_action_targets_the_file_manager() {
+        let path = std::path::Path::new(r"C:\Program Files\7-Zip\7zFM.exe");
+        let action = reveal_action(path);
+        let Action::RunShell(command) = action else {
+            panic!("reveal must run a shell command");
+        };
+        assert!(command.contains("7zFM.exe"), "got {command}");
+        #[cfg(target_os = "macos")]
+        assert!(command.starts_with("open -R "), "got {command}");
+        #[cfg(target_os = "windows")]
+        assert!(command.contains("explorer.exe /select,"), "got {command}");
+    }
+
+    #[test]
+    fn reveal_label_and_hotkey_are_not_macos_only() {
+        // These strings render in the actions menu, so a macOS-only word
+        // on another platform is a visible bug.
+        let label = reveal_label();
+        #[cfg(target_os = "macos")]
+        assert_eq!(label, "Show in Finder");
+        #[cfg(target_os = "windows")]
+        assert_eq!(label, "Show in Explorer");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(label, "Show in Files");
+    }
+
+    #[test]
+    fn reveal_hotkey_names_the_bound_secondary_action() {
+        // The secondary action is bound to the primary modifier plus
+        // Enter, so the label has to say the same thing and has to render
+        // as one keycap per key.
+        let caps = corvo_core::shortcut::keycaps(reveal_hotkey());
+        let expected_primary = corvo_core::Primary::current().keycap_label();
+        assert_eq!(caps, vec![expected_primary.to_string(), "↵".to_string()]);
     }
 }

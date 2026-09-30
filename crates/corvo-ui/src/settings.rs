@@ -246,46 +246,13 @@ pub struct SettingsView {
     cancel_update_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// The keycaps to draw for a stored hotkey, in press order.
+///
+/// Delegates to `corvo_core::shortcut` so a hotkey reads the same way in
+/// the settings pane, the actions menu, and the footer. macOS draws
+/// glyphs; Windows and Linux draw the words users expect.
 pub(crate) fn format_hotkey_keycaps(hotkey: &str) -> Vec<String> {
-    hotkey
-        .split('+')
-        .filter_map(|token| {
-            let t = token.trim();
-            if t.is_empty() {
-                return None;
-            }
-            let lower = t.to_lowercase();
-            Some(match lower.as_str() {
-                "ctrl" | "control" => "⌃".to_string(),
-                "alt" | "opt" | "option" => "⌥".to_string(),
-                "shift" => "⇧".to_string(),
-                "cmd" | "command" => "⌘".to_string(),
-                "space" => "Space".to_string(),
-                "enter" | "return" => "↵".to_string(),
-                "backspace" => "⌫".to_string(),
-                "delete" => "⌦".to_string(),
-                "escape" | "esc" => "Esc".to_string(),
-                "tab" => "⇥".to_string(),
-                "up" => "↑".to_string(),
-                "down" => "↓".to_string(),
-                "left" => "←".to_string(),
-                "right" => "→".to_string(),
-                other => {
-                    if other.len() == 1 {
-                        other.to_uppercase()
-                    } else {
-                        let mut chars = other.chars();
-                        match chars.next() {
-                            Some(first) => {
-                                first.to_uppercase().collect::<String>() + chars.as_str()
-                            }
-                            None => String::new(),
-                        }
-                    }
-                }
-            })
-        })
-        .collect()
+    corvo_core::shortcut::keycaps(hotkey)
 }
 
 impl SettingsView {
@@ -1112,7 +1079,11 @@ impl SettingsView {
                     ),
                     self.toggle_row(
                         "toggle-show-menu-bar",
-                        "Show in menu bar",
+                        if cfg!(target_os = "macos") {
+                            "Show in menu bar"
+                        } else {
+                            "Show in system tray"
+                        },
                         Some("Shortcuts still work when hidden."),
                         self.settings.show_menu_bar,
                         cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -1189,10 +1160,7 @@ impl SettingsView {
                 ],
             ));
 
-        pane = pane.child(self.section_group(
-            "Onboarding",
-            vec![self.onboarding_rerun_row(cx)],
-        ));
+        pane = pane.child(self.section_group("Onboarding", vec![self.onboarding_rerun_row(cx)]));
 
         if let Some(active) = self.active_dropdown {
             pane = pane
@@ -1441,10 +1409,17 @@ impl SettingsView {
             && !self.adding_quicklink
             && self.editing_quicklink_index.is_none()
         {
-            if keystroke.modifiers.platform
-                && !keystroke.modifiers.control
-                && !keystroke.modifiers.alt
-            {
+            // The settings window uses the platform's primary modifier:
+            // Command on macOS, Control on Windows and Linux. Reading
+            // `modifiers.platform` here meant the Windows key, which the
+            // shell intercepts before the window sees it.
+            let primary = match corvo_core::Primary::current() {
+                corvo_core::Primary::Command => {
+                    keystroke.modifiers.platform && !keystroke.modifiers.control
+                }
+                corvo_core::Primary::Control => keystroke.modifiers.control,
+            };
+            if primary && !keystroke.modifiers.alt {
                 match keystroke.key.as_str() {
                     "[" => {
                         self.go_back(cx);
@@ -1678,7 +1653,15 @@ impl SettingsView {
                 parts.push("alt");
             }
             if keystroke.modifiers.platform {
-                parts.push("cmd");
+                // `cmd` means the primary modifier, which the parser
+                // resolves per platform. Storing the physical `super`
+                // here bound the Windows key on Windows and displayed a
+                // command glyph in the list.
+                parts.push(if corvo_core::Primary::is_command() {
+                    "cmd"
+                } else {
+                    "super"
+                });
             }
             if keystroke.modifiers.shift {
                 parts.push("shift");
@@ -2347,7 +2330,14 @@ impl SettingsView {
                                     rgb(COLOR_TEXT)
                                 })
                                 .child(if self.new_scope_text.is_empty() {
-                                    "Type path (e.g. ~/Applications) and press Enter...".to_string()
+                                    // Suggest a folder that exists on the
+                                    // running platform.
+                                    let example = if cfg!(target_os = "macos") {
+                                        "~/Applications"
+                                    } else {
+                                        "~/Documents"
+                                    };
+                                    format!("Type path (e.g. {example}) and press Enter...")
                                 } else {
                                     self.new_scope_text.clone()
                                 }),
@@ -6302,8 +6292,11 @@ impl SettingsView {
                             )),
                     ),
             )
-            // Section 3: Search Menu Bar Items
-            .child(
+            // Section 3: Search Menu Bar Items. Only macOS has a menu bar
+            // or an Apple menu, so the section is hidden elsewhere rather
+            // than offering a toggle that does nothing.
+            .when(cfg!(target_os = "macos"), |section| {
+                section.child(
                 div()
                     .flex()
                     .flex_col()
@@ -6342,6 +6335,8 @@ impl SettingsView {
                                     .child(
                                         self.toggle_row(
                                             "toggle-apple-menu-items",
+                                            // Only macOS has an Apple menu
+                                            // and a menu bar to search.
                                             "Show Apple menu items",
                                             None,
                                             self.settings.navigation.show_apple_menu_items,
@@ -6506,7 +6501,8 @@ impl SettingsView {
                                     ),
                             ),
                     ),
-            )
+                )
+            })
     }
 
     fn render_calendar_pane(&self, cx: &mut Context<Self>) -> Div {

@@ -812,7 +812,7 @@ impl Command for ClipboardManagerCommand {
                 subtitle: Some("Commands".into()),
                 icon: Icon::Clipboard,
                 score: 990,
-                accessory: Some("⌥⌘C".into()),
+                accessory: Some("cmd+alt+c".into()),
             }];
         }
 
@@ -827,7 +827,7 @@ impl Command for ClipboardManagerCommand {
                 subtitle: Some("Commands".into()),
                 icon: Icon::Clipboard,
                 score,
-                accessory: Some("⌥⌘C".into()),
+                accessory: Some("cmd+alt+c".into()),
             });
         }
         results
@@ -861,7 +861,7 @@ impl Command for ClipboardManagerCommand {
                 action: Action::ShowToast("Clipboard History".into()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::CLIPBOARD_TEXT),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             }];
         }
         let Some(id) = result_id.strip_prefix("clipboard-manager:entry:") else {
@@ -879,7 +879,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::PasteImage(img_path.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 },
                 CommandAction {
                     id: "clipboard-manager-action:copy-image".into(),
@@ -887,7 +887,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::CopyImage(img_path.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                     group: ActionGroup::Standard,
-                    hotkey: Some("⌘↵"),
+                    hotkey: Some("cmd+enter"),
                 },
                 CommandAction {
                     id: "clipboard-manager-action:reveal-image".into(),
@@ -895,7 +895,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::RunShell(format!("open -R \"{}\"", img_path.to_string_lossy())),
                     icon: Icon::Svg(phosphor_svgs::style::regular::FOLDER),
                     group: ActionGroup::Standard,
-                    hotkey: Some("⌥↵"),
+                    hotkey: Some("alt+enter"),
                 },
                 CommandAction {
                     id: format!("clipboard-manager-action:delete:{id}"),
@@ -903,7 +903,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::ShowToast(format!("delete:{id}")),
                     icon: Icon::Svg(phosphor_svgs::style::regular::TRASH),
                     group: ActionGroup::Destructive,
-                    hotkey: Some("⌘⌫"),
+                    hotkey: Some("cmd+backspace"),
                 },
                 CommandAction {
                     id: "clipboard-manager-action:clear".into(),
@@ -922,7 +922,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::PasteText(entry.text.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                     group: ActionGroup::Primary,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 },
                 CommandAction {
                     id: "clipboard-manager-action:copy".into(),
@@ -930,7 +930,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::Copy(entry.text.clone()),
                     icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                     group: ActionGroup::Standard,
-                    hotkey: Some("⌘↵"),
+                    hotkey: Some("cmd+enter"),
                 },
                 CommandAction {
                     id: format!("clipboard-manager-action:delete:{id}"),
@@ -938,7 +938,7 @@ impl Command for ClipboardManagerCommand {
                     action: Action::ShowToast(format!("delete:{id}")),
                     icon: Icon::Svg(phosphor_svgs::style::regular::TRASH),
                     group: ActionGroup::Destructive,
-                    hotkey: Some("⌘⌫"),
+                    hotkey: Some("cmd+backspace"),
                 },
                 CommandAction {
                     id: "clipboard-manager-action:clear".into(),

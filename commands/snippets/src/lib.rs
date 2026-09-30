@@ -102,7 +102,7 @@ impl Command for SnippetsCommand {
                 action: Action::PasteText(snippet.body.clone()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             CommandAction {
                 id: "snippets-action:copy".into(),
@@ -110,7 +110,7 @@ impl Command for SnippetsCommand {
                 action: Action::ShowToast(format!("copy:{}", snippet.body)),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

@@ -104,7 +104,7 @@ impl Command for QuicklinksCommand {
                 action: Action::OpenUrl(link.url.clone()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_UP_RIGHT),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             },
             CommandAction {
                 id: "quicklinks-action:copy".into(),
@@ -112,7 +112,7 @@ impl Command for QuicklinksCommand {
                 action: Action::ShowToast(format!("copy:{}", link.url)),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Standard,
-                hotkey: Some("⌘↵"),
+                hotkey: Some("cmd+enter"),
             },
         ]
     }

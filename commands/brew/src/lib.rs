@@ -138,7 +138,7 @@ impl Command for BrewCommand {
                 },
                 icon: Icon::Glyph("🍺"),
                 group: ActionGroup::Primary,
-                hotkey: Some("↵"),
+                hotkey: Some("enter"),
             }];
         }
         let Some((mode, kind, name)) = result_id.strip_prefix("brew:").and_then(parse_result_id)
@@ -170,7 +170,7 @@ impl Command for BrewCommand {
             action: Action::OpenUrl(page_path),
             icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_UP_RIGHT),
             group: ActionGroup::Primary,
-            hotkey: Some("↵"),
+            hotkey: Some("enter"),
         }];
         let operation = match mode {
             "outdated" => Some(("Upgrade", "upgrade")),
