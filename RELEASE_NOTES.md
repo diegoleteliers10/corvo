@@ -1,3 +1,50 @@
+# Corvo 0.3.1
+
+This release repairs Windows. Every item below was broken on Windows and
+either did nothing or reported success while doing nothing. macOS and
+Linux keep their current behaviour, apart from the shared shortcut and
+defaults work, which now name each platform's own keys.
+
+## Shortcuts
+
+- The launcher bound every shortcut to the wrong key. It read the platform modifier as the primary one, which is Command on macOS, the Windows key on Windows, and the Super key on Linux. On Windows and Linux the actions menu, the settings window, and quit were all dead.
+- Ctrl+K opens the actions menu, Ctrl+, opens Settings, and Ctrl+Q quits, on Windows and Linux. macOS keeps its Command shortcuts.
+- Ctrl+C and Ctrl+V did nothing in the search field on Windows and Linux. The typing guard swallowed every Ctrl chord before the copy and paste handlers could run. Both work now, and Ctrl+C falls back to copying the query text when the selected row has no copy action.
+- The labels named a Mac key. Windows and Linux now read Ctrl, Alt, and Shift as words, which is the convention on those platforms. The keycap renderer also drew one keycap per character, so a multi-key label would have appeared as `C` `t` `r` `l` `+` `K`.
+- Two shortcuts moved because the obvious key is taken on Windows. The emoji picker uses Ctrl+Alt+Space, because Ctrl+Space is the input-method switch. Delete-to-end-of-line uses Ctrl+Alt+K, because Ctrl+K opens the actions menu.
+- Delete and Backspace are separate keys on Windows and Linux. Corvo collapsed them, so Ctrl+Delete ran delete-to-start-of-line instead.
+- Recording a shortcut in Settings stored a Mac key for a Windows key press, then displayed it as a Mac key. The recorder and the settings list agree now.
+- The uninstaller said "Show in Finder" and "Show Info in Finder" on every platform. They name the platform's file manager. The app launcher's reveal action is hidden for Store apps, which have no file to reveal.
+
+## System actions
+
+- Eleven Windows actions never ran. Each was a PowerShell one-liner inside a command that goes through `cmd /c`, and the escaping did not survive the trip. Lock, sleep, empty trash, toggle appearance, mute, the three media keys, show desktop, quit all, eject disks, and dismiss notifications are all affected.
+- Every one of them now calls the Windows API directly. Mute and the media keys use SendInput, so the key reaches the system volume mixer and the active media player. The old code sent a character instead of a key code, so those four did nothing even without the command problem.
+- Dismiss Notifications opens the notification settings. Windows has no API that clears the Action Center from another app, so the action is named for what it does.
+- Toggle Appearance now keeps the light and dark values in step. The old script read one and wrote both, which desynchronised them for good on a machine where the user had set them differently. Open windows repaint at once instead of on the next sign-in.
+- Open Trash no longer reports a failure after succeeding. Windows Explorer exits with an error code even when it opened the window.
+- Empty Trash says the bin is already empty instead of failing.
+- Eject Disks ejects the drive itself rather than the volume on its top, and reports what Windows refused and why.
+- Restart, Shut Down, and Log Out were already working and are unchanged.
+
+## Windows features that were missing
+
+- Window management did not exist. Left half, right half, the thirds, the quarters, maximize, center, restore, and moving to another display all did nothing, and the launcher reported each one as done. They now work, and they respect the window gap from Settings.
+- Brightness did not work on any machine without a laptop panel. It now reaches external monitors, and a display with no brightness control says so instead of failing.
+- Volume changed the level but stalled for seconds on every press, because it compiled C# each time. It is now a direct call.
+- Compact mode worked on the first launch of a session and never again, because the resident panel kept the previous height. It now collapses on every open.
+- The file listing and preview were empty. The default scope resolved the home directory from a variable Windows does not set, so the page had nothing to search. Existing installs are fixed without editing your settings.
+- The Files page also ignores AppData, .git, and .venv by default, and does not follow directory junctions that would otherwise loop.
+- The launcher panel had square corners, because Windows draws a square window for a borderless panel. The window is now clipped to the painted shape, and the two radii cannot drift apart.
+- App icons never appeared once the Start Menu grew past about sixty shortcuts. The extraction overflowed the Windows command-line limit, failed, and repeated on every launch. The job list moved to a file.
+- File preview images showed with red and blue swapped.
+- Opening an application was slow and reported an error even when it worked.
+
+## Changes for everyone
+
+- The launcher hotkey, the clipboard and emoji hotkeys, the application search scopes, and the file-search scopes no longer ship macOS values on every platform.
+- Two hotkey-triggered actions ran on the UI thread and froze the launcher while they waited. They run in the background now.
+
 # Corvo 0.3.0
 
 ## First-launch setup
