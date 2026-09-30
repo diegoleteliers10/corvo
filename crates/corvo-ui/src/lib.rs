@@ -2,8 +2,8 @@
 //! registry, results render as rows, Enter launches and dismisses.
 
 mod icons;
-mod settings;
 mod onboarding;
+mod settings;
 
 pub use settings::{
     open_settings, open_settings_tab, open_settings_tab_with_update_check,
@@ -29,6 +29,12 @@ const WINDOW_HEIGHT: f32 = 475.0;
 const COMPACT_WINDOW_HEIGHT: f32 = 58.0;
 const ROW_HEIGHT: f32 = 38.0;
 const ICON_SIZE: f32 = 26.0;
+/// Corner radius of the launcher panel, in logical pixels. `rounded_xl` in
+/// the element tree and the HWND region on Windows both read this value, so
+/// the painted border and the OS window edge cannot drift apart.
+fn launcher_corner_radius() -> f32 {
+    12.0
+}
 const CONFIDENT_SEARCH_SCORE: i32 = 1800;
 const MAX_WEAK_SEARCH_RESULTS: usize = 8;
 
@@ -384,7 +390,9 @@ impl ToastCategory {
             Self::Window => "◩",
             Self::Brightness => "☼",
             Self::Homebrew => "🍺",
-            Self::Application => "⌘",
+            // A window badge, not a modifier: the command glyph here read
+            // as a Mac-only shortcut on every platform.
+            Self::Application => "▣",
             Self::Files => "▤",
             Self::Quicklink => "↗",
             Self::Snippet => "✎",
@@ -1478,15 +1486,15 @@ impl Launcher {
         WINDOW_WIDTH * self.size_scale()
     }
 
-    fn sync_palette_size(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_palette_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target_w = self.desired_window_width();
         let target_h = self.desired_window_height();
-        if (self.current_window_height - target_h).abs() > 0.5 {
-            // Update current_window_height immediately so that render() paints the
-            // correct content size on this frame. The actual NSWindow resize happens
-            // on the next event-loop tick via spawn, but because CATransaction with
-            // disableActions is used in resize_launcher_panel, Core Animation will
-            // not interpolate between the old and new frames.
+        // Compare against the window's real content size, not the cached
+        // height. The Windows launcher is a resident hidden window, so its
+        // size outlives a dismiss and the cache desynchronizes from the
+        // HWND; reading the real size makes this self-correcting.
+        let actual_h: f32 = window.viewport_size().height.into();
+        if (actual_h - target_h).abs() > 0.5 {
             self.current_window_height = target_h;
             #[cfg(target_os = "macos")]
             {
@@ -1497,7 +1505,19 @@ impl Launcher {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                _window.resize(size(px(target_w), px(target_h)));
+                window.resize(size(px(target_w), px(target_h)));
+                // Window::resize posts SetWindowPos to the main-thread
+                // queue, so the new client rect does not exist yet and a
+                // window region set now would be one size behind. Re-clip
+                // on the next tick, once the resize has landed.
+                #[cfg(target_os = "windows")]
+                cx.spawn(async move |this, cx| {
+                    this.update(cx, |_launcher, window, _| {
+                        apply_windows_launcher_region(window);
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
     }
@@ -1870,12 +1890,11 @@ impl Launcher {
         cx: &mut Context<Self>,
     ) {
         let key = keystroke.key.as_str();
-        let cmd = keystroke.modifiers.platform;
-        let ctrl = keystroke.modifiers.control;
-        let alt = keystroke.modifiers.alt;
+        let mods = Shortcuts::from_modifiers(&keystroke.modifiers);
+        let alt = mods.alt;
 
-        // ⌘1..⌘9: Direct action execution
-        if cmd && !ctrl && !alt {
+        // Primary+1..9: Direct action execution
+        if mods.is_command_alone() {
             if let Ok(digit) = key.parse::<usize>() {
                 if (1..=9).contains(&digit) {
                     let target_idx = digit - 1;
@@ -1889,8 +1908,8 @@ impl Launcher {
             }
         }
 
-        // ⌘↵: Execute secondary action
-        if cmd && !ctrl && !alt && key == "enter" {
+        // Primary+Enter: Execute secondary action
+        if mods.is_command_alone() && key == "enter" {
             if self.page == LauncherPage::Uninstaller {
                 self.run_selected_action(window, cx);
                 return;
@@ -1902,20 +1921,20 @@ impl Launcher {
             return;
         }
 
-        // ⌘V: Paste into actions filter
-        if cmd && !ctrl && !alt && key == "v" {
+        // Primary+V: Paste into actions filter
+        if mods.is_command_alone() && key == "v" {
             self.paste_from_clipboard(cx);
             return;
         }
 
         // Enter: Execute selected action
-        if !cmd && !ctrl && !alt && key == "enter" {
+        if mods.is_unmodified() && key == "enter" {
             self.run_selected_action(window, cx);
             return;
         }
 
         // Up / ⌃P: Move selection up
-        if (!cmd && !ctrl && !alt && key == "up") || (!cmd && ctrl && !alt && key == "p") {
+        if (mods.is_unmodified() && key == "up") || (mods.is_ctrl_alone() && key == "p") {
             let count = self.filtered_actions().len();
             if count > 0 {
                 self.action_selected = if self.action_selected == 0 {
@@ -1929,7 +1948,7 @@ impl Launcher {
         }
 
         // Down / ⌃N: Move selection down
-        if (!cmd && !ctrl && !alt && key == "down") || (!cmd && ctrl && !alt && key == "n") {
+        if (mods.is_unmodified() && key == "down") || (mods.is_ctrl_alone() && key == "n") {
             let count = self.filtered_actions().len();
             if count > 0 {
                 self.action_selected = if self.action_selected + 1 >= count {
@@ -1942,8 +1961,10 @@ impl Launcher {
             return;
         }
 
-        // ⌥⌫ / ⌃W: Delete word backward in actions filter
-        if (!cmd && !ctrl && alt && key == "backspace") || (!cmd && ctrl && !alt && key == "w") {
+        // Alt+Backspace / Ctrl+W: Delete word backward in actions filter
+        if (!mods.command && !mods.ctrl && alt && key == "backspace")
+            || (mods.is_ctrl_alone() && key == "w")
+        {
             while self.actions_filter.ends_with(char::is_whitespace) {
                 self.actions_filter.pop();
             }
@@ -1957,8 +1978,8 @@ impl Launcher {
             return;
         }
 
-        // ⌘⌫ / ⌃U: Clear actions filter
-        if (cmd && !ctrl && !alt && key == "backspace") || (!cmd && ctrl && !alt && key == "u") {
+        // Primary+Backspace / Ctrl+U: Clear actions filter
+        if (mods.is_command_alone() && key == "backspace") || (mods.is_ctrl_alone() && key == "u") {
             if !self.actions_filter.is_empty() {
                 self.actions_filter.clear();
                 self.action_selected = 0;
@@ -1968,7 +1989,7 @@ impl Launcher {
         }
 
         // Backspace: Delete character
-        if !cmd && !ctrl && !alt && key == "backspace" {
+        if mods.is_unmodified() && key == "backspace" {
             if self.actions_filter.pop().is_some() {
                 self.action_selected = 0;
                 cx.notify();
@@ -1976,9 +1997,7 @@ impl Launcher {
             return;
         }
 
-        if !cmd
-            && !ctrl
-            && !alt
+        if mods.is_unmodified()
             && matches!(
                 key,
                 "tab" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
@@ -1987,7 +2006,8 @@ impl Launcher {
             return;
         }
 
-        if cmd || ctrl || alt {
+        // Any modifier means the keystroke is a chord, not text.
+        if mods.command || mods.ctrl || mods.alt {
             return;
         }
 
@@ -2006,22 +2026,18 @@ impl Launcher {
         self.cursor_visible = true;
         let keystroke = &event.keystroke;
         let key = keystroke.key.as_str();
-        let mods = &keystroke.modifiers;
-
-        let cmd = mods.platform;
-        let ctrl = mods.control;
+        let mods = Shortcuts::from_modifiers(&keystroke.modifiers);
         let alt = mods.alt;
-        let shift = mods.shift;
 
         if self.page == LauncherPage::Root && self.selected_result_is_port_action() {
-            if !cmd && !ctrl && !alt && key == "tab" {
+            if mods.is_unmodified() && key == "tab" {
                 self.port_input_active = !self.port_input_active;
                 self.port_cursor_idx = self.port_argument.chars().count();
                 cx.notify();
                 cx.stop_propagation();
                 return;
             }
-            if self.port_input_active && !cmd && !ctrl && !alt {
+            if self.port_input_active && mods.is_unmodified() {
                 match key {
                     "escape" => {
                         self.handle_escape(window, cx);
@@ -2096,7 +2112,7 @@ impl Launcher {
                     return;
                 }
             }
-            if !cmd && !ctrl && !alt && key == "right" {
+            if mods.is_unmodified() && key == "right" {
                 self.port_input_active = true;
                 self.port_cursor_idx = self.port_argument.chars().count();
                 cx.notify();
@@ -2106,7 +2122,7 @@ impl Launcher {
         }
 
         // Stage 0: Global App & Window Lifecycle
-        if cmd && !ctrl && !alt && !shift {
+        if mods.is_command_alone() {
             match key {
                 "q" => {
                     self.dismiss(window);
@@ -2136,22 +2152,30 @@ impl Launcher {
             }
         }
 
-        // ⌃⌘Space: Switch to Emoji picker
-        if cmd && ctrl && !alt && key == "space" {
+        // Command+Alt+Space: Switch to Emoji picker. macOS keeps the
+        // Control variant, where Command and Control are distinct keys.
+        // Windows and Linux use Alt, because there Control is already the
+        // primary modifier and cannot be held twice.
+        let emoji_chord = match corvo_core::Primary::current() {
+            corvo_core::Primary::Command => mods.command && mods.ctrl && !mods.alt,
+            corvo_core::Primary::Control => mods.command && mods.alt && !mods.shift,
+        };
+        if emoji_chord && key == "space" {
             self.open_emoji_page(window, cx);
             cx.stop_propagation();
             return;
         }
 
-        // ⌥⌘C: Switch to Clipboard manager
-        if cmd && alt && !ctrl && key == "c" {
+        // Command+Alt+C: Switch to Clipboard manager. Cross-platform as
+        // written, because the primary modifier plus Alt never collides.
+        if mods.command && mods.alt && !mods.ctrl && !mods.shift && key == "c" {
             self.open_clipboard_page(window, cx);
             cx.stop_propagation();
             return;
         }
 
         // Stage 1: Escape Modal Layer Unwinding
-        if !cmd && !ctrl && !alt && key == "escape" {
+        if mods.is_unmodified() && key == "escape" {
             self.handle_escape(window, cx);
             cx.stop_propagation();
             return;
@@ -2159,7 +2183,7 @@ impl Launcher {
 
         // Stage 2: Modal Overlays (Dropdown, Burger, Actions)
         if self.filter_dropdown_open {
-            self.handle_filter_dropdown_key(key, ctrl, cx);
+            self.handle_filter_dropdown_key(key, mods.ctrl, cx);
             cx.stop_propagation();
             return;
         }
@@ -2177,12 +2201,12 @@ impl Launcher {
         }
 
         if self.page == LauncherPage::Uninstaller {
-            if cmd && !ctrl && !alt && key == "enter" {
+            if mods.is_command_alone() && key == "enter" {
                 self.begin_uninstall(cx);
                 cx.stop_propagation();
                 return;
             }
-            if !cmd && !ctrl && !alt && key == "space" && self.query.is_empty() {
+            if mods.is_unmodified() && key == "space" && self.query.is_empty() {
                 self.toggle_uninstaller_focus(cx);
                 cx.stop_propagation();
                 return;
@@ -2191,8 +2215,8 @@ impl Launcher {
 
         // Stage 3: Contextual List Actions
         if self.page == LauncherPage::Clipboard {
-            // ⌘⌫ / ⌘⌦: Delete selected clipboard entry from history
-            if cmd && !ctrl && !alt && (key == "backspace" || key == "delete") {
+            // Primary+Backspace / Primary+Delete: Delete selected clipboard entry
+            if mods.is_command_alone() && (key == "backspace" || key == "delete") {
                 if let Some(res) = self.selected_result() {
                     if let Some(id) = res.id.strip_prefix("clipboard-manager:entry:") {
                         let result = corvo_clipboard_manager::delete_entry(id);
@@ -2215,24 +2239,32 @@ impl Launcher {
                     }
                 }
             }
-            // ⌘C or ⌘↵: Copy entry to clipboard without pasting
-            if cmd && !ctrl && !alt && (key == "c" || key == "enter") {
+            // Primary+C or Primary+Enter: Copy entry without pasting
+            if mods.is_command_alone() && (key == "c" || key == "enter") {
                 self.execute_secondary_selected(window, cx);
                 cx.stop_propagation();
                 return;
             }
         }
 
-        // ⌘↵: Secondary Action on selected row (Root / Main List)
-        if cmd && !ctrl && !alt && key == "enter" {
+        // Primary+Enter: Secondary action on the selected row
+        if mods.is_command_alone() && key == "enter" {
             self.execute_secondary_selected(window, cx);
             cx.stop_propagation();
             return;
         }
 
-        // ⌘C: Copy selected item in Root if query is empty or on non-text selection
-        if cmd && !ctrl && !alt && key == "c" {
+        // Primary+C: Copy the selected item when the row offers a copy action
+        // action, otherwise copy the query text itself. Without the
+        // second branch, Ctrl+C did nothing at all on Windows and Linux,
+        // where the typing guard swallowed the chord.
+        if mods.is_command_alone() && key == "c" {
             if self.page != LauncherPage::Uninstaller && self.execute_copy_action(window, cx) {
+                cx.stop_propagation();
+                return;
+            }
+            if !self.query.is_empty() {
+                self.perform(Ok(Action::Copy(self.query.clone())), window, cx);
                 cx.stop_propagation();
                 return;
             }
@@ -2240,7 +2272,7 @@ impl Launcher {
 
         // Stage 4: List Navigation & Activation
         // Up / ⌃P: Move selection up
-        if (!cmd && !ctrl && !alt && key == "up") || (!cmd && ctrl && !alt && key == "p") {
+        if (mods.is_unmodified() && key == "up") || (mods.is_ctrl_alone() && key == "p") {
             if self.page == LauncherPage::Emoji {
                 self.select_emoji_delta(-(self.emoji_column_count as isize), cx);
             } else {
@@ -2256,7 +2288,7 @@ impl Launcher {
         }
 
         // Down / ⌃N: Move selection down
-        if (!cmd && !ctrl && !alt && key == "down") || (!cmd && ctrl && !alt && key == "n") {
+        if (mods.is_unmodified() && key == "down") || (mods.is_ctrl_alone() && key == "n") {
             if self.is_compact_collapsed() {
                 self.force_expanded = true;
                 self.sync_palette_size(window, cx);
@@ -2281,7 +2313,7 @@ impl Launcher {
         }
 
         // PageUp / PageDown
-        if !cmd && !ctrl && !alt && key == "pageup" {
+        if mods.is_unmodified() && key == "pageup" {
             let delta = if self.page == LauncherPage::Emoji {
                 self.emoji_column_count * 3
             } else {
@@ -2291,7 +2323,7 @@ impl Launcher {
             cx.stop_propagation();
             return;
         }
-        if !cmd && !ctrl && !alt && key == "pagedown" {
+        if mods.is_unmodified() && key == "pagedown" {
             let delta = if self.page == LauncherPage::Emoji {
                 self.emoji_column_count * 3
             } else {
@@ -2304,14 +2336,14 @@ impl Launcher {
         }
 
         // Enter: Execute primary action
-        if !cmd && !ctrl && !alt && key == "enter" {
+        if mods.is_unmodified() && key == "enter" {
             self.execute_selected(window, cx);
             cx.stop_propagation();
             return;
         }
 
         // Tab: Toggle filter dropdown on Emoji/Clipboard
-        if !cmd && !ctrl && !alt && key == "tab" {
+        if mods.is_unmodified() && key == "tab" {
             if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
                 self.toggle_filter_dropdown(cx);
                 cx.stop_propagation();
@@ -2320,7 +2352,7 @@ impl Launcher {
         }
 
         // Emoji grid lateral movement
-        if self.page == LauncherPage::Emoji && !cmd && !ctrl && !alt {
+        if self.page == LauncherPage::Emoji && mods.is_unmodified() {
             if key == "left" {
                 self.select_emoji_delta(-1, cx);
                 cx.stop_propagation();
@@ -2334,40 +2366,40 @@ impl Launcher {
         }
 
         // Stage 5: macOS Text Editing Primitives
-        // ⌘V: Paste
-        if cmd && !ctrl && !alt && key == "v" {
+        // Primary+V: Paste
+        if mods.is_command_alone() && key == "v" {
             self.paste_from_clipboard(cx);
             self.ensure_window_size(window, cx);
             cx.stop_propagation();
             return;
         }
 
-        // ⌥←: Word backward
-        if !cmd && !ctrl && alt && key == "left" {
+        // Alt+Left: Word backward
+        if !mods.command && !mods.ctrl && alt && key == "left" {
             self.cursor_word_left();
             cx.notify();
             cx.stop_propagation();
             return;
         }
 
-        // ⌥→: Word forward
-        if !cmd && !ctrl && alt && key == "right" {
+        // Alt+Right: Word forward
+        if !mods.command && !mods.ctrl && alt && key == "right" {
             self.cursor_word_right();
             cx.notify();
             cx.stop_propagation();
             return;
         }
 
-        // ⌘← / ⌃A: Line start
-        if (cmd && !ctrl && !alt && key == "left") || (!cmd && ctrl && !alt && key == "a") {
+        // Primary+Left / Ctrl+A: Line start
+        if (mods.is_command_alone() && key == "left") || (mods.is_ctrl_alone() && key == "a") {
             self.cursor_idx = 0;
             cx.notify();
             cx.stop_propagation();
             return;
         }
 
-        // ⌘→ / ⌃E: Line end
-        if (cmd && !ctrl && !alt && key == "right") || (!cmd && ctrl && !alt && key == "e") {
+        // Primary+Right / Ctrl+E: Line end
+        if (mods.is_command_alone() && key == "right") || (mods.is_ctrl_alone() && key == "e") {
             self.cursor_idx = self.query.chars().count();
             cx.notify();
             cx.stop_propagation();
@@ -2375,13 +2407,13 @@ impl Launcher {
         }
 
         // Left / Right: Single character movement
-        if !cmd && !ctrl && !alt && key == "left" && self.page != LauncherPage::Emoji {
+        if mods.is_unmodified() && key == "left" && self.page != LauncherPage::Emoji {
             self.cursor_idx = self.cursor_idx.saturating_sub(1);
             cx.notify();
             cx.stop_propagation();
             return;
         }
-        if !cmd && !ctrl && !alt && key == "right" && self.page != LauncherPage::Emoji {
+        if mods.is_unmodified() && key == "right" && self.page != LauncherPage::Emoji {
             self.cursor_idx = (self.cursor_idx + 1).min(self.query.chars().count());
             cx.notify();
             cx.stop_propagation();
@@ -2389,7 +2421,7 @@ impl Launcher {
         }
 
         // Home / End
-        if !cmd && !ctrl && !alt && key == "home" {
+        if mods.is_unmodified() && key == "home" {
             if self.query.is_empty() {
                 self.select(0, cx);
             } else {
@@ -2399,7 +2431,7 @@ impl Launcher {
             cx.stop_propagation();
             return;
         }
-        if !cmd && !ctrl && !alt && key == "end" {
+        if mods.is_unmodified() && key == "end" {
             if self.query.is_empty() {
                 let last = self.selectable_count().saturating_sub(1);
                 self.select(last, cx);
@@ -2411,8 +2443,10 @@ impl Launcher {
             return;
         }
 
-        // ⌥⌫ / ⌃W: Delete word backward
-        if (!cmd && !ctrl && alt && key == "backspace") || (!cmd && ctrl && !alt && key == "w") {
+        // Alt+Backspace / Ctrl+W: Delete word backward
+        if (!mods.command && !mods.ctrl && alt && key == "backspace")
+            || (mods.is_ctrl_alone() && key == "w")
+        {
             if self.delete_word_backward() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2424,8 +2458,8 @@ impl Launcher {
             return;
         }
 
-        // ⌘⌫ / ⌃U: Delete to beginning of line (in Root / Emoji pages)
-        if (cmd && !ctrl && !alt && key == "backspace") || (!cmd && ctrl && !alt && key == "u") {
+        // Primary+Backspace / Ctrl+U: Delete to beginning of line
+        if (mods.is_command_alone() && key == "backspace") || (mods.is_ctrl_alone() && key == "u") {
             if self.delete_to_beginning_of_line() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2437,8 +2471,16 @@ impl Launcher {
             return;
         }
 
-        // ⌃K: Delete to end of line (kill line)
-        if !cmd && ctrl && !alt && key == "k" {
+        // ⌃K: Delete to end of line (kill line).
+        //
+        // On macOS Command+K opens the actions menu, so Control+K is free
+        // here. On Windows and Linux the primary modifier is Control, so
+        // Ctrl+K is the actions menu and kill-line moves to Ctrl+Alt+K.
+        let kill_line_chord = match corvo_core::Primary::current() {
+            corvo_core::Primary::Command => mods.is_ctrl_alone(),
+            corvo_core::Primary::Control => mods.is_ctrl_alone() && mods.alt,
+        };
+        if kill_line_chord && key == "k" {
             if self.delete_to_end_of_line() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2451,7 +2493,7 @@ impl Launcher {
         }
 
         // Backspace: Delete character backward
-        if !cmd && !ctrl && !alt && key == "backspace" {
+        if mods.is_unmodified() && key == "backspace" {
             if self.backspace_char() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2473,7 +2515,7 @@ impl Launcher {
         }
 
         // Delete: Delete character forward
-        if !cmd && !ctrl && !alt && key == "delete" {
+        if mods.is_unmodified() && key == "delete" {
             if self.delete_char() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2486,7 +2528,7 @@ impl Launcher {
         }
 
         // Space
-        if !cmd && !ctrl && !alt && key == "space" {
+        if mods.is_unmodified() && key == "space" {
             self.insert_str(" ");
             self.ensure_window_size(window, cx);
             self.refresh_current_page(cx);
@@ -2495,7 +2537,7 @@ impl Launcher {
         }
 
         // Stage 6: Character Typing Guard
-        if cmd || ctrl || alt {
+        if mods.command || mods.ctrl || mods.alt {
             return;
         }
 
@@ -3884,7 +3926,7 @@ impl Launcher {
         .detach();
     }
 
-    /// Opens the ⌘K actions menu for the selected result, or closes it.
+    /// Opens the actions menu for the selected result, or closes it.
     fn toggle_actions(&mut self, cx: &mut Context<Self>) {
         self.burger_menu_open = false;
         self.filter_dropdown_open = false;
@@ -3917,7 +3959,7 @@ impl Launcher {
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::CIRCLE),
                         group: corvo_core::ActionGroup::Standard,
-                        hotkey: Some("⌘↵"),
+                        hotkey: Some("cmd+enter"),
                     },
                     CommandAction {
                         id: "uninstaller:copy-path".into(),
@@ -3925,23 +3967,23 @@ impl Launcher {
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                         group: corvo_core::ActionGroup::Standard,
-                        hotkey: Some("⌥⌘C"),
+                        hotkey: Some("alt+cmd+c"),
                     },
                     CommandAction {
                         id: "uninstaller:show-in-finder".into(),
-                        label: "Show in Finder".into(),
+                        label: file_manager_label("Show in").into(),
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::FOLDER),
                         group: corvo_core::ActionGroup::Standard,
-                        hotkey: Some("⇧⌘O"),
+                        hotkey: Some("shift+cmd+o"),
                     },
                     CommandAction {
                         id: "uninstaller:show-info".into(),
-                        label: "Show Info in Finder".into(),
+                        label: file_manager_label("Show Info in").into(),
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::INFO),
                         group: corvo_core::ActionGroup::Standard,
-                        hotkey: Some("⇧⌘I"),
+                        hotkey: Some("shift+cmd+i"),
                     },
                 ]);
             }
@@ -3991,7 +4033,7 @@ impl Launcher {
             },
             icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::STAR),
             group: corvo_core::ActionGroup::Standard,
-            hotkey: Some("⇧⌘F"),
+            hotkey: Some("shift+cmd+f"),
         });
         actions.push(CommandAction {
             id: "launcher:hide".into(),
@@ -4007,7 +4049,7 @@ impl Launcher {
             },
             icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::EYE_SLASH),
             group: corvo_core::ActionGroup::Standard,
-            hotkey: Some("⇧⌘H"),
+            hotkey: Some("shift+cmd+h"),
         });
         actions.sort_by_key(|action| match action.group {
             corvo_core::ActionGroup::Primary => 0,
@@ -4122,11 +4164,14 @@ impl Launcher {
     }
 
     fn burger_menu(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        // Shortcuts are written once in macOS terms and translated for the
+        // running platform when drawn, so Windows and Linux read `Ctrl+,`
+        // and `Ctrl+Q` instead of a command glyph.
         let items: [(&str, Option<&str>); 4] = [
-            ("Preferences...", Some("⌘,")),
+            ("Preferences...", Some("cmd+,")),
             ("About Corvo", None),
             ("Check for Updates...", None),
-            ("Quit Corvo", Some("⌘Q")),
+            ("Quit Corvo", Some("cmd+q")),
         ];
         div()
             .id("burger-menu")
@@ -4184,7 +4229,7 @@ impl Launcher {
                             .child(label_str),
                     )
                     .when_some(*hotkey, |row, hotkey| {
-                        row.child(div().flex().gap_1().children(hotkey.chars().map(keycap)))
+                        row.child(div().flex().gap_1().children(shortcut_keycaps(hotkey)))
                     })
             }))
     }
@@ -4533,19 +4578,31 @@ impl Launcher {
                     .and_then(|name| name.to_str())
                     .unwrap_or("item")
                     .to_string();
+                // dismiss() takes previous_app and hands activation back
+                // to it, which is wrong here: the app we are about to open
+                // must get the focus instead.
                 self.previous_app = None;
-                corvo_platform::forget_launcher_panel();
-                window.remove_window();
-                if let Err(error) = ops.open_path(&path) {
-                    show_action_toast(
-                        ToastNotice::failure(
-                            category,
-                            "Could not open item",
-                            format!("{item_name} · {error}"),
-                        ),
-                        cx,
-                    );
-                }
+                self.dismiss(window);
+                // open_path reaches the OS shell. Keep it off the main
+                // thread so a slow or hung shell call cannot freeze
+                // rendering, and so the panel is already gone by the time
+                // the toast needs a window.
+                cx.spawn(async move |_this, cx| {
+                    let result = smol::unblock(move || ops.open_path(&path)).await;
+                    cx.update(|cx| {
+                        if let Err(error) = result {
+                            show_action_toast(
+                                ToastNotice::failure(
+                                    category,
+                                    "Could not open item",
+                                    format!("{item_name} · {error}"),
+                                ),
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .detach();
             }
             Ok(Action::OpenAppUninstaller { name, path }) => {
                 self.open_uninstaller_page(name, path, window, cx);
@@ -4645,9 +4702,7 @@ impl Launcher {
                 }) || cmd.contains("DisplayServices")
                     || cmd.contains("brightness")
                     || cmd.contains("volume settings")
-                    || cmd.contains("wpctl set-volume")
-                    || cmd.contains("[char]175")
-                    || cmd.contains("[char]174");
+                    || cmd.contains("wpctl set-volume");
 
                 if is_repeatable {
                     cx.spawn(async move |_this, cx| {
@@ -4669,6 +4724,29 @@ impl Launcher {
                     .detach();
                 }
             }
+            Ok(Action::RunNative(native)) => {
+                let (category, action_title) = self
+                    .selected_result()
+                    .map(|result| (category_for_result(&result.id), result.title.clone()))
+                    .unwrap_or((ToastCategory::System, "System action".into()));
+                self.previous_app = None;
+                corvo_platform::forget_launcher_panel();
+                self.dismiss(window);
+                // Some of these walk the device tree or the window list,
+                // so keep them off the main thread.
+                cx.spawn(async move |_this, cx| {
+                    let result =
+                        smol::unblock(move || corvo_platform::run_native_action(native)).await;
+                    let notice = match result {
+                        Ok(detail) => ToastNotice::success(category, action_title, detail),
+                        Err(error) => {
+                            ToastNotice::failure(category, action_title, error.to_string())
+                        }
+                    };
+                    cx.update(|cx| show_action_toast(notice, cx));
+                })
+                .detach();
+            }
             Ok(Action::ConfirmProcessTermination { pid, start_time }) => {
                 self.actions_title = format!("Confirm force quit for PID {pid}");
                 self.actions_filter.clear();
@@ -4683,7 +4761,7 @@ impl Launcher {
                     },
                     icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::WARNING),
                     group: ActionGroup::Destructive,
-                    hotkey: Some("↵"),
+                    hotkey: Some("enter"),
                 }];
                 self.actions_open = true;
                 cx.notify();
@@ -5069,6 +5147,10 @@ impl Launcher {
         self.rebuild_root_flat_items();
         self.results_scroll_handle.scroll_to_item(0);
         window.focus(&self.focus_handle, cx);
+        // The resident HWND keeps the height the last session left behind.
+        // Collapse to the compact height before showing, so the panel never
+        // appears at the stale size and then shrinks a frame later.
+        self.sync_palette_size(window, cx);
         set_windows_launcher_visible(window, true);
         self.refresh(cx);
         cx.notify();
@@ -6419,7 +6501,7 @@ impl Launcher {
                     .items_center()
                     .justify_center()
                     .p_3()
-                    .child(img(path.clone()).max_w_full().max_h(px(300.0)).rounded_lg()),
+                    .child(file_preview_image(path.clone())),
                 FilePreview::Text(text) => div()
                     .id("file-preview-text")
                     .flex_1()
@@ -6997,7 +7079,7 @@ impl Launcher {
         }
     }
 
-    /// The ⌘K surface, floating over the list and anchored above the
+    /// The actions surface, floating over the list and anchored above the
     /// footer: item title, grouped action rows with hotkey hints, and
     /// an actions filter at the bottom.
     fn actions_menu(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -7056,7 +7138,7 @@ impl Launcher {
                     )
                     .child(div().flex_1())
                     .when_some(entry.hotkey, |row, hotkey| {
-                        row.child(div().flex().gap_1().children(hotkey.chars().map(keycap)))
+                        row.child(div().flex().gap_1().children(shortcut_keycaps(hotkey)))
                     })
                     .into_any_element(),
             );
@@ -7366,12 +7448,11 @@ impl Launcher {
                                                     .child("Actions"),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(action_keycap("⌘"))
-                                                    .child(action_keycap("K")),
+                                                div().flex().items_center().gap_1().children(
+                                                    corvo_core::shortcut::keycaps("cmd+k")
+                                                        .iter()
+                                                        .map(|label| action_keycap(label)),
+                                                ),
                                             ),
                                     )
                                 }),
@@ -7591,6 +7672,12 @@ impl Launcher {
             )
             .child(div().flex_1())
             .when_some(result.accessory.clone(), |row, accessory| {
+                // An accessory can be a shortcut, written in token form
+                // by the command crate. Render it with this platform's
+                // labels so a Windows row reads "Ctrl Alt C" and not the
+                // raw string "cmd+alt+c". Anything that is not a shortcut
+                // passes through unchanged.
+                let text = shortcut_text(&accessory);
                 row.child(
                     div()
                         .flex_none()
@@ -7603,7 +7690,7 @@ impl Launcher {
                         } else {
                             rgb(COLOR_TEXT_DIM)
                         })
-                        .child(accessory),
+                        .child(text),
                 )
             })
     }
@@ -7658,8 +7745,137 @@ fn action_keycap(key: &str) -> Div {
     }
 }
 
-/// One character of an action hotkey hint.
-fn keycap(glyph: char) -> Div {
+/// The modifier state of one keystroke, named for what the launcher
+/// means by each flag.
+///
+/// GPUI's `Modifiers::platform` is the Command key on macOS, the Windows
+/// key on Windows, and the Super key on Linux, so a shortcut bound to it
+/// never fires on Windows or Linux. This type resolves the platform's
+/// primary modifier once and exposes the two questions the key handlers
+/// actually ask.
+#[derive(Clone, Copy)]
+struct Shortcuts {
+    /// The platform's primary shortcut modifier: Command on macOS,
+    /// Control on Windows and Linux.
+    command: bool,
+    /// The physical Control key.
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl Shortcuts {
+    fn from_modifiers(mods: &gpui::Modifiers) -> Self {
+        Self {
+            command: match corvo_core::Primary::current() {
+                corvo_core::Primary::Command => mods.platform,
+                corvo_core::Primary::Control => mods.control,
+            },
+            ctrl: mods.control,
+            alt: mods.alt,
+            shift: mods.shift,
+        }
+    }
+
+    /// True when no shortcut modifier is held, so the keystroke is plain
+    /// text. Use this to gate typing and unmodified key handling.
+    ///
+    /// This excludes the primary modifier and the physical Control key
+    /// separately, because on Windows and Linux they are the same key and
+    /// either check alone would let a shortcut through as text.
+    fn is_unmodified(&self) -> bool {
+        !self.command && !self.ctrl && !self.alt
+    }
+
+    /// True when Control is held on its own, with no other shortcut
+    /// modifier. Covers the readline bindings such as Ctrl+P and Ctrl+W.
+    ///
+    /// Off macOS the primary modifier is Control, so a chord carrying
+    /// both is one key, not two.
+    fn is_ctrl_alone(&self) -> bool {
+        self.ctrl && !self.alt && !(self.command && !self.is_ctrl_primary())
+    }
+
+    /// True when the primary modifier is Control, so `command` and `ctrl`
+    /// are the same physical key on this platform.
+    fn is_ctrl_primary(&self) -> bool {
+        matches!(corvo_core::Primary::current(), corvo_core::Primary::Control)
+    }
+
+    /// True when the primary modifier is held and Control is not a
+    /// separate key. This is the family that opens the actions menu and
+    /// the settings window.
+    fn is_command_alone(&self) -> bool {
+        self.command && !self.alt && !self.shift && (!self.ctrl || self.is_ctrl_primary())
+    }
+}
+
+/// Names the platform's file manager, for example "Finder".
+///
+/// Windows and Linux have no Finder, so a label that reads "Show in
+/// Finder" there points at an application that does not exist.
+fn file_manager() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Finder"
+    } else if cfg!(target_os = "windows") {
+        "Explorer"
+    } else {
+        "Files"
+    }
+}
+
+/// Builds a label such as "Show in Finder" for the running platform.
+fn file_manager_label(prefix: &str) -> String {
+    format!("{prefix} {}", file_manager())
+}
+
+/// The image element for the file preview pane.
+///
+/// On Windows the plain `img` path uploads RGBA bytes into a BGRA texture,
+/// which shows every preview with red and blue exchanged. The application
+/// icon path already swaps the channels; reuse it here so both surfaces
+/// decode the same way.
+fn file_preview_image(path: std::path::PathBuf) -> impl IntoElement {
+    #[cfg(target_os = "windows")]
+    {
+        match windows_cached_render_icon(&path) {
+            Some(decoded) => {
+                return img(decoded)
+                    .max_w_full()
+                    .max_h(px(300.0))
+                    .rounded_lg()
+                    .into_any_element();
+            }
+            None => {
+                // Decode on a worker thread, then redraw when it lands.
+                windows_request_render_icon(&path);
+            }
+        }
+    }
+    img(path).max_w_full().max_h(px(300.0)).rounded_lg()
+}
+
+/// Renders a result accessory for display.
+///
+/// Most accessories are plain words such as "Application". A few carry a
+/// shortcut, which the command crate writes in token form. This returns
+/// the accessory with a shortcut translated to this platform's labels,
+/// and every other string untouched.
+fn shortcut_text(accessory: &str) -> String {
+    let looks_like_shortcut = corvo_core::shortcut::tokens(accessory)
+        .iter()
+        .any(|token| corvo_core::shortcut::primary_from_token(token).is_some());
+    if !looks_like_shortcut {
+        return accessory.to_string();
+    }
+    corvo_core::shortcut::keycaps(accessory).join("+")
+}
+
+/// One key of a shortcut hint, drawn as a keycap.
+///
+/// Takes a label rather than a character: Windows and Linux spell the
+/// primary modifier `Ctrl`, which is four characters in one key.
+fn keycap(label: &str) -> Div {
     let container = div()
         .flex_none()
         .min_w(px(18.0))
@@ -7671,7 +7887,7 @@ fn keycap(glyph: char) -> Div {
         .items_center()
         .justify_center();
 
-    if glyph == '↵' {
+    if label == "↵" {
         container.child(icons::render_phosphor_svg(
             phosphor_svgs::style::regular::ARROW_ELBOW_DOWN_LEFT,
             rgb(COLOR_TEXT_DIM),
@@ -7681,8 +7897,16 @@ fn keycap(glyph: char) -> Div {
         container
             .text_size(px(11.0))
             .text_color(rgb(COLOR_TEXT_DIM))
-            .child(glyph.to_string())
+            .child(label.to_string())
     }
+}
+
+/// The keycaps for a shortcut string, one per key.
+fn shortcut_keycaps(shortcut: &str) -> Vec<Div> {
+    corvo_core::shortcut::keycaps(shortcut)
+        .iter()
+        .map(|label| keycap(label))
+        .collect()
 }
 
 /// The icon slot of an actions-menu row.
@@ -7887,7 +8111,7 @@ impl Render for Launcher {
             .flex()
             .flex_col()
             .pt_1()
-            .rounded_xl()
+            .rounded(px(launcher_corner_radius()))
             .border_1()
             .border_color(rgb(COLOR_DIVIDER))
             .overflow_hidden()
@@ -8501,7 +8725,25 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
                         .detach();
                     }
                     _ => {
-                        let _ = corvo_platform::run_shell(&shell_cmd);
+                        // run_shell waits for the child process, so a
+                        // blocking action from a hotkey would freeze the
+                        // launcher while it ran.
+                        let title = target_id.clone();
+                        cx.spawn(async move |cx| {
+                            let result = smol::unblock(move || {
+                                corvo_platform::run_shell(&shell_cmd)
+                            })
+                            .await;
+                            if let Err(error) = result {
+                                let notice = ToastNotice::failure(
+                                    ToastCategory::System,
+                                    title,
+                                    error.to_string(),
+                                );
+                                cx.update(|cx| show_action_toast(notice, cx));
+                            }
+                        })
+                        .detach();
                     }
                 },
                 Action::OpenUrl(url) => {
@@ -8603,7 +8845,12 @@ fn execute_system_setting_intent(setting_id: &str, cx: &mut App) {
         if let Ok(action) = smol::block_on(cmd.execute(&result_id, &ctx)) {
             match action {
                 Action::RunShell(shell_cmd) => {
-                    let _ = corvo_platform::run_shell(&shell_cmd);
+                    // Off the main thread: run_shell waits for the child
+                    // process to exit.
+                    smol::unblock(move || corvo_platform::run_shell(&shell_cmd)).detach();
+                }
+                Action::RunNative(native) => {
+                    smol::unblock(move || corvo_platform::run_native_action(native)).detach();
                 }
                 Action::OpenUrl(url) => {
                     let _ = corvo_platform::open_url(&url);
@@ -8851,6 +9098,25 @@ fn set_windows_launcher_visible(window: &Window, visible: bool) {
     }
 }
 
+/// Clips the launcher HWND to the radius the root element paints. Call
+/// this after every open and every resize, because a window region does
+/// not follow the window bounds.
+#[cfg(target_os = "windows")]
+fn apply_windows_launcher_region(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    corvo_platform::set_launcher_window_region(
+        handle.hwnd.get(),
+        launcher_corner_radius() * window.scale_factor(),
+    );
+}
+
 fn open_launcher(cx: &mut App) {
     open_launcher_for(LauncherPage::Root, String::new(), cx);
 }
@@ -8899,7 +9165,6 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         _ => 1.0,
     };
     let window_width = WINDOW_WIDTH * size_scale;
-    let full_height = WINDOW_HEIGHT * size_scale;
     let initial_height = palette_size(
         store.compact_mode(),
         false,
@@ -8910,8 +9175,10 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         false,
     )
     .height(size_scale);
-    let mut initial_bounds = centered_bounds(size(px(window_width), px(full_height)), cx);
-    initial_bounds.size.height = px(initial_height);
+    // Center on the height the window will actually open at. Centering on
+    // the full height and then overwriting the height leaves a compact
+    // window sitting well above the middle of the screen.
+    let initial_bounds = centered_bounds(size(px(window_width), px(initial_height)), cx);
     let display_id = active_display_id();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(initial_bounds)),
@@ -8940,6 +9207,7 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
     cx.set_global(LauncherWindow(window));
     #[cfg(target_os = "windows")]
     let _ = window.update(cx, |_, window, _| {
+        apply_windows_launcher_region(window);
         set_windows_launcher_visible(window, true);
         window.activate_window();
     });
@@ -9010,4 +9278,151 @@ fn window_kind() -> WindowKind {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn window_kind() -> WindowKind {
     WindowKind::PopUp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn size(compact: bool, force: bool, page: LauncherPage, query: &str) -> PaletteSize {
+        palette_size(compact, force, page, query, false, false, false)
+    }
+
+    #[test]
+    fn compact_mode_collapses_on_an_empty_root_query() {
+        assert_eq!(
+            size(true, false, LauncherPage::Root, ""),
+            PaletteSize::Compact
+        );
+    }
+
+    #[test]
+    fn compact_mode_expands_once_the_user_types() {
+        assert_eq!(
+            size(true, false, LauncherPage::Root, "note"),
+            PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn compact_mode_stays_collapsed_on_whitespace() {
+        // A query of only spaces means the user has typed nothing, so the
+        // panel should stay short rather than jumping to full height.
+        assert_eq!(
+            size(true, false, LauncherPage::Root, "   "),
+            PaletteSize::Compact
+        );
+    }
+
+    #[test]
+    fn compact_mode_is_off_when_disabled() {
+        assert_eq!(
+            size(false, false, LauncherPage::Root, ""),
+            PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn an_open_overlay_expands_the_panel() {
+        // The actions menu and the burger menu need room to draw.
+        assert_eq!(
+            palette_size(
+                true,
+                false,
+                LauncherPage::Root,
+                "",
+                true,
+                false,
+                false
+            ),
+            PaletteSize::Extended
+        );
+        assert_eq!(
+            palette_size(
+                true,
+                false,
+                LauncherPage::Root,
+                "",
+                false,
+                true,
+                false
+            ),
+            PaletteSize::Extended
+        );
+        assert_eq!(
+            palette_size(
+                true,
+                false,
+                LauncherPage::Root,
+                "",
+                false,
+                false,
+                true
+            ),
+            PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn a_sub_page_is_never_compact() {
+        assert_eq!(
+            size(true, false, LauncherPage::Clipboard, ""),
+            PaletteSize::Extended
+        );
+        assert_eq!(
+            size(true, false, LauncherPage::Files, ""),
+            PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn force_expanded_overrides_compact() {
+        assert_eq!(
+            size(true, true, LauncherPage::Root, ""),
+            PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn the_compact_height_is_much_smaller_than_the_extended_one() {
+        // Guards the constant itself: a regression here would make the
+        // panel look collapsed while it is still tall.
+        assert!(COMPACT_WINDOW_HEIGHT < WINDOW_HEIGHT / 4.0);
+    }
+
+    #[test]
+    fn the_interface_size_scale_applies_to_both_heights() {
+        for scale in [0.9, 1.0, 1.1] {
+            assert_eq!(
+                PaletteSize::Compact.height(scale),
+                COMPACT_WINDOW_HEIGHT * scale
+            );
+            assert_eq!(PaletteSize::Extended.height(scale), WINDOW_HEIGHT * scale);
+        }
+    }
+
+    #[test]
+    fn the_reveal_label_names_the_platform_file_manager() {
+        // "Show in Finder" points at an application that does not exist on
+        // Windows or Linux.
+        let label = file_manager_label("Show in");
+        if cfg!(target_os = "macos") {
+            assert_eq!(label, "Show in Finder");
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(label, "Show in Explorer");
+        } else {
+            assert_eq!(label, "Show in Files");
+        }
+    }
+
+    #[test]
+    fn a_shortcut_accessory_is_translated_and_a_word_is_not() {
+        // Accessories that carry a shortcut must render with this
+        // platform's labels; plain words must pass through untouched.
+        let rendered = shortcut_text("cmd+alt+c");
+        assert!(!rendered.contains("cmd"), "got {rendered}");
+        assert!(rendered.contains(&corvo_core::Primary::current().keycap_label()));
+        assert_eq!(shortcut_text("Application"), "Application");
+        assert_eq!(shortcut_text("Folder"), "Folder");
+    }
 }
