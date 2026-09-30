@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 corvo-config = { workspace = true }
+corvo-core = { workspace = true }
 directories = { workspace = true }
 global-hotkey = "0.8"
 hex = { workspace = true }

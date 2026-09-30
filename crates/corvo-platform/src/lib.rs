@@ -443,6 +443,14 @@ pub fn set_launcher_window_visible(handle: isize, visible: bool) {
     windows::set_launcher_window_visible(handle, visible);
 }
 
+/// Clips the launcher window to a rounded rectangle. Windows draws a square
+/// client area for a borderless popup, so the corner pixels outside the
+/// painted radius stay unpainted. `radius` is in device pixels.
+#[cfg(target_os = "windows")]
+pub fn set_launcher_window_region(handle: isize, radius: f32) {
+    windows::set_launcher_window_region(handle, radius);
+}
+
 /// Finds an app bundle and data named with its bundle identifier.
 pub fn associated_app_files(_app_path: &std::path::Path) -> PlatformResult<AppFileScan> {
     #[cfg(target_os = "macos")]
@@ -538,6 +546,44 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
     {
         let _ = enabled;
         Ok(())
+    }
+}
+
+/// Performs a system operation through the platform's own API.
+///
+/// Returns a short detail line for the result toast. A platform with no
+/// implementation reports `Unsupported` rather than doing nothing, so a
+/// missing capability is visible instead of silent.
+pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<String> {
+    use corvo_core::NativeAction;
+    #[cfg(target_os = "windows")]
+    {
+        use corvo_core::NativeAction as A;
+        return match action {
+            A::LockWorkstation => windows::lock_workstation().map(|()| String::new()),
+            A::Suspend => windows::suspend().map(|()| String::new()),
+            A::EmptyRecycleBin => windows::empty_recycle_bin().map(|()| String::new()),
+            A::OpenRecycleBin => windows::open_recycle_bin().map(|()| String::new()),
+            A::ShowDesktop => windows::show_desktop().map(|()| String::new()),
+            A::QuitAllApplications => windows::quit_all_applications(),
+            A::ToggleDarkMode => windows::toggle_dark_mode(),
+            A::ToggleMute => windows::toggle_mute().map(|()| String::new()),
+            A::MediaNextTrack => windows::media_next_track().map(|()| String::new()),
+            A::MediaPreviousTrack => windows::media_previous_track().map(|()| String::new()),
+            A::MediaPlayPause => windows::media_play_pause().map(|()| String::new()),
+            A::EjectRemovableDisks => windows::eject_removable_disks(),
+        };
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // macOS and Linux express these actions as AppleScript or as
+        // desktop-specific commands, which the command layer already
+        // sends as a shell string.
+        let _ = action;
+        let _ = NativeAction::LockWorkstation;
+        Err(PlatformError::Unsupported(
+            "this action runs through the platform's own command on this system".into(),
+        ))
     }
 }
 
@@ -758,21 +804,29 @@ pub fn capture_current_window_layout() -> Vec<(String, String)> {
 pub fn apply_window_layout(placements: &[(String, String)]) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return macos::apply_window_layout(placements);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return windows::apply_window_layout(placements);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = placements;
-        Ok(())
+        Err(PlatformError::Unsupported(
+            "window layouts are not available on this platform".into(),
+        ))
     }
 }
 
-/// Tiles the target application window using native OS accessibility APIs.
+/// Tiles the target application window using native OS window APIs.
 pub fn tile_window(target_pid: Option<i32>, action: &str) -> PlatformResult<()> {
     #[cfg(target_os = "macos")]
     return macos::tile_window(target_pid, action);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return windows::tile_window(target_pid, action);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (target_pid, action);
-        Ok(())
+        Err(PlatformError::Unsupported(
+            "window management is not available on this platform".into(),
+        ))
     }
 }
 
