@@ -3093,6 +3093,10 @@ impl Launcher {
             .await;
             let (files, reached_scan_limit, message, notice) = match result {
                 Ok(moved_paths) => {
+                    if !cfg!(target_os = "macos") || moved_paths.contains(&target.path) {
+                        corvo_app_launcher::remove_cached_apps(std::slice::from_ref(&target.path));
+                    }
+                    corvo_app_launcher::reload_corpus();
                     let moved_paths: std::collections::HashSet<_> =
                         moved_paths.into_iter().collect();
                     let moved_count = moved_paths.len();
@@ -3120,6 +3124,7 @@ impl Launcher {
                     )
                 }
                 Err(error) => {
+                    corvo_app_launcher::reload_corpus();
                     let notice = ToastNotice::failure(
                         ToastCategory::Uninstallation,
                         format!("Could not remove {}", target.name),
@@ -5115,6 +5120,7 @@ impl Launcher {
 
     #[cfg(target_os = "windows")]
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        corvo_app_launcher::reload_corpus();
         let (pid, name) = match corvo_platform::frontmost_app_info() {
             Some((pid, name)) => (Some(pid), Some(name)),
             None => (corvo_platform::frontmost_app_pid(), None),
@@ -8096,11 +8102,7 @@ impl Render for Launcher {
             .border_1()
             .border_color(rgb(COLOR_DIVIDER))
             .overflow_hidden()
-            .bg(rgba(if is_collapsed {
-                self.background_color | 0xff
-            } else {
-                self.background_color
-            }))
+            .bg(rgba(self.background_color))
             .text_color(rgb(COLOR_TEXT))
             .font_family("Helvetica")
             .when(is_root, |view| {
@@ -8933,7 +8935,7 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
             }
         }
         "reload-applications" | "Reload Applications" => {
-            corvo_app_launcher::warmup();
+            corvo_app_launcher::reload_corpus();
         }
         "toggle-system-appearance" | "Toggle System Appearance" => {
             let _ = corvo_platform::run_shell(
@@ -9144,6 +9146,7 @@ fn sync_launcher_preferences(cx: &mut App) {
 }
 
 fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
+    corvo_app_launcher::reload_corpus();
     let store = cx.global::<StoreGlobal>().0.clone();
     let (previous_pid, previous_name) = match corvo_platform::frontmost_app_info() {
         Some((pid, name)) => (Some(pid), Some(name)),

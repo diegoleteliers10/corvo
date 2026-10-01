@@ -33,6 +33,7 @@ fn read_cached_corpus() -> Option<CachedCorpus> {
     {
         return None;
     }
+    cached.apps.retain(app_path_is_present);
     for app in &mut cached.apps {
         if app.icon_png.as_ref().is_some_and(|path| !path.is_file()) {
             app.icon_png = None;
@@ -68,46 +69,52 @@ fn write_cached_corpus(scopes: &[String], apps: &[AppEntry]) {
 /// on disk, so it cannot be checked with `is_file`. Store apps are
 /// re-derived from `Get-StartApps` on every scan, so they are always
 /// current and never need carrying forward.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn is_pending_icon_decode(app: &AppEntry) -> bool {
     app.icon_png.is_none() && !is_store_app_entry(app)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn is_store_app_entry(app: &AppEntry) -> bool {
     app.path.to_string_lossy().starts_with("shell:AppsFolder\\")
 }
 
 #[cfg(target_os = "windows")]
 fn publish_ready_apps(scopes: &[String], apps: &[AppEntry]) {
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.apps = ready_apps(apps, &state.apps);
+    state.scopes = scopes.to_vec();
+    drop(state);
+    notify_corpus_subscribers();
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn ready_apps(apps: &[AppEntry], previous: &[AppEntry]) -> Vec<AppEntry> {
     let mut ready = apps
         .iter()
         .filter(|app| app.icon_png.as_ref().is_some_and(|path| path.is_file()))
         .cloned()
         .collect::<Vec<_>>();
-    let mut state = corpus()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ready_paths = ready
         .iter()
         .map(|app| app.path.clone())
         .collect::<std::collections::HashSet<_>>();
-    // Carry forward only the entries the scanner found but could not show
-    // yet, and only while they are still installed. Carrying forward every
-    // known app kept an uninstalled one in the list forever, because a
-    // missing app is exactly what the scan stops reporting.
+    let pending_paths = apps
+        .iter()
+        .filter(|app| is_pending_icon_decode(app))
+        .map(|app| &app.path)
+        .collect::<std::collections::HashSet<_>>();
     ready.extend(
-        state
-            .apps
+        previous
             .iter()
             .filter(|app| !ready_paths.contains(&app.path))
-            .filter(|app| is_pending_icon_decode(app))
+            .filter(|app| pending_paths.contains(&app.path))
+            .filter(|app| app_path_is_present(app))
             .cloned(),
     );
-    state.apps = ready;
-    state.scopes = scopes.to_vec();
-    drop(state);
-    notify_corpus_subscribers();
+    ready
 }
 
 #[derive(Default)]
@@ -481,12 +488,31 @@ pub fn cached_apps() -> Vec<AppEntry> {
     corpus_apps()
 }
 
+/// Removes app entries after the platform removes their files.
+pub fn remove_cached_apps(paths: &[PathBuf]) {
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.apps.retain(|app| !paths.contains(&app.path));
+    #[cfg(target_os = "windows")]
+    write_cached_corpus(&state.scopes, &state.apps);
+    drop(state);
+    notify_corpus_subscribers();
+}
+
+fn app_path_is_present(app: &AppEntry) -> bool {
+    if app.path.to_string_lossy().starts_with("shell:AppsFolder\\") {
+        return true;
+    }
+    app.path.try_exists().unwrap_or(true)
+}
+
 fn corpus_apps() -> Vec<AppEntry> {
-    corpus()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .apps
-        .clone()
+    let mut state = corpus()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.apps.retain(app_path_is_present);
+    state.apps.clone()
 }
 
 /// Launch counts, in memory. Persistent frecency lands in phase 3 with
@@ -623,6 +649,87 @@ mod tests {
     }
 
     #[test]
+    fn deleted_app_paths_are_not_present() {
+        let directory = std::env::temp_dir().join(format!(
+            "corvo-app-launcher-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        for name in ["Removed.app", "removed.desktop", "Removed.lnk"] {
+            let path = directory.join(name);
+            std::fs::write(&path, []).unwrap();
+            let entry = AppEntry {
+                name: name.into(),
+                path: path.clone(),
+                icon_png: None,
+            };
+            assert!(app_path_is_present(&entry));
+            std::fs::remove_file(&path).unwrap();
+            assert!(!app_path_is_present(&entry));
+        }
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn corpus_reads_and_removal_drop_deleted_app_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "corvo-corpus-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, []).unwrap();
+        let entry = AppEntry {
+            name: "Removed".into(),
+            path: path.clone(),
+            icon_png: None,
+        };
+        let saved = {
+            let mut state = corpus().write().unwrap();
+            std::mem::replace(&mut state.apps, vec![entry.clone()])
+        };
+        assert_eq!(cached_apps().len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        assert!(cached_apps().is_empty());
+        corpus().write().unwrap().apps = vec![entry];
+        remove_cached_apps(&[path]);
+        assert!(corpus().read().unwrap().apps.is_empty());
+        corpus().write().unwrap().apps = saved;
+    }
+
+    #[test]
+    fn partial_publish_drops_apps_absent_from_the_scan() {
+        let previous = app("Old", ".");
+        assert!(ready_apps(&[], &[previous]).is_empty());
+    }
+
+    #[test]
+    fn partial_publish_keeps_a_scanned_app_until_its_icon_is_ready() {
+        let previous = app("Present", ".");
+        let scanned = previous.clone();
+        let ready = ready_apps(&[scanned], &[previous]);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].name, "Present");
+    }
+
+    #[test]
+    fn store_app_ids_do_not_require_a_file() {
+        let entry = app(
+            "Store",
+            r"shell:AppsFolder\Microsoft.Store_8wekyb3d8bbwe!App",
+        );
+        assert!(is_store_app_entry(&entry));
+        assert!(app_path_is_present(&entry));
+    }
+
+    #[test]
     fn query_matches_names_fuzzily() {
         let apps = vec![app("Safari", "/Safari"), app("Notes", "/Notes")];
 
@@ -708,7 +815,6 @@ mod tests {
     /// that is the only signal that it is gone. Carrying the previous
     /// entry forward re-added it, so it stayed in the launcher forever.
     #[test]
-    #[cfg(target_os = "windows")]
     fn an_uninstalled_store_app_is_not_carried_forward() {
         let uninstalled = app("Gone", r"shell:AppsFolder\Microsoft.Gone_8wekyb3d8bbwe!App");
         // A Store app that has no decoded icon is not "pending", it is
@@ -721,7 +827,6 @@ mod tests {
     /// intermediate publishes, otherwise every app blinks out while the
     /// icons stream in.
     #[test]
-    #[cfg(target_os = "windows")]
     fn a_shortcut_waiting_for_its_icon_is_carried_forward() {
         let pending = app("Pending", r"C:\Program Files\Pending\Pending.lnk");
         assert!(is_pending_icon_decode(&pending));
