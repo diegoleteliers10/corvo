@@ -1,5 +1,24 @@
 //! Pure scalar shunting-yard arithmetic evaluation.
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarError {
+    InvalidExpression,
+    DivisionByZero,
+    NonFiniteResult,
+}
+
+impl std::fmt::Display for ScalarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidExpression => "Invalid expression",
+            Self::DivisionByZero => "Division by zero",
+            Self::NonFiniteResult => "The result is not finite",
+        })
+    }
+}
+
+impl std::error::Error for ScalarError {}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tok {
     Num(f64),
@@ -9,7 +28,7 @@ enum Tok {
     RParen,
 }
 
-fn tokenize(input: &str) -> Result<Vec<Tok>, ()> {
+fn tokenize(input: &str) -> Result<Vec<Tok>, ScalarError> {
     let mut toks = Vec::new();
     let mut prev: Option<Tok> = None;
     let mut chars = input.chars().peekable();
@@ -30,7 +49,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ()> {
                     } else if d == '.' {
                         dot_count += 1;
                         if dot_count > 1 {
-                            return Err(());
+                            return Err(ScalarError::InvalidExpression);
                         }
                         num.push(d);
                         chars.next();
@@ -38,7 +57,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ()> {
                         break;
                     }
                 }
-                let value: f64 = num.parse().map_err(|_| ())?;
+                let value: f64 = num.parse().map_err(|_| ScalarError::InvalidExpression)?;
                 prev = Some(Tok::Num(value));
                 toks.push(Tok::Num(value));
             }
@@ -67,7 +86,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ()> {
                 prev = Some(Tok::RParen);
                 toks.push(Tok::RParen);
             }
-            _ => return Err(()),
+            _ => return Err(ScalarError::InvalidExpression),
         }
     }
     Ok(toks)
@@ -82,7 +101,7 @@ fn precedence(op: char) -> u8 {
     }
 }
 
-fn apply_bin(op: char, a: f64, b: f64) -> Result<f64, ()> {
+fn apply_bin(op: char, a: f64, b: f64) -> Result<f64, ScalarError> {
     match op {
         '+' => Ok(a + b),
         '-' => Ok(a - b),
@@ -90,15 +109,16 @@ fn apply_bin(op: char, a: f64, b: f64) -> Result<f64, ()> {
         '/' if b != 0.0 => Ok(a / b),
         '%' if b != 0.0 => Ok(a % b),
         '^' => Ok(a.powf(b)),
-        _ => Err(()),
+        '/' | '%' => Err(ScalarError::DivisionByZero),
+        _ => Err(ScalarError::InvalidExpression),
     }
 }
 
 /// Evaluates a pure mathematical expression containing numbers, operators, and parentheses.
-pub fn evaluate_scalar(input: &str) -> Result<f64, ()> {
+pub fn evaluate_scalar(input: &str) -> Result<f64, ScalarError> {
     let toks = tokenize(input)?;
     if toks.is_empty() {
-        return Err(());
+        return Err(ScalarError::InvalidExpression);
     }
 
     let mut output: Vec<Tok> = Vec::new();
@@ -121,7 +141,8 @@ pub fn evaluate_scalar(input: &str) -> Result<f64, ()> {
                     if !pop {
                         break;
                     }
-                    output.push(ops.pop().unwrap());
+                    ops.pop();
+                    output.push(top);
                 }
                 ops.push(tok);
             }
@@ -130,7 +151,7 @@ pub fn evaluate_scalar(input: &str) -> Result<f64, ()> {
                 match ops.pop() {
                     Some(Tok::LParen) => break,
                     Some(t) => output.push(t),
-                    None => return Err(()),
+                    None => return Err(ScalarError::InvalidExpression),
                 }
             },
         }
@@ -138,7 +159,7 @@ pub fn evaluate_scalar(input: &str) -> Result<f64, ()> {
 
     while let Some(t) = ops.pop() {
         if matches!(t, Tok::LParen) {
-            return Err(());
+            return Err(ScalarError::InvalidExpression);
         }
         output.push(t);
     }
@@ -148,28 +169,28 @@ pub fn evaluate_scalar(input: &str) -> Result<f64, ()> {
         match tok {
             Tok::Num(v) => stack.push(v),
             Tok::Un => {
-                let Some(v) = stack.pop() else { return Err(()) };
+                let Some(v) = stack.pop() else { return Err(ScalarError::InvalidExpression) };
                 stack.push(-v);
             }
             Tok::Bin(op) => {
                 let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
-                    return Err(());
+                    return Err(ScalarError::InvalidExpression);
                 };
                 stack.push(apply_bin(op, a, b)?);
             }
-            _ => return Err(()),
+            _ => return Err(ScalarError::InvalidExpression),
         }
     }
 
     if stack.len() != 1 {
-        return Err(());
+        return Err(ScalarError::InvalidExpression);
     }
 
     let value = stack[0];
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(())
+        Err(ScalarError::NonFiniteResult)
     }
 }
 
@@ -200,5 +221,7 @@ mod tests {
     fn rejects_malformed() {
         assert!(evaluate_scalar("font-size").is_err());
         assert!(evaluate_scalar("1..2").is_err());
+        assert_eq!(evaluate_scalar("1 % 0"), Err(ScalarError::DivisionByZero));
+        assert_eq!(evaluate_scalar("10^1000"), Err(ScalarError::NonFiniteResult));
     }
 }

@@ -269,7 +269,7 @@ mod tests {
             subtitle_is_exact: false,
             priority: 0,
         };
-        let mut candidates = vec![
+        let mut candidates = [
             candidate("low", 0, 100.0),
             candidate("mid", 200, 50.0),
             candidate("high", 400, 0.0),
@@ -300,7 +300,7 @@ mod tests {
             subtitle_is_exact: false,
             priority: 0,
         };
-        let mut candidates = vec![
+        let mut candidates = [
             candidate("boosted-low", true, 0, 100.0),
             candidate("regular-high", false, 400, 250.0),
             candidate("boosted-mid", true, 350, 0.0),

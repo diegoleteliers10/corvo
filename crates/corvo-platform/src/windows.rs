@@ -15,7 +15,16 @@ use super::{
     AppEntry, AppFileEntry, AppFileScan, PlatformError, PlatformOps, PlatformResult, WindowHandle,
 };
 
+#[path = "windows_icons.rs"]
+mod windows_icons;
+
 pub struct WindowsPlatform;
+
+#[repr(C)]
+struct ClientPoint {
+    x: i32,
+    y: i32,
+}
 
 #[repr(C)]
 struct ClientRect {
@@ -42,6 +51,8 @@ pub fn set_launcher_window_region(handle: isize, radius: f32) {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn GetClientRect(window: isize, rect: *mut ClientRect) -> i32;
+        fn GetWindowRect(window: isize, rect: *mut ClientRect) -> i32;
+        fn ClientToScreen(window: isize, point: *mut ClientPoint) -> i32;
         fn SetWindowRgn(window: isize, region: isize, redraw: i32) -> i32;
     }
     #[allow(non_snake_case)]
@@ -65,6 +76,7 @@ pub fn set_launcher_window_region(handle: isize, radius: f32) {
         bottom: 0,
     };
     if unsafe { GetClientRect(handle, &mut rect) } == 0 {
+        crate::diagnostics::record_error("window", "client_bounds_failed");
         return;
     }
     let width = rect.right - rect.left;
@@ -83,22 +95,30 @@ pub fn set_launcher_window_region(handle: isize, radius: f32) {
         unsafe { SetWindowRgn(handle, 0, 1) };
         return;
     }
-    // The region is in window coordinates, not client coordinates.
-    let region = unsafe {
-        CreateRoundRectRgn(
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            diameter,
-            diameter,
-        )
+    let mut window_rect = ClientRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
     };
+    let mut client_origin = ClientPoint { x: 0, y: 0 };
+    if unsafe { GetWindowRect(handle, &mut window_rect) } == 0
+        || unsafe { ClientToScreen(handle, &mut client_origin) } == 0
+    {
+        crate::diagnostics::record_error("window", "region_origin_failed");
+        return;
+    }
+    let left = client_origin.x - window_rect.left;
+    let top = client_origin.y - window_rect.top;
+    let region =
+        unsafe { CreateRoundRectRgn(left, top, left + width, top + height, diameter, diameter) };
     if region == 0 {
+        crate::diagnostics::record_error("window", "region_create_failed");
         return;
     }
     // SetWindowRgn takes ownership of the region and deletes it.
     if unsafe { SetWindowRgn(handle, region, 1) } == 0 {
+        crate::diagnostics::record_error("window", "region_apply_failed");
         unsafe { DeleteObject(region) };
     }
 }
@@ -1919,9 +1939,7 @@ fn powershell_output(script: &str) -> PlatformResult<String> {
         .map_err(|error| PlatformError::Os(format!("PowerShell returned invalid UTF-8: {error}")))
 }
 
-/// Icons one PowerShell pass extracts. Each shortcut costs a WScript.Shell
-/// parse plus an icon lookup, so one uncapped pass holds the scan thread
-/// for minutes on a machine with a full Start Menu.
+/// Maximum packaged app icon jobs in one PowerShell pass.
 const ICON_BATCH_SIZE: usize = 40;
 
 /// Runs one icon extraction pass. The job list goes in a file next to the
@@ -1949,7 +1967,8 @@ fn write_icon_jobs(jobs: &[serde_json::Value]) -> Option<PathBuf> {
     let directory = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)?
         .join("Corvo")
-        .join("icon-cache");
+        .join("icon-cache")
+        .join("native-v1");
     std::fs::create_dir_all(&directory).ok()?;
     let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = directory.join(format!("icon-jobs-{}-{serial}.json", std::process::id()));
@@ -1984,18 +2003,25 @@ fn cached_shortcut_icon(shortcut: &Path) -> Option<PathBuf> {
     cached_icon_for_key(&shortcut.to_string_lossy().to_lowercase())
 }
 
-fn cached_icon_for_key(key: &str) -> Option<PathBuf> {
+fn icon_cache_path(key: &str) -> Option<PathBuf> {
     let cache_dir = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)?
         .join("Corvo")
-        .join("icon-cache");
+        .join("icon-cache")
+        .join("native-v1");
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
-    let cached = cache_dir.join(format!("{:016x}.png", hasher.finish()));
+    Some(cache_dir.join(format!("{:016x}.png", hasher.finish())))
+}
+
+fn cached_icon_for_key(key: &str) -> Option<PathBuf> {
+    let cached = icon_cache_path(key)?;
     if !cached.is_file() {
         return None;
     }
-    if image::open(&cached).is_ok() {
+    if image::open(&cached)
+        .is_ok_and(|image| image.to_rgba8().pixels().any(|pixel| pixel[3] != 0))
+    {
         Some(cached)
     } else {
         let _ = std::fs::remove_file(&cached);
@@ -2003,10 +2029,35 @@ fn cached_icon_for_key(key: &str) -> Option<PathBuf> {
     }
 }
 
+fn cache_native_icon(source: &Path, key: &str) -> Option<PathBuf> {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pixels = windows_icons::extract_icon(source)?;
+    let target = icon_cache_path(key)?;
+    std::fs::create_dir_all(target.parent()?).ok()?;
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = target.with_extension(format!("{}-{serial}.tmp", std::process::id()));
+    let saved = image::save_buffer_with_format(
+        &temporary,
+        &pixels,
+        windows_icons::ICON_SIZE as u32,
+        windows_icons::ICON_SIZE as u32,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    );
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return None;
+    }
+    let renamed = std::fs::rename(&temporary, &target);
+    let _ = std::fs::remove_file(&temporary);
+    renamed.ok()?;
+    Some(target)
+}
+
 fn fill_start_app_icons(apps: &mut [AppEntry]) {
     let Some(cache_dir) = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map(|path| path.join("Corvo").join("icon-cache"))
+        .map(|path| path.join("Corvo").join("icon-cache").join("native-v1"))
     else {
         return;
     };
@@ -2017,7 +2068,9 @@ fn fill_start_app_icons(apps: &mut [AppEntry]) {
             .to_string_lossy()
             .strip_prefix("shell:AppsFolder\\")
         {
-            app.icon_png = cached_icon_for_key(&app_id.to_lowercase());
+            let key = app_id.to_lowercase();
+            app.icon_png = cached_icon_for_key(&key)
+                .or_else(|| cache_native_icon(&app.path, &key));
         }
     }
 
@@ -2131,6 +2184,7 @@ foreach ($item in $items) {
 "#;
     for batch in items.chunks(ICON_BATCH_SIZE) {
         if let Err(error) = run_icon_jobs(batch, &script) {
+            crate::diagnostics::record_error("icons", "packaged_extract_failed");
             eprintln!("corvo: could not extract Windows Start app icons: {error}");
             return;
         }
@@ -2149,143 +2203,16 @@ foreach ($item in $items) {
 }
 
 fn fill_shortcut_icons(apps: &mut [AppEntry]) {
-    let Some(cache_dir) = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|path| path.join("Corvo").join("icon-cache"))
-    else {
-        return;
-    };
-
-    for app in apps.iter_mut() {
-        if app
-            .path
+    for app in apps.iter_mut().filter(|app| {
+        app.path
             .extension()
             .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("lnk"))
-        {
-            app.icon_png = cached_shortcut_icon(&app.path);
-        }
-    }
-
-    let missing = apps
-        .iter()
-        .filter(|app| {
-            app.icon_png.is_none()
-                && app
-                    .path
-                    .extension()
-                    .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("lnk"))
-        })
-        .map(|app| app.path.clone())
-        .filter(|path| cached_shortcut_icon(path).is_none())
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return;
-    }
-    if std::fs::create_dir_all(&cache_dir).is_err() {
-        return;
-    }
-
-    let cache_paths = missing
-        .iter()
-        .map(|path| {
-            let mut hasher = DefaultHasher::new();
-            path.to_string_lossy().to_lowercase().hash(&mut hasher);
-            (
-                path.clone(),
-                cache_dir.join(format!("{:016x}.png", hasher.finish())),
-            )
-        })
-        .collect::<Vec<_>>();
-    let script_items = cache_paths
-        .iter()
-        .map(|(source, target)| (source.to_string_lossy(), target.to_string_lossy()))
-        .map(|(source, target)| serde_json::json!({ "source": source, "target": target }))
-        .collect::<Vec<_>>();
-    let script = r#"
-$shell = New-Object -ComObject WScript.Shell
-Add-Type -AssemblyName System.Drawing
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-public struct CorvoShortcutFileInfo {
-    public IntPtr hIcon;
-    public int iIcon;
-    public uint dwAttributes;
-    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
-    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
-}
-public static class CorvoIconNative {
-    [DllImport("shell32.dll", EntryPoint = "SHGetFileInfoW", CharSet = CharSet.Unicode)]
-    public static extern IntPtr SHGetFileInfo(string path, uint attributes, ref CorvoShortcutFileInfo info, uint size, uint flags);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool DestroyIcon(IntPtr handle);
-}
-'@
-foreach ($item in $items) {
-    $handle = [IntPtr]::Zero
-    $icon = $null
-    $bitmap = $null
-    $large = $null
-    $small = $null
-    try {
-        $info = [CorvoShortcutFileInfo]::new()
-        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][CorvoShortcutFileInfo])
-        $shortcut = $shell.CreateShortcut([string]$item.source)
-        $location = [string]$shortcut.IconLocation
-        $iconPath = [string]$shortcut.TargetPath
-        $iconIndex = 0
-        if ($location) {
-            $match = [regex]::Match($location, '^(.*?)(?:,\s*(-?\d+))?$')
-            if ($match.Success) {
-                $iconPath = $match.Groups[1].Value.Trim().Trim('"')
-                if ($match.Groups[2].Success) { $iconIndex = [int]$match.Groups[2].Value }
-            }
-        }
-        $iconPath = [Environment]::ExpandEnvironmentVariables($iconPath)
-        if (-not (Test-Path -LiteralPath $iconPath)) { $iconPath = [string]$shortcut.TargetPath; $iconIndex = 0 }
-        $iconPath = [Environment]::ExpandEnvironmentVariables($iconPath)
-        if ($iconPath -and (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
-            $large = New-Object IntPtr[] 1
-            $small = New-Object IntPtr[] 1
-            if ([CorvoIconNative]::ExtractIconEx($iconPath, $iconIndex, $large, $small, 1) -gt 0) {
-                $handle = $large[0]
-                if ($handle -eq [IntPtr]::Zero) { $handle = $small[0] }
-            }
-            if ($handle -ne [IntPtr]::Zero) {
-                $icon = [System.Drawing.Icon]::FromHandle($handle)
-            } else {
-                try { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath) } catch { }
-            }
-        }
-        if (-not $icon) {
-            if ([CorvoIconNative]::SHGetFileInfo([string]$item.source, 0, [ref]$info, $size, 0x00000100) -ne [IntPtr]::Zero -and $info.hIcon -ne [IntPtr]::Zero) {
-                $icon = [System.Drawing.Icon]::FromHandle($info.hIcon)
-            }
-        }
-        if (-not $icon) { continue }
-        $bitmap = $icon.ToBitmap()
-        $bitmap.Save([string]$item.target, [System.Drawing.Imaging.ImageFormat]::Png)
-    } catch { }
-    finally {
-        if ($bitmap) { $bitmap.Dispose() }
-        if ($info.hIcon -ne [IntPtr]::Zero) { [void][CorvoIconNative]::DestroyIcon($info.hIcon) }
-        if ($large -and $large[0] -ne [IntPtr]::Zero) { [void][CorvoIconNative]::DestroyIcon($large[0]) }
-        if ($small -and $small[0] -ne [IntPtr]::Zero) { [void][CorvoIconNative]::DestroyIcon($small[0]) }
-    }
-}
-"#;
-    for batch in script_items.chunks(ICON_BATCH_SIZE) {
-        if let Err(error) = run_icon_jobs(batch, &script) {
-            eprintln!("corvo: could not extract Windows shortcut icons: {error}");
-            return;
-        }
-        for app in apps.iter_mut() {
-            if app.icon_png.is_none() {
-                app.icon_png = cached_shortcut_icon(&app.path);
-            }
+    }) {
+        let key = app.path.to_string_lossy().to_lowercase();
+        app.icon_png = cached_shortcut_icon(&app.path)
+            .or_else(|| cache_native_icon(&app.path, &key));
+        if app.icon_png.is_none() {
+            crate::diagnostics::record_error("icons", "shortcut_extract_failed");
         }
     }
 }
@@ -2390,6 +2317,111 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_region_follows_client_bounds_after_resize() {
+        #[allow(non_snake_case)]
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateWindowExW(
+                ex_style: u32,
+                class: *const u16,
+                title: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                parent: isize,
+                menu: isize,
+                instance: isize,
+                param: *const (),
+            ) -> isize;
+            fn DestroyWindow(window: isize) -> i32;
+            fn SetWindowPos(
+                window: isize,
+                after: isize,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                flags: u32,
+            ) -> i32;
+            fn GetClientRect(window: isize, rect: *mut ClientRect) -> i32;
+            fn GetWindowRect(window: isize, rect: *mut ClientRect) -> i32;
+            fn ClientToScreen(window: isize, point: *mut ClientPoint) -> i32;
+            fn GetWindowRgn(window: isize, region: isize) -> i32;
+        }
+        #[allow(non_snake_case)]
+        #[link(name = "gdi32")]
+        unsafe extern "system" {
+            fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
+            fn GetRgnBox(region: isize, rect: *mut ClientRect) -> i32;
+            fn DeleteObject(object: isize) -> i32;
+        }
+        struct Fixture {
+            window: isize,
+            region: isize,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                unsafe {
+                    DestroyWindow(self.window);
+                    DeleteObject(self.region);
+                }
+            }
+        }
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        // A border gives the client area a nonzero origin in window coordinates.
+        let window = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                0x80800000,
+                100,
+                100,
+                750,
+                475,
+                0,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(window, 0);
+        let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        let fixture = Fixture { window, region };
+        assert_ne!(fixture.region, 0);
+        for (width, height) in [(750, 475), (750, 58), (825, 523), (750, 475)] {
+            assert_ne!(
+                unsafe { SetWindowPos(window, 0, 0, 0, width, height, 0x0016) },
+                0
+            );
+            set_launcher_window_region(window, 12.0);
+            let blank = || ClientRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            let mut client = blank();
+            let mut frame = blank();
+            let mut clipped = blank();
+            let mut origin = ClientPoint { x: 0, y: 0 };
+            assert_ne!(unsafe { GetClientRect(window, &mut client) }, 0);
+            assert_ne!(unsafe { GetWindowRect(window, &mut frame) }, 0);
+            assert_ne!(unsafe { ClientToScreen(window, &mut origin) }, 0);
+            assert_ne!(unsafe { GetWindowRgn(window, region) }, 0);
+            assert_ne!(unsafe { GetRgnBox(region, &mut clipped) }, 0);
+            let left = origin.x - frame.left;
+            let top = origin.y - frame.top;
+            assert!(left > 0 && top > 0);
+            assert_eq!([clipped.left, clipped.top], [left, top]);
+            assert!((left + client.right - 1..=left + client.right).contains(&clipped.right));
+            assert!((top + client.bottom - 1..=top + client.bottom).contains(&clipped.bottom));
+        }
+    }
 
     /// Every action a user can pick from the window-management command.
     const ALL_ACTIONS: &[&str] = &[

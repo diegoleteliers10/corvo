@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "corvo"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "corvo-app-launcher",
  "corvo-brew",
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-app-launcher"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-config",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-brew"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-calculator"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-clipboard-manager"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1176,17 +1176,18 @@ dependencies = [
 
 [[package]]
 name = "corvo-config"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "corvo-core",
  "directories",
+ "log",
  "serde",
  "toml 0.8.23",
 ]
 
 [[package]]
 name = "corvo-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "inventory",
@@ -1196,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-emoji-picker"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1205,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-file-search"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1214,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-kill-process"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1224,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-platform"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "arboard",
  "corvo-config",
@@ -1234,6 +1235,7 @@ dependencies = [
  "hex",
  "image",
  "libc",
+ "log",
  "minisign-verify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -1249,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-quicklinks"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1257,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-snippets"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1265,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-system-actions"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-config",
@@ -1277,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-ui"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "corvo-app-launcher",
  "corvo-brew",
@@ -1300,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-web-search-fallback"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-core",
@@ -1308,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "corvo-window-management"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "corvo-config",

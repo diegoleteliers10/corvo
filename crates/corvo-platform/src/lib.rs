@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub mod hotkey;
+pub mod diagnostics;
 pub mod ipc;
 pub mod permissions;
 pub mod updates;

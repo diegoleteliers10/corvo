@@ -43,3 +43,10 @@ jobs:
       # same type check on every push to main, for every target.
       - name: Check
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+      - name: Test local diagnostics
+        run: cargo test -p corvo-platform --lib --target ${{ matrix.target }} diagnostics
+
+      - name: Test Windows platform
+        if: runner.os == 'Windows'
+        run: cargo test -p corvo-platform --lib --target ${{ matrix.target }} windows

@@ -334,7 +334,7 @@ fn try_typed_arithmetic(expr: &str) -> Option<CalcOutcome> {
                     });
                 }
                 '*' => {
-                    let total_dim = u_a.dim.mul(u_b.dim);
+                    let total_dim = u_a.dim.product(u_b.dim);
                     let result_base = (num_a * u_a.factor) * (num_b * u_b.factor);
 
                     let compound_sym = if u_a.symbol == u_b.symbol {
@@ -364,7 +364,7 @@ fn try_typed_arithmetic(expr: &str) -> Option<CalcOutcome> {
                     if num_b == 0.0 {
                         return None;
                     }
-                    let total_dim = u_a.dim.div(u_b.dim);
+                    let total_dim = u_a.dim.quotient(u_b.dim);
                     let result_base = (num_a * u_a.factor) / (num_b * u_b.factor);
 
                     if total_dim.is_scalar() {
@@ -408,11 +408,8 @@ fn find_binary_operator_outside_parens(s: &str, op: char) -> Option<usize> {
         match ch {
             '(' => paren_depth += 1,
             ')' => paren_depth = paren_depth.saturating_sub(1),
-            c if c == op && paren_depth == 0 => {
-                // Must be binary: not at beginning or end
-                if idx > 0 && idx + 1 < s.len() {
-                    return Some(idx);
-                }
+            c if c == op && paren_depth == 0 && idx > 0 && idx + 1 < s.len() => {
+                return Some(idx);
             }
             _ => {}
         }

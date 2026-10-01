@@ -937,16 +937,27 @@ where
     let path = dirs.config_dir().join(file);
     match fs::read_to_string(&path) {
         Ok(text) => toml::from_str::<T>(&text).ok().unwrap_or_else(|| {
+            log::error!("configuration_parse_failed");
             eprintln!("corvo: {file} is malformed, using defaults");
             default.clone()
         }),
-        Err(_) => {
-            let _ = fs::create_dir_all(dirs.config_dir());
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::error!("configuration_read_failed");
+            }
+            if fs::create_dir_all(dirs.config_dir()).is_err() {
+                log::error!("configuration_directory_failed");
+            }
             match toml::to_string_pretty(default) {
                 Ok(text) => {
-                    let _ = fs::write(&path, &text);
+                    if fs::write(&path, &text).is_err() {
+                        log::error!("configuration_write_failed");
+                    }
                 }
-                Err(err) => eprintln!("corvo: cannot serialize default {file}: {err}"),
+                Err(err) => {
+                    log::error!("configuration_serialize_failed");
+                    eprintln!("corvo: cannot serialize default {file}: {err}");
+                }
             }
             default.clone()
         }

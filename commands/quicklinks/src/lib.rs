@@ -67,7 +67,7 @@ impl Command for QuicklinksCommand {
                 accessory: link.hotkey.clone(),
             })
             .collect();
-        results.sort_by(|left, right| right.score.cmp(&left.score));
+        results.sort_by_key(|result| std::cmp::Reverse(result.score));
         results.truncate(ctx.max_results);
         results
     }

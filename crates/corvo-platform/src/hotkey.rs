@@ -217,6 +217,7 @@ impl HotkeyManager {
                 match GlobalHotKeyManager::new() {
                     Ok(mgr) => Some(mgr),
                     Err(err) => {
+                        crate::diagnostics::record_error("hotkey", "manager_init_failed");
                         eprintln!("corvo: cannot initialize GlobalHotKeyManager: {err}");
                         None
                     }
@@ -305,12 +306,14 @@ impl HotkeyManager {
                 if let Some((launch_mod, launch_code)) = parse_hotkey_string(launcher_hotkey_str) {
                     let launch_hk = HotKey::new(Some(launch_mod), launch_code);
                     if let Err(err) = manager.register(launch_hk) {
+                        crate::diagnostics::record_error("hotkey", "launcher_registration_failed");
                         eprintln!("corvo: cannot register main launcher hotkey: {err}");
                     } else {
                         new_id_map.insert(launch_hk.id(), HotkeyIntent::ToggleLauncher);
                         new_registered.push(launch_hk);
                     }
                 } else {
+                    crate::diagnostics::record_error("hotkey", "launcher_parse_failed");
                     eprintln!("corvo: cannot parse main launcher hotkey: '{launcher_hotkey_str}'");
                 }
             }
@@ -324,6 +327,7 @@ impl HotkeyManager {
                         continue;
                     }
                     if let Err(err) = manager.register(hk) {
+                        crate::diagnostics::record_error("hotkey", "binding_registration_failed");
                         eprintln!("corvo: cannot register hotkey '{hotkey_str}': {err}");
                     } else {
                         new_id_map.insert(hk.id(), intent);

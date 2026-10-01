@@ -21,7 +21,7 @@ impl Dim {
     pub const SPEED: Dim = Dim { length: 1, mass: 0, time: -1, data: 0, temp: 0 };
     pub const FREQUENCY: Dim = Dim { length: 0, mass: 0, time: -1, data: 0, temp: 0 };
 
-    pub fn mul(self, other: Dim) -> Dim {
+    pub fn product(self, other: Dim) -> Dim {
         Dim {
             length: self.length + other.length,
             mass: self.mass + other.mass,
@@ -31,7 +31,7 @@ impl Dim {
         }
     }
 
-    pub fn div(self, other: Dim) -> Dim {
+    pub fn quotient(self, other: Dim) -> Dim {
         Dim {
             length: self.length - other.length,
             mass: self.mass - other.mass,

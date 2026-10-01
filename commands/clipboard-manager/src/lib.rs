@@ -108,6 +108,7 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
         return Vec::new();
     };
     let Ok(entries) = serde_json::from_str::<Vec<ClipboardEntry>>(&data) else {
+        corvo_platform::diagnostics::record_error("clipboard", "history_parse_failed");
         eprintln!("corvo: clipboard_history.json malformed, starting fresh");
         return Vec::new();
     };

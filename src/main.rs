@@ -25,6 +25,8 @@ fn main() {
         }
     }
 
+    corvo_platform::diagnostics::init(env!("CARGO_PKG_VERSION"));
+
     let (ipc_tx, ipc_rx) = smol::channel::unbounded::<()>();
     ipc::serve(ipc_tx);
 
@@ -34,7 +36,9 @@ fn main() {
     let config = corvo_config::ConfigService::load();
     let launch_at_login = config.settings().launch_at_login;
     std::thread::spawn(move || {
-        let _ = corvo_platform::set_launch_at_login(launch_at_login);
+        if corvo_platform::set_launch_at_login(launch_at_login).is_err() {
+            corvo_platform::diagnostics::record_error("startup", "launch_at_login_failed");
+        }
     });
     let clipboard = &config.settings().clipboard;
     corvo_clipboard_manager::set_preferences(corvo_clipboard_manager::ClipboardPreferences {

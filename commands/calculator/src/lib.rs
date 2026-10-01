@@ -6,7 +6,7 @@ pub mod scalar;
 pub mod units;
 
 pub use engine::{evaluate, CalcOutcome};
-pub use scalar::evaluate_scalar;
+pub use scalar::{evaluate_scalar, ScalarError};
 pub use units::{convert_units, Dim, UNITS};
 
 use corvo_core::{
@@ -190,9 +190,9 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert_eq!(evaluate_scalar("1 / 0"), Err(()));
-        assert_eq!(evaluate_scalar("(1 + 2"), Err(()));
-        assert_eq!(evaluate_scalar(""), Err(()));
-        assert_eq!(evaluate_scalar("foo"), Err(()));
+        assert_eq!(evaluate_scalar("1 / 0"), Err(ScalarError::DivisionByZero));
+        assert_eq!(evaluate_scalar("(1 + 2"), Err(ScalarError::InvalidExpression));
+        assert_eq!(evaluate_scalar(""), Err(ScalarError::InvalidExpression));
+        assert_eq!(evaluate_scalar("foo"), Err(ScalarError::InvalidExpression));
     }
 }

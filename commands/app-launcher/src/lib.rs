@@ -408,6 +408,7 @@ fn start_scan(force: bool) {
             let mut apps = match scanned {
                 Ok(apps) => apps,
                 Err(error) => {
+                    corvo_platform::diagnostics::record_error("applications", "scan_failed");
                     eprintln!("corvo: could not scan applications: {error}");
                     previous_apps
                 }
@@ -440,7 +441,10 @@ fn start_scan(force: bool) {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match scanned {
                 Ok(apps) => state.apps = apps,
-                Err(error) => eprintln!("corvo: could not scan applications: {error}"),
+                Err(error) => {
+                    corvo_platform::diagnostics::record_error("applications", "scan_failed");
+                    eprintln!("corvo: could not scan applications: {error}");
+                }
             }
             state.scopes = scopes.clone();
             state.scanned_at = Some(Instant::now());

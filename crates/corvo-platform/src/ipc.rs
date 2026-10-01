@@ -58,12 +58,14 @@ pub fn serve(tx: smol::channel::Sender<()>) {
             match UnixListener::bind(&path) {
                 Ok(listener) => listener,
                 Err(err) => {
+                    crate::diagnostics::record_error("ipc", "socket_bind_failed");
                     eprintln!("corvo: cannot bind ipc socket at {}: {err}", path.display());
                     return;
                 }
             }
         }
         Err(err) => {
+            crate::diagnostics::record_error("ipc", "socket_bind_failed");
             eprintln!("corvo: cannot bind ipc socket at {}: {err}", path.display());
             return;
         }
@@ -222,6 +224,7 @@ pub fn serve(tx: smol::channel::Sender<()>) {
                 )
             };
             if pipe == INVALID_HANDLE_VALUE {
+                crate::diagnostics::record_error("ipc", "pipe_create_failed");
                 std::thread::sleep(std::time::Duration::from_millis(250));
                 continue;
             }

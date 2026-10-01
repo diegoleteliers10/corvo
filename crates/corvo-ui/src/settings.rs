@@ -385,7 +385,10 @@ impl SettingsView {
                 );
                 corvo_platform::hotkey::notify_hotkeys_changed();
             }
-            Err(error) => self.save_error = Some(format!("Could not save Quicklinks: {error}")),
+            Err(error) => {
+                corvo_platform::diagnostics::record_error("settings", "quicklinks_save_failed");
+                self.save_error = Some(format!("Could not save Quicklinks: {error}"));
+            }
         }
     }
 
@@ -405,7 +408,10 @@ impl SettingsView {
                         .collect(),
                 );
             }
-            Err(error) => self.save_error = Some(format!("Could not save Snippets: {error}")),
+            Err(error) => {
+                corvo_platform::diagnostics::record_error("settings", "snippets_save_failed");
+                self.save_error = Some(format!("Could not save Snippets: {error}"));
+            }
         }
     }
 
@@ -466,7 +472,10 @@ impl SettingsView {
                 corvo_platform::set_window_gap(self.settings.window_management.gap_between_windows);
                 corvo_platform::hotkey::notify_hotkeys_changed();
             }
-            Err(error) => self.save_error = Some(format!("Could not save Settings: {error}")),
+            Err(error) => {
+                corvo_platform::diagnostics::record_error("settings", "settings_save_failed");
+                self.save_error = Some(format!("Could not save Settings: {error}"));
+            }
         }
     }
 
@@ -541,7 +550,7 @@ impl SettingsView {
                         .app_configs
                         .get(&app.name)
                         .and_then(|c| c.alias.as_deref())
-                        .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        .is_some_and(|a| a.to_lowercase().contains(&query_lower))
             })
             .map(|(idx, _)| idx)
             .collect();
@@ -1094,8 +1103,7 @@ impl SettingsView {
                     ),
                     self.interactive_dropdown_trigger(
                         "pop-to-root",
-                        "Pop to Root Search",
-                        Some("After the launcher closes."),
+                        ("Pop to Root Search", Some("After the launcher closes.")),
                         ActiveDropdown::PopToRoot,
                         self.settings.pop_to_root_option,
                         &["Immediately", "After 90 seconds", "Never"],
@@ -1103,8 +1111,7 @@ impl SettingsView {
                     ),
                     self.interactive_dropdown_trigger(
                         "escape-behavior",
-                        "Escape Key Behavior",
-                        Some("When the search field is empty."),
+                        ("Escape Key Behavior", Some("When the search field is empty.")),
                         ActiveDropdown::EscapeBehavior,
                         self.settings.escape_behavior_option,
                         &["Navigate back or close window", "Close window"],
@@ -1112,8 +1119,7 @@ impl SettingsView {
                     ),
                     self.interactive_dropdown_trigger(
                         "auto-switch-input",
-                        "Auto-switch input source",
-                        Some("While the launcher is open."),
+                        ("Auto-switch input source", Some("While the launcher is open.")),
                         ActiveDropdown::AutoSwitchInput,
                         self.settings.auto_switch_input,
                         &["None", "ABC"],
@@ -1127,8 +1133,7 @@ impl SettingsView {
                 vec![
                     self.interactive_dropdown_trigger(
                         "theme-select",
-                        "Theme",
-                        None,
+                        ("Theme", None),
                         ActiveDropdown::Theme,
                         self.settings.theme_option,
                         &["System", "Dark", "Light"],
@@ -1477,15 +1482,14 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            if self.quicklink_active_field == 0 {
-                                self.quicklink_name_input.push_str(key);
-                            } else {
-                                self.quicklink_url_input.push_str(key);
-                            }
-                            cx.notify();
+                        if self.quicklink_active_field == 0 {
+                            self.quicklink_name_input.push_str(key);
+                        } else {
+                            self.quicklink_url_input.push_str(key);
                         }
+                        cx.notify();
                     }
                 }
             }
@@ -1962,11 +1966,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.alias_input_text.push_str(key);
-                            cx.notify();
-                        }
+                        self.alias_input_text.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2006,11 +2009,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.new_scope_text.push_str(key);
-                            cx.notify();
-                        }
+                        self.new_scope_text.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2049,11 +2051,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.new_file_scope_text.push_str(key);
-                            cx.notify();
-                        }
+                        self.new_file_scope_text.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2092,11 +2093,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.new_ignore_pattern_text.push_str(key);
-                            cx.notify();
-                        }
+                        self.new_ignore_pattern_text.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2139,11 +2139,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.new_nav_disabled_app_text.push_str(key);
-                            cx.notify();
-                        }
+                        self.new_nav_disabled_app_text.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2170,11 +2169,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            self.search_query.push_str(key);
-                            cx.notify();
-                        }
+                        self.search_query.push_str(key);
+                        cx.notify();
                     }
                 }
             }
@@ -2214,11 +2212,10 @@ impl SettingsView {
                     if !keystroke.modifiers.platform
                         && !keystroke.modifiers.control
                         && !keystroke.modifiers.alt
+                        && key.len() == 1
                     {
-                        if key.len() == 1 {
-                            query.push_str(key);
-                            query_changed = true;
-                        }
+                        query.push_str(key);
+                        query_changed = true;
                     }
                 }
             }
@@ -2668,7 +2665,7 @@ impl SettingsView {
                         .get(setting.id)
                         .or_else(|| self.settings.system_settings.items.get(setting.title))
                         .and_then(|c| c.alias.as_deref())
-                        .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        .is_some_and(|a| a.to_lowercase().contains(&query_lower))
             })
             .collect();
 
@@ -2812,7 +2809,7 @@ impl SettingsView {
                         .get(action.id)
                         .or_else(|| self.settings.system_actions.items.get(action.title))
                         .and_then(|c| c.alias.as_deref())
-                        .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        .is_some_and(|a| a.to_lowercase().contains(&query_lower))
             })
             .collect();
 
@@ -3339,11 +3336,11 @@ impl SettingsView {
         let is_editing_alias = self
             .editing_alias_item
             .as_ref()
-            .map_or(false, |(t, k)| *t == tab && k == key);
+            .is_some_and(|(t, k)| *t == tab && k == key);
         let is_recording_hotkey = self
             .recording_hotkey_item
             .as_ref()
-            .map_or(false, |(t, k)| *t == tab && k == key);
+            .is_some_and(|(t, k)| *t == tab && k == key);
 
         let tab_prefix = match tab {
             SettingsTab::Applications => "app",
@@ -3868,7 +3865,7 @@ impl SettingsView {
         let commands = get_builtin_commands();
         let query_lower = self.commands_search_query.to_lowercase();
         let filtered_commands: Vec<_> = commands
-            .into_iter()
+            .iter()
             .filter(|cmd| {
                 if query_lower.is_empty() {
                     return true;
@@ -3881,7 +3878,7 @@ impl SettingsView {
                         .get(cmd.id)
                         .or_else(|| self.settings.commands.items.get(cmd.title))
                         .and_then(|c| c.alias.as_deref())
-                        .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        .is_some_and(|a| a.to_lowercase().contains(&query_lower))
             })
             .collect();
 
@@ -4032,7 +4029,7 @@ impl SettingsView {
                     || q.url.to_lowercase().contains(&query_lower)
                     || q.alias
                         .as_deref()
-                        .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        .is_some_and(|a| a.to_lowercase().contains(&query_lower))
             })
             .map(|(i, q)| (i, q.clone()))
             .collect();
@@ -4207,8 +4204,8 @@ impl SettingsView {
                                     let is_hidden = q.hidden;
                                     let alias_text = q.alias.clone();
                                     let hotkey_text = q.hotkey.clone();
-                                    let is_editing_alias = self.editing_alias_item.as_ref().map_or(false, |(t, k)| *t == SettingsTab::Quicklinks && k == &name_clone);
-                                    let is_recording_hotkey = self.recording_hotkey_item.as_ref().map_or(false, |(t, k)| *t == SettingsTab::Quicklinks && k == &name_clone);
+                                    let is_editing_alias = self.editing_alias_item.as_ref().is_some_and(|(t, k)| *t == SettingsTab::Quicklinks && k == &name_clone);
+                                    let is_recording_hotkey = self.recording_hotkey_item.as_ref().is_some_and(|(t, k)| *t == SettingsTab::Quicklinks && k == &name_clone);
 
                                     div()
                                         .id(SharedString::from(format!("user-quicklink-row-{orig_idx}")))
@@ -4758,8 +4755,10 @@ impl SettingsView {
                         ),
                         self.interactive_dropdown_trigger(
                             "clipboard-retention",
-                            "History retention",
-                            Some("How long to keep clipboard history items."),
+                            (
+                                "History retention",
+                                Some("How long to keep clipboard history items."),
+                            ),
                             ActiveDropdown::ClipboardRetention,
                             self.settings.clipboard.retention_option,
                             &["24 Hours", "7 Days", "30 Days", "3 Months", "1 Year"],
@@ -5824,8 +5823,7 @@ impl SettingsView {
                     vec![
                         self.interactive_dropdown_trigger(
                             "window-cycling",
-                            "Cycling",
-                            Some("Repeating a half keeps the same frame."),
+                            ("Cycling", Some("Repeating a half keeps the same frame.")),
                             ActiveDropdown::WindowCycling,
                             self.settings.window_management.cycling_option,
                             &["None", "Cycle forward", "Cycle forward & backward"],
@@ -6050,7 +6048,7 @@ impl SettingsView {
                                         let is_recording_hotkey = self
                                             .recording_hotkey_item
                                             .as_ref()
-                                            .map_or(false, |(t, k)| {
+                                            .is_some_and(|(t, k)| {
                                                 *t == SettingsTab::WindowManagement
                                                     && k == &hotkey_item_key
                                             });
@@ -6540,8 +6538,7 @@ impl SettingsView {
                         ),
                         self.interactive_dropdown_trigger(
                             "calendar-upcoming",
-                            "Upcoming meetings in launcher",
-                            None,
+                            ("Upcoming meetings in launcher", None),
                             ActiveDropdown::CalendarUpcomingMeetings,
                             self.settings.calendar.upcoming_meetings_option,
                             &["1 next", "3 next", "5 next", "All today"],
@@ -6576,8 +6573,7 @@ impl SettingsView {
                     vec![
                         self.interactive_dropdown_trigger(
                             "calendar-join-card",
-                            "Show the join card",
-                            Some("Before and after a meeting starts."),
+                            ("Show the join card", Some("Before and after a meeting starts.")),
                             ActiveDropdown::CalendarJoinCard,
                             self.settings.calendar.join_card_option,
                             &["Immediately", "5 minutes", "10 minutes", "15 minutes"],
@@ -6627,8 +6623,10 @@ impl SettingsView {
                         ),
                         self.interactive_dropdown_trigger(
                             "calendar-browser",
-                            "Open Meeting Links In",
-                            Some("When no meeting app handles the link."),
+                            (
+                                "Open Meeting Links In",
+                                Some("When no meeting app handles the link."),
+                            ),
                             ActiveDropdown::CalendarBrowser,
                             self.settings.calendar.open_meeting_links_in,
                             &["Default Browser", "Google Chrome", "Safari", "Arc"],
@@ -7365,6 +7363,28 @@ impl SettingsView {
             )
     }
 
+    fn open_logs(&mut self, cx: &mut Context<Self>) {
+        let Some(directory) = corvo_platform::diagnostics::log_directory() else {
+            corvo_platform::diagnostics::record_error("settings", "logs_directory_unavailable");
+            self.save_error = Some("Could not find the log folder".to_string());
+            cx.notify();
+            return;
+        };
+        if std::fs::create_dir_all(&directory).is_err() {
+            corvo_platform::diagnostics::record_error("settings", "logs_directory_create_failed");
+            self.save_error = Some("Could not create the log folder".to_string());
+        } else if corvo_platform::platform_ops()
+            .open_path(&directory)
+            .is_err()
+        {
+            corvo_platform::diagnostics::record_error("settings", "logs_directory_open_failed");
+            self.save_error = Some("Could not open the log folder".to_string());
+        } else {
+            self.save_error = None;
+        }
+        cx.notify();
+    }
+
     fn render_about_pane(&self, cx: &mut Context<Self>) -> Div {
         const REPOSITORY_URL: &str = "https://github.com/diegoleteliers10/corvo";
         let open_repository = cx.listener(|_: &mut Self, _: &ClickEvent, _window, _cx| {
@@ -7543,6 +7563,24 @@ impl SettingsView {
                     ),
             )
             .child(
+                div().flex().justify_end().child(
+                    div()
+                        .id("about-open-logs")
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(rgb(COLOR_CONTROL_BG))
+                        .text_size(px(13.0))
+                        .text_color(rgb(COLOR_TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(COLOR_CONTROL_HOVER)))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.open_logs(cx);
+                        }))
+                        .child("Open logs"),
+                ),
+            )
+            .child(
                 div()
                     .w_full()
                     .text_size(px(11.0))
@@ -7577,6 +7615,9 @@ impl SettingsView {
                         view.update_status = UpdateStatusUI::UpToDate;
                     }
                     Err(e) => {
+                        if !matches!(e, corvo_platform::UpdateError::Cancelled) {
+                            corvo_platform::diagnostics::record_error("updater", "check_failed");
+                        }
                         view.update_status = UpdateStatusUI::Error(e.to_string());
                     }
                 }
@@ -7654,6 +7695,7 @@ impl SettingsView {
                         view.update_status = UpdateStatusUI::Idle;
                     }
                     Err(e) => {
+                        corvo_platform::diagnostics::record_error("updater", "download_failed");
                         view.update_status = UpdateStatusUI::Error(e.to_string());
                     }
                 }
@@ -7682,8 +7724,16 @@ impl SettingsView {
             let result =
                 smol::unblock(move || corvo_platform::install_and_restart(&install_path)).await;
             let message = match result {
-                Ok(()) => "Corvo did not restart after the update".to_string(),
-                Err(error) => error.to_string(),
+                Ok(()) => {
+                    corvo_platform::diagnostics::record_error("updater", "restart_failed");
+                    "Corvo did not restart after the update".to_string()
+                }
+                Err(error) => {
+                    if !matches!(error, corvo_platform::UpdateError::Cancelled) {
+                        corvo_platform::diagnostics::record_error("updater", "install_failed");
+                    }
+                    error.to_string()
+                }
             };
             let _ = this.update(cx, |view, cx| {
                 view.update_status = UpdateStatusUI::InstallFailed {
@@ -8086,8 +8136,7 @@ impl SettingsView {
                     ),
                     self.interactive_dropdown_trigger(
                         "update-channel",
-                        "Update Channel",
-                        Some("Stable releases or early Beta prereleases."),
+                        ("Update Channel", Some("Stable releases or early Beta prereleases.")),
                         ActiveDropdown::UpdateChannel,
                         if self.settings.updates.channel.to_lowercase() == "beta" {
                             1
@@ -8267,13 +8316,13 @@ impl SettingsView {
     fn interactive_dropdown_trigger(
         &self,
         id_str: &'static str,
-        title: &str,
-        subtitle: Option<&str>,
+        label: (&str, Option<&str>),
         dropdown_type: ActiveDropdown,
         current_idx: usize,
         options: &[&'static str],
         cx: &mut Context<Self>,
     ) -> Div {
+        let (title, subtitle) = label;
         let is_open = self.active_dropdown == Some(dropdown_type);
         let selected_label = options.get(current_idx).copied().unwrap_or("");
         let has_subtitle = subtitle.is_some();

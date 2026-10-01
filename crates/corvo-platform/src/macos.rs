@@ -702,6 +702,7 @@ fn hide_traffic_lights(panel: &objc2_app_kit::NSWindow) {
 pub fn make_panel_instant(width: f64, height: f64) {
     use objc2_app_kit::{NSColor, NSWindowCollectionBehavior, NSWindowTitleVisibility};
     let Some(panel) = find_new_panel(width, height) else {
+        crate::diagnostics::record_error("window", "launcher_panel_missing");
         eprintln!("corvo: launcher panel not found before show");
         return;
     };
@@ -2247,10 +2248,10 @@ pub fn is_launch_at_login_enabled() -> bool {
 pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
     let app_path = find_corvo_app_path();
 
-    if app_path.is_some() {
+    if let Some(app_path) = app_path {
         // Bundled: use Login Item only. Clean up any stale LaunchAgent.
         if enabled {
-            let path_str = app_path.as_ref().unwrap().to_string_lossy();
+            let path_str = app_path.to_string_lossy();
             let script = format!(
                 "tell application \"System Events\" to if not (exists login item \"Corvo\") then make login item at end with properties {{name:\"Corvo\", path:\"{path_str}\", hidden:false}}"
             );

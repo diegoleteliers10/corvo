@@ -441,6 +441,7 @@ impl ToastNotice {
         title: impl Into<String>,
         detail: impl Into<String>,
     ) -> Self {
+        corvo_platform::diagnostics::record_error(category.label(), "action_failed");
         Self {
             category,
             title: title.into(),
@@ -1056,7 +1057,8 @@ pub struct Launcher {
     brew_page_mode: BrewPageMode,
     registry: CommandRegistry,
     store: std::sync::Arc<dyn DataStore>,
-    current_window_height: f32,
+    #[cfg(target_os = "windows")]
+    windows_region_size: Option<(f32, f32, f32)>,
     force_expanded: bool,
     _activation_sub: Subscription,
 }
@@ -1371,21 +1373,6 @@ impl Launcher {
                 launcher.dismiss(window);
             }
         });
-        let size_scale = match store.interface_size_option() {
-            0 => 0.9,
-            2 => 1.1,
-            _ => 1.0,
-        };
-        let current_window_height = palette_size(
-            store.compact_mode(),
-            false,
-            page,
-            &query,
-            false,
-            false,
-            false,
-        )
-        .height(size_scale);
         let cursor_idx = query.chars().count();
         let mut launcher = Self {
             focus_handle,
@@ -1435,7 +1422,8 @@ impl Launcher {
             brew_page_mode: BrewPageMode::Installed,
             registry: cx.global::<RegistryGlobal>().0.clone(),
             store,
-            current_window_height,
+            #[cfg(target_os = "windows")]
+            windows_region_size: None,
             force_expanded: false,
             _activation_sub,
         };
@@ -1489,13 +1477,18 @@ impl Launcher {
     fn sync_palette_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target_w = self.desired_window_width();
         let target_h = self.desired_window_height();
-        // Compare against the window's real content size, not the cached
-        // height. The Windows launcher is a resident hidden window, so its
-        // size outlives a dismiss and the cache desynchronizes from the
-        // HWND; reading the real size makes this self-correcting.
-        let actual_h: f32 = window.viewport_size().height.into();
-        if (actual_h - target_h).abs() > 0.5 {
-            self.current_window_height = target_h;
+        let viewport = window.viewport_size();
+        let actual_w: f32 = viewport.width.into();
+        let actual_h: f32 = viewport.height.into();
+        #[cfg(target_os = "windows")]
+        {
+            let observed = (actual_w, actual_h, window.scale_factor());
+            if self.windows_region_size != Some(observed) {
+                self.windows_region_size = Some(observed);
+                apply_windows_launcher_region(window, cx);
+            }
+        }
+        if (actual_w - target_w).abs() > 0.5 || (actual_h - target_h).abs() > 0.5 {
             #[cfg(target_os = "macos")]
             {
                 cx.spawn(async move |_, _| {
@@ -1506,23 +1499,6 @@ impl Launcher {
             #[cfg(not(target_os = "macos"))]
             {
                 window.resize(size(px(target_w), px(target_h)));
-                // Window::resize posts SetWindowPos to the main-thread
-                // queue, so the new client rect does not exist yet and a
-                // window region set now would be one size behind. Re-clip
-                // on the next tick, once the resize has landed.
-                #[cfg(target_os = "windows")]
-                {
-                    let hwnd = windows_hwnd(window);
-                    let radius =
-                        launcher_corner_radius() * window.scale_factor();
-                    cx.spawn(async move |this, cx| {
-                        this.update(cx, |_launcher, _| {
-                            corvo_platform::set_launcher_window_region(hwnd, radius);
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
             }
         }
     }
@@ -2348,12 +2324,13 @@ impl Launcher {
         }
 
         // Tab: Toggle filter dropdown on Emoji/Clipboard
-        if mods.is_unmodified() && key == "tab" {
-            if self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard {
-                self.toggle_filter_dropdown(cx);
-                cx.stop_propagation();
-                return;
-            }
+        if mods.is_unmodified()
+            && key == "tab"
+            && (self.page == LauncherPage::Emoji || self.page == LauncherPage::Clipboard)
+        {
+            self.toggle_filter_dropdown(cx);
+            cx.stop_propagation();
+            return;
         }
 
         // Emoji grid lateral movement
@@ -3976,7 +3953,7 @@ impl Launcher {
                     },
                     CommandAction {
                         id: "uninstaller:show-in-finder".into(),
-                        label: file_manager_label("Show in").into(),
+                        label: file_manager_label("Show in"),
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::FOLDER),
                         group: corvo_core::ActionGroup::Standard,
@@ -3984,7 +3961,7 @@ impl Launcher {
                     },
                     CommandAction {
                         id: "uninstaller:show-info".into(),
-                        label: file_manager_label("Show Info in").into(),
+                        label: file_manager_label("Show Info in"),
                         action: Action::CloseWindow,
                         icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::INFO),
                         group: corvo_core::ActionGroup::Standard,
@@ -4916,7 +4893,6 @@ impl Launcher {
                             corvo_platform::auto_paste_image(pid, &bytes)
                                 .await
                                 .map_err(|error| error.to_string())
-                                .map(|()| ())
                         } else {
                             corvo_platform::copy_image_to_pasteboard(&bytes)
                                 .map_err(|error| error.to_string())
@@ -5097,6 +5073,7 @@ impl Launcher {
         let mut settings = corvo_config::Settings::load();
         if settings.set_result_item_flags(result_id, title, hidden, favorite) {
             if let Err(error) = settings.save() {
+                corvo_platform::diagnostics::record_error("launcher", "item_preferences_save_failed");
                 eprintln!("corvo: could not save item preferences: {error}");
                 saved = false;
             }
@@ -5110,6 +5087,7 @@ impl Launcher {
             {
                 link.hidden = hidden;
                 if let Err(error) = quicklinks.save() {
+                    corvo_platform::diagnostics::record_error("launcher", "quicklink_visibility_save_failed");
                     eprintln!("corvo: could not save quicklink visibility: {error}");
                     saved = false;
                 }
@@ -5552,7 +5530,7 @@ impl Launcher {
         }
 
         let column_count = self.emoji_column_count;
-        let num_rows = (self.results.len() + column_count - 1) / column_count;
+        let num_rows = self.results.len().div_ceil(column_count);
         let mut rows: Vec<Stateful<Div>> = Vec::with_capacity(num_rows);
 
         for row_idx in 0..num_rows {
@@ -6193,10 +6171,7 @@ impl Launcher {
                         |el, path| el.child(img(path).size(px(ICON_SIZE))),
                     )
                     .when(
-                        match &result.icon {
-                            Icon::Image(path) if path.exists() => false,
-                            _ => true,
-                        },
+                        !matches!(&result.icon, Icon::Image(path) if path.exists()),
                         |el| {
                             el.child(icons::render_phosphor_svg(
                                 icons::icon_svg_data(&result.icon)
@@ -7091,8 +7066,7 @@ impl Launcher {
         let filtered = self.filtered_actions();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut previous_group = None;
-        for position in 0..filtered.len() {
-            let index = filtered[position];
+        for (position, &index) in filtered.iter().enumerate() {
             let Some(entry) = self.actions.get(index) else {
                 continue;
             };
@@ -8253,7 +8227,7 @@ pub fn collect_hotkey_bindings(
     if settings.window_management.enabled {
         for action in corvo_window_management::WINDOW_ACTIONS {
             let user_cfg = settings.window_management.command_items.get(action.id);
-            let is_hidden = user_cfg.map_or(false, |c| c.hidden);
+            let is_hidden = user_cfg.is_some_and(|c| c.hidden);
             if is_hidden {
                 continue;
             }
@@ -8425,13 +8399,13 @@ pub fn collect_hotkey_bindings(
     }
     for (name, cfg) in &settings.quicklinks.command_items {
         if let Some(ref hk) = cfg.hotkey {
-            if !hk.is_empty() {
-                if !quicklinks_file.quicklinks.iter().any(|q| &q.name == name) {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::OpenUrl(name.clone()),
-                    ));
-                }
+            if !hk.is_empty()
+                && !quicklinks_file.quicklinks.iter().any(|q| &q.name == name)
+            {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::OpenUrl(name.clone()),
+                ));
             }
         }
     }
@@ -8475,7 +8449,7 @@ pub fn run(
                 let registry = refresh_registry.clone();
                 let store = refresh_store.clone();
                 smol::unblock(move || preload_initial_results(&registry, store)).await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
                         let _ = handle.update(cx, |launcher, _window, cx| {
                             if launcher.page == LauncherPage::Root {
@@ -8531,7 +8505,7 @@ pub fn run(
         // Listen for reload notifications when user updates hotkeys in settings
         cx.spawn(async move |cx: &mut AsyncApp| {
             while reload_rx.recv().await.is_ok() {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let settings = corvo_config::Settings::load();
                     corvo_platform::set_window_gap(settings.window_management.gap_between_windows);
                     reload_active_hotkeys(&settings, cx);
@@ -8568,20 +8542,20 @@ pub fn run(
                             .await;
                             match dl_res {
                                 Ok((rel, path)) => {
-                                    let _ = cx.update(|cx| {
+                                    cx.update(|cx| {
                                         crate::open_settings_with_ready_update(rel, path, cx);
                                     });
                                 }
                                 Err(_) => {
                                     let rel = release.clone();
-                                    let _ = cx.update(|cx| {
+                                    cx.update(|cx| {
                                         crate::open_settings_with_available_update(rel, cx);
                                     });
                                 }
                             }
                         } else {
                             let rel = release.clone();
-                            let _ = cx.update(|cx| {
+                            cx.update(|cx| {
                                 crate::open_settings_with_available_update(rel, cx);
                             });
                         }
@@ -8627,6 +8601,7 @@ pub fn run(
                         } else {
                             smol::spawn(async move {
                                 if let Err(err) = corvo_platform::tile_window(None, &action_id) {
+                                    corvo_platform::diagnostics::record_error("launcher", "headless_tile_failed");
                                     eprintln!("corvo: headless tile window error: {err}");
                                 }
                             })
@@ -8637,6 +8612,7 @@ pub fn run(
                         let path_str = path.to_string_lossy().to_string();
                         smol::spawn(async move {
                             if let Err(err) = corvo_platform::open_app(&path_str) {
+                                corvo_platform::diagnostics::record_error("launcher", "app_open_failed");
                                 eprintln!("corvo: open app error: {err}");
                             }
                         })
@@ -9105,15 +9081,15 @@ fn set_windows_launcher_visible(window: &Window, visible: bool) {
     }
 }
 
-/// Clips the launcher HWND to the radius the root element paints. Call
-/// this after every open and every resize, because a window region does
-/// not follow the window bounds.
+/// Apply the region outside an App update. SetWindowRgn sends window messages.
 #[cfg(target_os = "windows")]
-fn apply_windows_launcher_region(window: &Window) {
-    corvo_platform::set_launcher_window_region(
-        windows_hwnd(window),
-        launcher_corner_radius() * window.scale_factor(),
-    );
+fn apply_windows_launcher_region(window: &Window, cx: &mut App) {
+    let hwnd = windows_hwnd(window);
+    let radius = launcher_corner_radius() * window.scale_factor();
+    cx.spawn(async move |_| {
+        corvo_platform::set_launcher_window_region(hwnd, radius);
+    })
+    .detach();
 }
 
 /// The Win32 handle behind a GPUI window, or 0 when the platform window
@@ -9205,7 +9181,11 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         is_movable: true,
         focus: true,
         show: !cfg!(target_os = "macos"),
-        window_background: WindowBackgroundAppearance::Blurred,
+        window_background: if cfg!(target_os = "windows") {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Blurred
+        },
         ..Default::default()
     };
     let opened: Result<WindowHandle<Launcher>, _> = cx.open_window(options, move |window, cx| {
@@ -9214,14 +9194,15 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
     let window = match opened {
         Ok(handle) => handle,
         Err(err) => {
+            corvo_platform::diagnostics::record_error("launcher", "launcher_open_failed");
             eprintln!("corvo: cannot open launcher window: {err}");
             return;
         }
     };
     cx.set_global(LauncherWindow(window));
     #[cfg(target_os = "windows")]
-    let _ = window.update(cx, |_, window, _| {
-        apply_windows_launcher_region(window);
+    let _ = window.update(cx, |_, window, cx| {
+        apply_windows_launcher_region(window, cx);
         set_windows_launcher_visible(window, true);
         window.activate_window();
     });
@@ -9248,7 +9229,7 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
             corvo_clipboard_manager::poll_clipboard_with_source(clipboard_source.as_deref());
         })
         .await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
                 let _ = handle.update(cx, |launcher, _window, cx| {
                     if launcher.page == LauncherPage::Clipboard {
@@ -9437,7 +9418,7 @@ mod tests {
     fn the_compact_height_is_much_smaller_than_the_extended_one() {
         // Guards the constant itself: a regression here would make the
         // panel look collapsed while it is still tall.
-        assert!(COMPACT_WINDOW_HEIGHT < WINDOW_HEIGHT / 4.0);
+        const { assert!(COMPACT_WINDOW_HEIGHT < WINDOW_HEIGHT / 4.0) };
     }
 
     #[test]
@@ -9471,7 +9452,7 @@ mod tests {
         // platform's labels; plain words must pass through untouched.
         let rendered = shortcut_text("cmd+alt+c");
         assert!(!rendered.contains("cmd"), "got {rendered}");
-        assert!(rendered.contains(&corvo_core::Primary::current().keycap_label()));
+        assert!(rendered.contains(corvo_core::Primary::current().keycap_label()));
         assert_eq!(shortcut_text("Application"), "Application");
         assert_eq!(shortcut_text("Folder"), "Folder");
     }

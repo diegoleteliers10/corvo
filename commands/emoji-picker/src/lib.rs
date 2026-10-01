@@ -1286,7 +1286,7 @@ pub fn search_emojis(query: &str, max_results: usize) -> Vec<SearchResult> {
         }
     }
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|item| std::cmp::Reverse(item.1));
 
     scored
         .into_iter()
