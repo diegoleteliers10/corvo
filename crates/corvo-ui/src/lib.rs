@@ -2,6 +2,7 @@
 //! registry, results render as rows, Enter launches and dismisses.
 
 mod icons;
+mod note_editor;
 mod onboarding;
 mod settings;
 
@@ -19,7 +20,7 @@ use gpui::{
     uniform_list, AnyElement, App, AppContext, AsyncApp, Bounds, ClickEvent, Context, Div,
     FocusHandle, FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
     ParentElement, Pixels, Render, ScrollHandle, ScrollStrategy, SharedString, Size, Stateful,
-    Styled, Subscription, TextOverflow, TextRun, UniformListScrollHandle, Window,
+    Styled, Subscription, TextOverflow, TextRun, UniformList, UniformListScrollHandle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use smol::channel::Receiver;
@@ -43,6 +44,24 @@ const COLOR_BACKGROUND: u32 = 0x17181ae6;
 const COLOR_DIVIDER: u32 = 0x282a2d;
 const COLOR_ROW_SELECTED: u32 = 0x113c30;
 const COLOR_ACCENT: u32 = 0x34d399;
+/// Pomodoro phase colors: warm for focus, mint for break.
+const POMODORO_FOCUS_COLOR: u32 = 0xf97316;
+const POMODORO_BREAK_COLOR: u32 = 0x34d399;
+/// Focus length presets on the pomodoro page, minutes.
+const POMODORO_PRESETS: &[u64] = &[15, 25, 45, 60];
+
+fn format_pomodoro_time(total_seconds: u64) -> String {
+    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
+}
+
+fn truncate_for_display(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_owned()
+    } else {
+        let cut: String = text.chars().take(limit).collect();
+        format!("{cut}…")
+    }
+}
 const COLOR_PILL: u32 = 0x222426;
 const COLOR_KEYCAP: u32 = 0x2d3034;
 const COLOR_MENU: u32 = 0x1c1e20f0;
@@ -860,6 +879,12 @@ pub enum LauncherPage {
     Clipboard,
     Files,
     Brew,
+    Text,
+    Pomodoro,
+    Weather,
+    Notes,
+    Media,
+    Tabs,
     Ports,
     Processes,
     Uninstaller,
@@ -1015,6 +1040,17 @@ pub struct Launcher {
     port_argument: String,
     port_cursor_idx: usize,
     port_input_active: bool,
+    /// Whether the 1 Hz pomodoro countdown pump is in flight; the pump
+    /// re-renders the launcher once per second while a timer runs.
+    pomodoro_pump_running: bool,
+    /// Index of the highlighted pomodoro preset (idle) or control
+    /// button (running) on the pomodoro page.
+    pomodoro_selection: usize,
+    /// The forecast shown on the weather page.
+    weather_data: Option<corvo_weather::Weather>,
+    weather_error: Option<String>,
+    /// What the media page last read from the active player.
+    media_playing: Option<corvo_media_control::NowPlaying>,
     cursor_visible: bool,
     results: Vec<SearchResult>,
     selected: usize,
@@ -1282,6 +1318,156 @@ fn filter_file_search_results(
     matches
 }
 
+/// Preview kinds rendered as virtualized uniform-height lines. Markdown
+/// keeps element-per-line rendering (its rows are not uniform).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipPreviewKind {
+    Text,
+    Link,
+    Latex,
+    Json,
+    Code,
+}
+
+/// The wrapped rows of the clipboard entry on screen. uniform_list's row
+/// callback is 'static and reaches the rows only through this slot; each
+/// render fills it before building the list, and the callback runs
+/// within that same frame.
+fn clip_preview_rows() -> &'static std::sync::RwLock<(ClipPreviewKind, Vec<String>)> {
+    static ROWS: std::sync::OnceLock<std::sync::RwLock<(ClipPreviewKind, Vec<String>)>> =
+        std::sync::OnceLock::new();
+    ROWS.get_or_init(|| std::sync::RwLock::new((ClipPreviewKind::Text, Vec::new())))
+}
+
+fn clip_preview_row(kind: ClipPreviewKind, index: usize, line: &str) -> Div {
+    let shown = if line.is_empty() {
+        " ".to_string()
+    } else {
+        line.to_string()
+    };
+    match kind {
+        ClipPreviewKind::Text => div()
+            .h(px(18.0))
+            .min_w(px(0.0))
+            .max_w_full()
+            .text_size(px(13.5))
+            .text_color(rgb(COLOR_TEXT))
+            .child(shown),
+        ClipPreviewKind::Link => div()
+            .h(px(18.0))
+            .min_w(px(0.0))
+            .max_w_full()
+            .text_size(px(14.0))
+            .text_color(rgb(COLOR_ACCENT))
+            .child(shown),
+        ClipPreviewKind::Latex => div()
+            .h(px(17.0))
+            .min_w(px(0.0))
+            .max_w_full()
+            .font_family("Menlo")
+            .text_size(px(13.0))
+            .text_color(rgb(0xf1f5f9))
+            .child(shown),
+        ClipPreviewKind::Json | ClipPreviewKind::Code => div()
+            .h(px(18.0))
+            .min_w(px(0.0))
+            .max_w_full()
+            .flex()
+            .gap_3()
+            .items_baseline()
+            .child(
+                div()
+                    .w(px(24.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x52525b))
+                    .child(format!("{}", index + 1)),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .max_w_full()
+                    .font_family("Menlo")
+                    .text_size(px(12.5))
+                    .text_color(rgb(0xe4e4e7))
+                    .child(shown),
+            ),
+    }
+}
+/// Builds the virtualized line list for one preview kind: fills the row
+/// slot and returns a uniform list that only renders the visible rows,
+/// so a multi-thousand-line entry costs the same as a short one.
+fn clip_preview_uniform_list(
+    list_id: &'static str,
+    kind: ClipPreviewKind,
+    rows: Vec<String>,
+) -> UniformList {
+    let count = rows.len();
+    if let Ok(mut slot) = clip_preview_rows().write() {
+        *slot = (kind, rows);
+    }
+    uniform_list(list_id, count, move |range, _window, _app| {
+        let Ok(slot) = clip_preview_rows().read() else {
+            return Vec::new();
+        };
+        if slot.1.len() != count {
+            return Vec::new();
+        }
+        range
+            .map(|index| clip_preview_row(kind, index, &slot.1[index]))
+            .collect()
+    })
+}
+
+/// Preview caps: a multi-megabyte paste would build a wrapped string and
+/// a row per line on every render, which stutters selection and
+/// scrolling. A clipboard preview never needs more than this much text;
+/// the entry itself is still copied in full.
+const CLIP_PREVIEW_MAX_CHARS: usize = 120_000;
+const CLIP_PREVIEW_MAX_LINES: usize = 2_000;
+
+/// Clips `text` to the preview caps, appending a marker line when
+/// content was left out.
+fn cap_preview_text(text: &str) -> String {
+    let total_lines = text.lines().count();
+    if total_lines <= CLIP_PREVIEW_MAX_LINES && text.chars().count() <= CLIP_PREVIEW_MAX_CHARS {
+        return text.to_owned();
+    }
+
+    let mut capped = String::new();
+    let mut lines_taken = 0usize;
+    let mut char_count = 0usize;
+    for line in text.lines() {
+        if lines_taken >= CLIP_PREVIEW_MAX_LINES {
+            break;
+        }
+        let line_len = line.chars().count();
+        if char_count + line_len > CLIP_PREVIEW_MAX_CHARS {
+            // A line that does not fit whole (or a single huge line):
+            // show what fits of it, then stop. The line is not counted
+            // as taken, so the marker below reports it as hidden.
+            let remaining = CLIP_PREVIEW_MAX_CHARS.saturating_sub(char_count);
+            if remaining > 1 {
+                let slice: String = line.chars().take(remaining - 1).collect();
+                if lines_taken > 0 {
+                    capped.push('\n');
+                }
+                capped.push_str(&slice);
+            }
+            break;
+        }
+        if lines_taken > 0 {
+            capped.push('\n');
+        }
+        capped.push_str(line);
+        lines_taken += 1;
+        char_count += line_len + 1;
+    }
+    let hidden = total_lines.saturating_sub(lines_taken);
+    capped.push_str(&format!("\n… {hidden} more lines not shown"));
+    capped
+}
+
 fn format_wrapped_preview_lines(text: &str, max_line_len: usize) -> Vec<String> {
     let mut result = Vec::new();
     for line in text.lines() {
@@ -1382,6 +1568,11 @@ impl Launcher {
             port_argument: String::new(),
             port_cursor_idx: 0,
             port_input_active: false,
+            pomodoro_pump_running: false,
+            pomodoro_selection: 1,
+            weather_data: None,
+            weather_error: None,
+            media_playing: None,
             cursor_visible: true,
             results: cached_initial_results(),
             selected: 0,
@@ -1435,6 +1626,12 @@ impl Launcher {
             LauncherPage::Clipboard => launcher.refresh_clipboard(cx),
             LauncherPage::Files => launcher.refresh_files(cx),
             LauncherPage::Brew => launcher.refresh_brew(cx),
+            LauncherPage::Text => launcher.refresh_text(cx),
+            LauncherPage::Pomodoro => launcher.refresh_pomodoro(cx),
+            LauncherPage::Weather => launcher.refresh_weather(cx),
+            LauncherPage::Notes => launcher.refresh_notes(cx),
+            LauncherPage::Media => launcher.refresh_media(cx),
+            LauncherPage::Tabs => launcher.refresh_tabs(cx),
             LauncherPage::Ports => launcher.refresh_ports(cx),
             LauncherPage::Processes => launcher.refresh_processes(cx),
             LauncherPage::Uninstaller => {}
@@ -1686,6 +1883,12 @@ impl Launcher {
             LauncherPage::Clipboard => self.refresh_clipboard(cx),
             LauncherPage::Files => self.refresh_files(cx),
             LauncherPage::Brew => self.refresh_brew(cx),
+            LauncherPage::Text => self.refresh_text(cx),
+            LauncherPage::Pomodoro => self.refresh_pomodoro(cx),
+            LauncherPage::Weather => self.refresh_weather(cx),
+            LauncherPage::Notes => self.refresh_notes(cx),
+            LauncherPage::Media => self.refresh_media(cx),
+            LauncherPage::Tabs => self.refresh_tabs(cx),
             LauncherPage::Ports => self.refresh_ports(cx),
             LauncherPage::Processes => self.refresh_processes(cx),
             LauncherPage::Uninstaller => {
@@ -1734,6 +1937,12 @@ impl Launcher {
             || self.page == LauncherPage::Clipboard
             || self.page == LauncherPage::Files
             || self.page == LauncherPage::Brew
+            || self.page == LauncherPage::Text
+            || self.page == LauncherPage::Pomodoro
+            || self.page == LauncherPage::Weather
+            || self.page == LauncherPage::Notes
+            || self.page == LauncherPage::Media
+            || self.page == LauncherPage::Tabs
             || self.page == LauncherPage::Ports
             || self.page == LauncherPage::Processes
         {
@@ -2102,6 +2311,31 @@ impl Launcher {
             }
         }
 
+        // Pomodoro page: arrows move the chip or button highlight while
+        // the input is empty; up/down have no list to move here.
+        if self.page == LauncherPage::Pomodoro && mods.is_unmodified() {
+            if key == "up" || key == "down" {
+                cx.stop_propagation();
+                return;
+            }
+            if self.query.is_empty() && (key == "left" || key == "right") {
+                let options = if corvo_pomodoro::snapshot().is_some() {
+                    3
+                } else {
+                    POMODORO_PRESETS.len()
+                };
+                let options = options.max(1);
+                self.pomodoro_selection = if key == "right" {
+                    (self.pomodoro_selection + 1) % options
+                } else {
+                    (self.pomodoro_selection + options - 1) % options
+                };
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         // Stage 0: Global App & Window Lifecycle
         if mods.is_command_alone() {
             match key {
@@ -2125,7 +2359,12 @@ impl Launcher {
                     return;
                 }
                 "k" => {
-                    self.toggle_actions(cx);
+                    // The visual pages have no result rows, so there is
+                    // no actions menu to open on them; the burger is the
+                    // only surface there.
+                    if !matches!(self.page, LauncherPage::Pomodoro | LauncherPage::Weather) {
+                        self.toggle_actions(cx);
+                    }
                     cx.stop_propagation();
                     return;
                 }
@@ -2486,6 +2725,12 @@ impl Launcher {
                 || self.page == LauncherPage::Clipboard
                 || self.page == LauncherPage::Files
                 || self.page == LauncherPage::Brew
+                || self.page == LauncherPage::Text
+                || self.page == LauncherPage::Pomodoro
+                || self.page == LauncherPage::Weather
+                || self.page == LauncherPage::Notes
+                || self.page == LauncherPage::Media
+                || self.page == LauncherPage::Tabs
                 || self.page == LauncherPage::Ports
                 || self.page == LauncherPage::Processes
                 || self.page == LauncherPage::Uninstaller
@@ -2623,6 +2868,108 @@ impl Launcher {
         self.burger_menu_open = false;
         self.filter_dropdown_open = false;
         self.refresh_brew(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_text_page(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Text;
+        self.query = input.to_string();
+        self.cursor_idx = self.query.chars().count();
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_text(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_pomodoro_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Pomodoro;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_pomodoro(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_weather_page(&mut self, city: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Weather;
+        self.query = city.to_string();
+        self.cursor_idx = self.query.chars().count();
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_weather(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_notes_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Notes;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_notes(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_media_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Media;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_media(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    fn open_tabs_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Tabs;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.refresh_tabs(cx);
         self.sync_palette_size(window, cx);
         cx.notify();
     }
@@ -3833,6 +4180,503 @@ impl Launcher {
         .detach();
     }
 
+    fn refresh_text(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "text-utilities")
+            .cloned()
+        else {
+            self.results.clear();
+            self.rebuild_root_flat_items();
+            cx.notify();
+            return;
+        };
+        let input = self.query.clone();
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command.search(&format!("text-page:{input}"), &ctx).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::Text {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_pomodoro(&mut self, cx: &mut Context<Self>) {
+        // The visual page reads the timer state directly; the only
+        // refresh work is keeping the 1 Hz pump alive.
+        self.ensure_pomodoro_pump(cx);
+        cx.notify();
+    }
+
+    /// Re-renders once per second while a pomodoro interval runs, so the
+    /// countdown ticks. The loop exits when the timer stops, so an idle
+    /// launcher pays nothing.
+    fn ensure_pomodoro_pump(&mut self, cx: &mut Context<Self>) {
+        if self.pomodoro_pump_running || !corvo_pomodoro::is_running() {
+            return;
+        }
+        self.pomodoro_pump_running = true;
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_secs(1)).await;
+            let still_running = corvo_pomodoro::is_running();
+            let _ = this.update(cx, |launcher, cx| {
+                if !corvo_pomodoro::is_running() {
+                    launcher.pomodoro_pump_running = false;
+                }
+                if launcher.page == LauncherPage::Pomodoro {
+                    launcher.refresh_pomodoro(cx);
+                } else {
+                    cx.notify();
+                }
+            });
+            if !still_running {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_weather(&mut self, cx: &mut Context<Self>) {
+        let city = self.query.trim().to_string();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            // Debounce: wait for the typing to settle instead of firing
+            // one network fetch per keystroke. A newer keystroke bumps
+            // search_seq, and this run gives up BEFORE touching the
+            // network — checking only after the fetch still sent one
+            // request per pause, which is what made typing feel laggy.
+            smol::Timer::after(std::time::Duration::from_millis(400)).await;
+            let still_current = this
+                .update(cx, |launcher, _| launcher.search_seq == seq)
+                .unwrap_or(false);
+            if !still_current {
+                return;
+            }
+            let city_arg = city.clone();
+            let fetched = smol::unblock(move || {
+                corvo_weather::fetch_cached(Some(city_arg.as_str()).filter(|city| !city.is_empty()))
+            })
+            .await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq != seq || launcher.page != LauncherPage::Weather {
+                    return;
+                }
+                match fetched {
+                    Ok(weather) => {
+                        launcher.weather_data = Some(weather);
+                        launcher.weather_error = None;
+                    }
+                    Err(error) => {
+                        launcher.weather_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_notes(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "notes")
+            .cloned()
+        else {
+            return;
+        };
+        let filter = self.query.clone();
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command.search(&format!("notes-page:{filter}"), &ctx).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::Notes {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_media(&mut self, cx: &mut Context<Self>) {
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let playing = smol::unblock(corvo_media_control::fetch_now_playing).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq != seq || launcher.page != LauncherPage::Media {
+                    return;
+                }
+                launcher.media_playing = playing;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Warms the AppleScript tab cache off the search path, then runs
+    /// the cache-reading command search.
+    fn refresh_tabs(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            smol::unblock(corvo_browser_tabs::fetch_tabs).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.page == LauncherPage::Tabs {
+                    launcher.refresh_tabs_search(cx);
+                }
+            });
+        })
+        .detach();
+        self.refresh_tabs_search(cx);
+    }
+
+    fn refresh_tabs_search(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == "browser-tabs")
+            .cloned()
+        else {
+            return;
+        };
+        let filter = self.query.clone();
+        let store = self.store.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 200,
+                store: Some(store),
+            };
+            let results = command.search(&format!("tabs-page:{filter}"), &ctx).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::Tabs {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The weather page: big current conditions and a three-day strip.
+    fn weather_page_view(&mut self, _cx: &mut Context<Self>) -> Stateful<Div> {
+        match (&self.weather_data, &self.weather_error) {
+            (Some(weather), _) => {
+                let days: Vec<Stateful<Div>> = weather
+                    .days
+                    .iter()
+                    .map(|day| {
+                        div()
+                            .id(SharedString::from(format!("weather-day-{}", day.label)))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .px_5()
+                            .py_3()
+                            .rounded_lg()
+                            .bg(rgb(0x141517))
+                            .border_1()
+                            .border_color(rgb(COLOR_DIVIDER))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(day.label.clone()),
+                            )
+                            .child(div().text_size(px(26.0)).child(day.glyph))
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(COLOR_TEXT))
+                                    .child(format!("{}° / {}°", day.max_c, day.min_c)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(truncate_for_display(&day.description, 14)),
+                            )
+                    })
+                    .collect();
+                div()
+                    .id("weather-page")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_5()
+                    .pb(px(48.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(weather.city.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("weather-current")
+                            .flex()
+                            .items_center()
+                            .gap_5()
+                            .child(div().text_size(px(72.0)).child(weather.glyph))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_family("Menlo")
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_size(px(56.0))
+                                            .text_color(rgb(COLOR_TEXT))
+                                            .child(format!("{}°", weather.temperature_c)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(14.0))
+                                            .text_color(rgb(COLOR_TEXT_DIM))
+                                            .child(format!(
+                                                "{} · feels {}° · {}% humidity · {} km/h",
+                                                weather.description,
+                                                weather.feels_like_c,
+                                                weather.humidity,
+                                                weather.wind_kph
+                                            )),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("weather-days")
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .children(days),
+                    )
+            }
+            (None, Some(error)) => div()
+                .id("weather-error")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .pb(px(48.0))
+                .child(div().text_size(px(30.0)).child("🌧️"))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .text_color(rgb(COLOR_TEXT))
+                        .child("Could not load the forecast"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(truncate_for_display(error, 70)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child("Check your connection and reopen the page to retry"),
+                ),
+            (None, None) => div()
+                .id("weather-loading")
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .pb(px(48.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child("Loading forecast…"),
+                ),
+        }
+    }
+
+    /// The media page: what is playing and transport buttons.
+    fn media_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let mut page = div()
+            .id("media-page")
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .pb(px(48.0));
+
+        match &self.media_playing {
+            Some(playing) => {
+                let badge = if playing.playing { "PLAYING" } else { "PAUSED" };
+                let badge_color = if playing.playing {
+                    rgb(POMODORO_BREAK_COLOR)
+                } else {
+                    rgb(COLOR_TEXT_DIM)
+                };
+                page = page
+                    .child(
+                        div()
+                            .id("media-app-badge")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(badge_color)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(badge_color)
+                            .child(format!("{badge} · {}", playing.app)),
+                    )
+                    .child(
+                        div()
+                            .id("media-title")
+                            .text_size(px(30.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(COLOR_TEXT))
+                            .child(truncate_for_display(&playing.title, 34)),
+                    )
+                    .child(
+                        div()
+                            .id("media-artist")
+                            .text_size(px(15.0))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(truncate_for_display(&playing.artist, 40)),
+                    );
+            }
+            None => {
+                page = page.child(div().text_size(px(40.0)).child("🎧")).child(
+                    div()
+                        .text_size(px(14.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child("No player is running"),
+                );
+            }
+        }
+
+        let transport: Vec<Stateful<Div>> = [
+            ("previous", "⏮", "Previous"),
+            ("toggle", "⏯", "Play / Pause"),
+            ("next", "⏭", "Next"),
+        ]
+        .iter()
+        .map(|(action, glyph, label)| {
+            let command = (*action).to_string();
+            div()
+                .id(SharedString::from(format!("media-action-{action}")))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .px_5()
+                .py_3()
+                .rounded_lg()
+                .bg(rgb(0x141517))
+                .border_1()
+                .border_color(rgb(COLOR_DIVIDER))
+                .child(div().text_size(px(22.0)).child(*glyph))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(*label),
+                )
+                .on_click(cx.listener(
+                    move |_launcher: &mut Self, _event: &ClickEvent, _window, cx| {
+                        let command = command.clone();
+                        cx.spawn(async move |this, cx| {
+                            let _ =
+                                smol::unblock(move || corvo_media_control::control(&command)).await;
+                            let _ = this.update(cx, |launcher, cx| {
+                                if launcher.page == LauncherPage::Media {
+                                    launcher.refresh_media(cx);
+                                }
+                            });
+                        })
+                        .detach();
+                    },
+                ))
+        })
+        .collect();
+        page.child(
+            div()
+                .id("media-transport")
+                .flex()
+                .items_center()
+                .gap_3()
+                .children(transport),
+        )
+    }
+
+    fn notes_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("NOTES")
+    }
+
+    fn tabs_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("BROWSER TABS")
+    }
+
     fn refresh_ports(&mut self, cx: &mut Context<Self>) {
         let Some(command) = self
             .registry
@@ -4358,11 +5202,32 @@ impl Launcher {
             }
         }
         self.perform(action, window, cx);
+        // Pomodoro controls mutate state the page shows; refresh it so
+        // pause/resume/stop reflect immediately. Notes likewise after a
+        // create or delete.
+        if self.page == LauncherPage::Pomodoro
+            && self
+                .selected_result()
+                .is_some_and(|result| result.id.starts_with("pomodoro:"))
+        {
+            self.refresh_pomodoro(cx);
+        }
+        if self.page == LauncherPage::Notes
+            && self.selected_result().is_some_and(|result| {
+                result.id.starts_with("notes:create:") || result.id.starts_with("notes:delete:")
+            })
+        {
+            self.refresh_notes(cx);
+        }
     }
 
     fn execute_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page == LauncherPage::Uninstaller {
             self.begin_uninstall(cx);
+            return;
+        }
+        if self.page == LauncherPage::Pomodoro {
+            self.execute_pomodoro_selection(window, cx);
             return;
         }
         if self.page == LauncherPage::Emoji {
@@ -4415,6 +5280,52 @@ impl Launcher {
         }
         if result.id == "kill-process:open-ports" {
             self.open_ports_page(window, cx);
+            return;
+        }
+        if let Some(input) = result.id.strip_prefix("text-utilities:open") {
+            let input = input.strip_prefix(':').unwrap_or_default();
+            self.open_text_page(input, window, cx);
+            return;
+        }
+        if result.id == "pomodoro:open" {
+            self.open_pomodoro_page(window, cx);
+            return;
+        }
+        if let Some(city) = result.id.strip_prefix("weather:open") {
+            let city = city.strip_prefix(':').unwrap_or_default();
+            self.open_weather_page(city, window, cx);
+            return;
+        }
+        if result.id == "notes:open" {
+            self.open_notes_page(window, cx);
+            return;
+        }
+        // Notes open in corvo's own editor window, not the system's.
+        if let Some(text) = result.id.strip_prefix("notes:create:") {
+            self.dismiss(window);
+            note_editor::open_note_editor(None, Some(text.to_owned()), cx);
+            return;
+        }
+        if let Some(id) = result
+            .id
+            .strip_prefix("notes:")
+            .filter(|id| !id.is_empty() && !id.contains(':'))
+        {
+            if let Some(note) = corvo_notes::list_notes()
+                .into_iter()
+                .find(|note| note.id == id)
+            {
+                self.dismiss(window);
+                note_editor::open_note_editor(Some(note), None, cx);
+                return;
+            }
+        }
+        if result.id == "media:open" {
+            self.open_media_page(window, cx);
+            return;
+        }
+        if result.id == "browser-tabs:open" {
+            self.open_tabs_page(window, cx);
             return;
         }
         if let Some(filter) = result.id.strip_prefix("kill-process:open-processes") {
@@ -4792,15 +5703,13 @@ impl Launcher {
                 let is_brew = program.ends_with("/brew") || program == "brew";
                 let notice_context = process_toast_context(&title, &args, is_brew);
                 cx.spawn(async move |_this, cx| {
+                    // Installs can compile from source, so the cap is
+                    // generous — but finite, so a hung child cannot park
+                    // the toast forever.
+                    const PROCESS_TIMEOUT: std::time::Duration =
+                        std::time::Duration::from_secs(15 * 60);
                     let output = smol::unblock(move || {
-                        let mut command = std::process::Command::new(program);
-                        command.args(args);
-                        #[cfg(target_os = "windows")]
-                        {
-                            use std::os::windows::process::CommandExt;
-                            command.creation_flags(0x0800_0000);
-                        }
-                        command.output()
+                        corvo_platform::run_process_with_timeout(&program, &args, PROCESS_TIMEOUT)
                     })
                     .await;
                     let notice = match output {
@@ -4914,7 +5823,15 @@ impl Launcher {
                 .detach();
             }
             Ok(Action::ShowToast(msg)) => {
-                if let Some(text) = msg.strip_prefix("copy:") {
+                if let Some(text) = msg.strip_prefix("note-editor:") {
+                    let note = corvo_notes::list_notes()
+                        .into_iter()
+                        .find(|note| note.id == text);
+                    if let Some(note) = note {
+                        self.dismiss(window);
+                        note_editor::open_note_editor(Some(note), None, cx);
+                    }
+                } else if let Some(text) = msg.strip_prefix("copy:") {
                     let result_id = self
                         .selected_result()
                         .map(|result| result.id.clone())
@@ -4922,6 +5839,27 @@ impl Launcher {
                     let result = ops.copy_text(text).map_err(|error| error.to_string());
                     let notice = copy_notice(&result_id, result, "text");
                     self.dismiss(window);
+                    show_action_toast(notice, cx);
+                } else if let Some(id) = msg.strip_prefix("note-delete:") {
+                    // Notes namespace, checked before the clipboard's
+                    // `delete:` so the two never collide.
+                    let deleted = corvo_notes::delete_note(id);
+                    if self.page == LauncherPage::Notes {
+                        self.refresh_notes(cx);
+                    }
+                    let notice = if deleted {
+                        ToastNotice::success(
+                            ToastCategory::General,
+                            "Note deleted",
+                            "Removed from your notes",
+                        )
+                    } else {
+                        ToastNotice::failure(
+                            ToastCategory::General,
+                            "Could not delete note",
+                            "The note file went missing",
+                        )
+                    };
                     show_action_toast(notice, cx);
                 } else if let Some(id) = msg.strip_prefix("delete:") {
                     let result = corvo_clipboard_manager::delete_entry(id);
@@ -5033,7 +5971,33 @@ impl Launcher {
                 self.dismiss(window);
                 cx.spawn(async move |_this, cx| {
                     smol::Timer::after(std::time::Duration::from_millis(50)).await;
-                    let result = corvo_platform::tile_window(previous_pid, &action_id);
+                    // Saved layouts tile every app they name, unlike the
+                    // plain tile actions, which move one window.
+                    let result = if let Some(layout_id) = action_id.strip_prefix("layout:") {
+                        let settings = corvo_config::Settings::load();
+                        settings
+                            .window_management
+                            .layouts
+                            .iter()
+                            .find(|layout| layout.id == layout_id)
+                            .map(|layout| {
+                                let placements: Vec<(String, String)> = layout
+                                    .placements
+                                    .iter()
+                                    .map(|placement| {
+                                        (placement.app_name.clone(), placement.position.clone())
+                                    })
+                                    .collect();
+                                corvo_platform::apply_window_layout(&placements)
+                            })
+                            .unwrap_or_else(|| {
+                                Err(corvo_platform::PlatformError::Os(format!(
+                                    "unknown layout {layout_id}"
+                                )))
+                            })
+                    } else {
+                        corvo_platform::tile_window(previous_pid, &action_id)
+                    };
                     let notice = match result {
                         Ok(()) => ToastNotice::success(
                             ToastCategory::Window,
@@ -5078,7 +6042,10 @@ impl Launcher {
         let mut settings = corvo_config::Settings::load();
         if settings.set_result_item_flags(result_id, title, hidden, favorite) {
             if let Err(error) = settings.save() {
-                corvo_platform::diagnostics::record_error("launcher", "item_preferences_save_failed");
+                corvo_platform::diagnostics::record_error(
+                    "launcher",
+                    "item_preferences_save_failed",
+                );
                 eprintln!("corvo: could not save item preferences: {error}");
                 saved = false;
             }
@@ -5092,7 +6059,10 @@ impl Launcher {
             {
                 link.hidden = hidden;
                 if let Err(error) = quicklinks.save() {
-                    corvo_platform::diagnostics::record_error("launcher", "quicklink_visibility_save_failed");
+                    corvo_platform::diagnostics::record_error(
+                        "launcher",
+                        "quicklink_visibility_save_failed",
+                    );
                     eprintln!("corvo: could not save quicklink visibility: {error}");
                     saved = false;
                 }
@@ -5169,6 +6139,18 @@ impl Launcher {
                 BrewPageMode::Services => "Filter Homebrew services...",
                 BrewPageMode::Search => "Search formulae and casks...",
             }
+        } else if self.page == LauncherPage::Text {
+            "Type text to transform, or leave empty to use the clipboard..."
+        } else if self.page == LauncherPage::Pomodoro {
+            "Minutes for a custom focus, or leave empty for 25..."
+        } else if self.page == LauncherPage::Weather {
+            "City name, or leave empty for your location..."
+        } else if self.page == LauncherPage::Notes {
+            "Search notes, or type a new one and press Enter..."
+        } else if self.page == LauncherPage::Media {
+            "Now playing..."
+        } else if self.page == LauncherPage::Tabs {
+            "Search open tabs and bookmarks..."
         } else if self.page == LauncherPage::Ports {
             "Filter or enter a port (e.g. 3000)..."
         } else if self.page == LauncherPage::Processes {
@@ -5367,6 +6349,320 @@ impl Launcher {
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(COLOR_TEXT_DIM))
             .child("PROCESSES")
+    }
+
+    fn text_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("TEXT TRANSFORMS")
+    }
+
+    /// Custom focus length typed into the page input, if any.
+    fn pomodoro_custom_minutes(&self) -> Option<u64> {
+        self.query
+            .split_whitespace()
+            .find_map(|word| word.parse::<u64>().ok())
+            .filter(|minutes| (1..=600).contains(minutes))
+    }
+
+    /// Runs the highlighted preset (idle) or control button (running).
+    fn execute_pomodoro_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let paused = corvo_pomodoro::snapshot().is_some_and(|state| state.paused);
+        if corvo_pomodoro::snapshot().is_some() {
+            match self.pomodoro_selection {
+                0 => {
+                    if paused {
+                        corvo_pomodoro::resume();
+                    } else {
+                        corvo_pomodoro::pause();
+                    }
+                }
+                1 => {
+                    corvo_pomodoro::skip();
+                }
+                _ => {
+                    corvo_pomodoro::stop();
+                }
+            }
+        } else {
+            let minutes = self
+                .pomodoro_custom_minutes()
+                .or_else(|| POMODORO_PRESETS.get(self.pomodoro_selection).copied())
+                .unwrap_or(25);
+            corvo_pomodoro::start(
+                corvo_pomodoro::Phase::Focus,
+                std::time::Duration::from_secs(minutes * 60),
+            );
+        }
+        // refresh_pomodoro both repaints and keeps the 1 Hz pump alive,
+        // so a countdown started from the page ticks immediately.
+        self.refresh_pomodoro(cx);
+    }
+
+    /// The visual pomodoro page: phase badge, live countdown, progress
+    /// bar, and preset chips or control buttons — no result list.
+    fn pomodoro_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
+        use corvo_pomodoro::Phase;
+
+        let snapshot = corvo_pomodoro::snapshot();
+        let custom_minutes = self.pomodoro_custom_minutes();
+
+        let phase_color = |phase: Phase| {
+            if phase == Phase::Focus {
+                rgb(POMODORO_FOCUS_COLOR)
+            } else {
+                rgb(POMODORO_BREAK_COLOR)
+            }
+        };
+
+        let (badge_label, badge_color, time_text, time_color, progress) = match &snapshot {
+            Some(state) => {
+                let color = phase_color(state.phase);
+                let label = if state.paused {
+                    format!("{} · PAUSED", state.phase_label().to_uppercase())
+                } else {
+                    state.phase_label().to_uppercase()
+                };
+                let total = state.duration.as_secs().max(1);
+                let remaining = state.remaining.as_secs().min(total);
+                let progress = 1.0 - remaining as f32 / total as f32;
+                let time_color = if state.paused {
+                    rgb(COLOR_TEXT_DIM)
+                } else {
+                    rgb(COLOR_TEXT)
+                };
+                (
+                    label,
+                    color,
+                    format_pomodoro_time(remaining),
+                    time_color,
+                    progress,
+                )
+            }
+            None => {
+                let minutes = custom_minutes
+                    .or_else(|| POMODORO_PRESETS.get(self.pomodoro_selection).copied())
+                    .unwrap_or(25);
+                (
+                    "READY".to_owned(),
+                    rgb(COLOR_TEXT_DIM),
+                    format!("{minutes:02}:00"),
+                    rgb(COLOR_TEXT_DIM),
+                    0.0,
+                )
+            }
+        };
+
+        let bar_width = 340.0;
+        let mut page = div()
+            .id("pomodoro-page")
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_5()
+            .pb(px(48.0))
+            .child(
+                div()
+                    .id("pomodoro-badge")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(badge_color)
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(badge_color)
+                    .child(badge_label),
+            )
+            .child(
+                div()
+                    .id("pomodoro-countdown")
+                    .font_family("Menlo")
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(72.0))
+                    .text_color(time_color)
+                    .child(time_text),
+            )
+            .child(
+                div()
+                    .id("pomodoro-progress")
+                    .w(px(bar_width))
+                    .h(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(0x27272a))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(bar_width * progress.clamp(0.0, 1.0)))
+                            .bg(badge_color),
+                    ),
+            );
+
+        if snapshot.is_some() {
+            // Control buttons: Pause/Resume, Skip, Stop.
+            let paused = snapshot.is_some_and(|state| state.paused);
+            let labels = [if paused { "Resume" } else { "Pause" }, "Skip", "Stop"];
+            let buttons: Vec<Stateful<Div>> = labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    let selected = index == self.pomodoro_selection.min(2);
+                    let destructive = index == 2;
+                    let base = if destructive {
+                        rgb(0xf87171)
+                    } else {
+                        rgb(COLOR_TEXT)
+                    };
+                    let (border, text_color) = if selected {
+                        (base, base)
+                    } else {
+                        (rgb(COLOR_DIVIDER), rgb(COLOR_TEXT_DIM))
+                    };
+                    div()
+                        .id(SharedString::from(format!("pomodoro-action-{index}")))
+                        .px_4()
+                        .py_1p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(border)
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(text_color)
+                        .when(selected, |button| button.bg(rgba(0xffffff14)))
+                        .child(*label)
+                        .on_click(cx.listener(
+                            move |launcher: &mut Self, _event: &ClickEvent, window, cx| {
+                                launcher.pomodoro_selection = index;
+                                launcher.execute_pomodoro_selection(window, cx);
+                            },
+                        ))
+                })
+                .collect();
+            page = page.child(
+                div()
+                    .id("pomodoro-actions")
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(buttons),
+            );
+        } else {
+            // Preset chips; a typed length overrides the selection.
+            let mut chips: Vec<Stateful<Div>> = POMODORO_PRESETS
+                .iter()
+                .enumerate()
+                .map(|(index, minutes)| {
+                    let selected = custom_minutes.is_none()
+                        && index == self.pomodoro_selection.min(POMODORO_PRESETS.len() - 1);
+                    let (border, text_color) = if selected {
+                        (rgb(POMODORO_FOCUS_COLOR), rgb(POMODORO_FOCUS_COLOR))
+                    } else {
+                        (rgb(COLOR_DIVIDER), rgb(COLOR_TEXT_DIM))
+                    };
+                    div()
+                        .id(SharedString::from(format!("pomodoro-preset-{minutes}")))
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(border)
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(text_color)
+                        .when(selected, |chip| chip.bg(rgba(0xffffff14)))
+                        .child(format!("{minutes} min"))
+                        .on_click(cx.listener(
+                            move |launcher: &mut Self, _event: &ClickEvent, _window, cx| {
+                                launcher.pomodoro_selection = index;
+                                launcher.query.clear();
+                                launcher.cursor_idx = 0;
+                                cx.notify();
+                            },
+                        ))
+                })
+                .collect();
+            if let Some(custom) = custom_minutes {
+                chips.insert(
+                    0,
+                    div()
+                        .id("pomodoro-preset-custom")
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(POMODORO_FOCUS_COLOR))
+                        .bg(rgba(0xffffff14))
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(POMODORO_FOCUS_COLOR))
+                        .child(format!("{custom} min")),
+                );
+            }
+            page = page.child(
+                div()
+                    .id("pomodoro-presets")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(chips),
+            );
+            page = page.child(
+                div()
+                    .id("pomodoro-start")
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("pomodoro-start-focus")
+                            .px_6()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(POMODORO_FOCUS_COLOR))
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x18181b))
+                            .child("Start Focus")
+                            .on_click(cx.listener(
+                                |launcher: &mut Self, _event: &ClickEvent, window, cx| {
+                                    launcher.execute_pomodoro_selection(window, cx);
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("pomodoro-start-break")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(POMODORO_BREAK_COLOR))
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(POMODORO_BREAK_COLOR))
+                            .child("Break 5 min")
+                            .on_click(cx.listener(
+                                |launcher: &mut Self, _event: &ClickEvent, _window, cx| {
+                                    corvo_pomodoro::start(
+                                        Phase::Break,
+                                        std::time::Duration::from_secs(5 * 60),
+                                    );
+                                    launcher.refresh_pomodoro(cx);
+                                },
+                            )),
+                    ),
+            );
+        }
+        page
     }
 
     fn emoji_search_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -6226,6 +7522,10 @@ impl Launcher {
         };
 
         let content_view = if let Some(img_path) = entry.image_path() {
+            // Natural display size, never upscaled; the card is a fixed
+            // block like the text cards, and the image is additionally
+            // bounded by it so wide or tall shots shrink instead of
+            // stretching the card.
             let (disp_w, disp_h) =
                 if let (Some(w), Some(h)) = (entry.image_width, entry.image_height) {
                     if w > 0 && h > 0 {
@@ -6245,10 +7545,9 @@ impl Launcher {
 
             div()
                 .id("clip-preview-image-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
-                .min_h(px(220.0))
-                .max_h(px(280.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -6257,14 +7556,20 @@ impl Launcher {
                 .bg(rgb(0x121315))
                 .border_1()
                 .border_color(rgb(0x27272a))
-                .child(img(img_path).w(px(disp_w)).h(px(disp_h)).rounded_md())
+                .child(
+                    img(img_path)
+                        .w(px(disp_w))
+                        .h(px(disp_h))
+                        .max_w_full()
+                        .max_h_full()
+                        .rounded_md(),
+                )
         } else {
             Self::render_clipboard_text_preview(&entry.text)
         };
 
         let mut info_list = div()
             .flex_none()
-            .pt_3()
             .flex()
             .flex_col()
             .gap_2()
@@ -6310,9 +7615,17 @@ impl Launcher {
             .overflow_x_hidden()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_4()
-            .overflow_y_scroll()
+            // Tight gap: the information section hugs the preview card.
+            .gap_2()
+            .px_4()
+            // No top padding: the preview card sits flush at the top and
+            // takes the whole height above the information section. The
+            // bottom clears the 48px floating footer plus breathing room
+            // so the last info row ("Copied") stays visible.
+            .pt_0()
+            .pb(px(64.0))
+            // Only the card's interior scrolls, never this pane.
+            .overflow_hidden()
             .child(content_view)
             .child(info_list)
     }
@@ -6544,6 +7857,10 @@ impl Launcher {
     }
 
     fn render_clipboard_text_preview(raw_text: &str) -> Stateful<Div> {
+        // Bound the preview before any detection or wrapping runs; huge
+        // entries would otherwise rebuild thousands of rows per render.
+        let raw_text = cap_preview_text(raw_text);
+        let raw_text = raw_text.as_str();
         let trimmed = raw_text.trim();
         let is_url = trimmed.starts_with("http://") || trimmed.starts_with("https://");
 
@@ -6609,21 +7926,12 @@ impl Launcher {
                 || (trimmed.contains('[') && trimmed.contains("](")));
 
         if is_url {
-            let url_lines: Vec<Div> = format_wrapped_preview_lines(trimmed, 50)
-                .into_iter()
-                .map(|l| {
-                    div()
-                        .min_w(px(0.0))
-                        .max_w_full()
-                        .text_size(px(14.0))
-                        .text_color(rgb(COLOR_ACCENT))
-                        .child(l)
-                })
-                .collect();
+            let rows = format_wrapped_preview_lines(trimmed, 50);
 
             div()
                 .id("clip-preview-link-card")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -6649,27 +7957,22 @@ impl Launcher {
                             .child("↗ Link"),
                     ),
                 )
-                .child(div().flex().flex_col().gap_0p5().children(url_lines))
+                .child(
+                    clip_preview_uniform_list(
+                        "clip-preview-link-list",
+                        ClipPreviewKind::Link,
+                        rows,
+                    )
+                    .flex_1()
+                    .min_h(px(0.0)),
+                )
         } else if is_latex {
-            let lines: Vec<Div> = format_wrapped_preview_lines(raw_text, 50)
-                .into_iter()
-                .map(|l| {
-                    if l.trim().is_empty() {
-                        div().h(px(8.0))
-                    } else {
-                        div()
-                            .min_w(px(0.0))
-                            .max_w_full()
-                            .text_size(px(13.0))
-                            .text_color(rgb(0xf1f5f9))
-                            .child(l)
-                    }
-                })
-                .collect();
+            let rows = format_wrapped_preview_lines(raw_text, 50);
 
             div()
                 .id("clip-preview-latex-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -6703,46 +8006,21 @@ impl Launcher {
                         ),
                 )
                 .child(
-                    div()
-                        .font_family("Menlo")
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .children(lines),
+                    clip_preview_uniform_list(
+                        "clip-preview-latex-list",
+                        ClipPreviewKind::Latex,
+                        rows,
+                    )
+                    .flex_1()
+                    .min_h(px(0.0)),
                 )
         } else if let Some(json_str) = parsed_json {
-            let lines: Vec<Div> = format_wrapped_preview_lines(&json_str, 50)
-                .into_iter()
-                .enumerate()
-                .map(|(idx, l)| {
-                    div()
-                        .min_w(px(0.0))
-                        .max_w_full()
-                        .flex()
-                        .gap_3()
-                        .items_baseline()
-                        .child(
-                            div()
-                                .w(px(24.0))
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(0x52525b))
-                                .child(format!("{}", idx + 1)),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .max_w_full()
-                                .text_size(px(12.5))
-                                .text_color(rgb(0xe4e4e7))
-                                .child(l),
-                        )
-                })
-                .collect();
+            let rows = format_wrapped_preview_lines(&json_str, 50);
 
             div()
                 .id("clip-preview-json-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -6778,50 +8056,25 @@ impl Launcher {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(rgb(COLOR_TEXT_DIM))
-                                .child(format!("{} lines", lines.len())),
+                                .child(format!("{} lines", rows.len())),
                         ),
                 )
                 .child(
-                    div()
-                        .font_family("Menlo")
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .children(lines),
+                    clip_preview_uniform_list(
+                        "clip-preview-json-list",
+                        ClipPreviewKind::Json,
+                        rows,
+                    )
+                    .flex_1()
+                    .min_h(px(0.0)),
                 )
         } else if is_code {
-            let lines: Vec<Div> = format_wrapped_preview_lines(raw_text, 50)
-                .into_iter()
-                .enumerate()
-                .map(|(idx, l)| {
-                    div()
-                        .min_w(px(0.0))
-                        .max_w_full()
-                        .flex()
-                        .gap_3()
-                        .items_baseline()
-                        .child(
-                            div()
-                                .w(px(24.0))
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(0x52525b))
-                                .child(format!("{}", idx + 1)),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .max_w_full()
-                                .text_size(px(12.5))
-                                .text_color(rgb(0xe4e4e7))
-                                .child(if l.is_empty() { " ".to_string() } else { l }),
-                        )
-                })
-                .collect();
+            let rows = format_wrapped_preview_lines(raw_text, 50);
 
             div()
                 .id("clip-preview-code-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -6857,16 +8110,17 @@ impl Launcher {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(rgb(COLOR_TEXT_DIM))
-                                .child(format!("{} lines", lines.len())),
+                                .child(format!("{} lines", rows.len())),
                         ),
                 )
                 .child(
-                    div()
-                        .font_family("Menlo")
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .children(lines),
+                    clip_preview_uniform_list(
+                        "clip-preview-code-list",
+                        ClipPreviewKind::Code,
+                        rows,
+                    )
+                    .flex_1()
+                    .min_h(px(0.0)),
                 )
         } else if is_markdown {
             let mut in_code_block = false;
@@ -6995,7 +8249,8 @@ impl Launcher {
 
             div()
                 .id("clip-preview-markdown-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -7028,27 +8283,24 @@ impl Launcher {
                                 .child("M↓ Markdown"),
                         ),
                 )
-                .child(div().flex().flex_col().gap_1p5().children(md_elements))
+                .child(
+                    div()
+                        .id("clip-preview-markdown-scroll")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1p5()
+                        .children(md_elements),
+                )
         } else {
-            let lines: Vec<Div> = format_wrapped_preview_lines(raw_text, 50)
-                .into_iter()
-                .map(|l| {
-                    if l.trim().is_empty() {
-                        div().h(px(8.0))
-                    } else {
-                        div()
-                            .min_w(px(0.0))
-                            .max_w_full()
-                            .text_size(px(13.5))
-                            .text_color(rgb(COLOR_TEXT))
-                            .child(l)
-                    }
-                })
-                .collect();
+            let rows = format_wrapped_preview_lines(raw_text, 50);
 
             div()
                 .id("clip-preview-text-box")
-                .flex_none()
+                .flex_1()
+                .min_h(px(0.0))
                 .w_full()
                 .min_w(px(0.0))
                 .max_w_full()
@@ -7060,8 +8312,15 @@ impl Launcher {
                 .border_color(rgb(0x27272a))
                 .flex()
                 .flex_col()
-                .gap_1()
-                .children(lines)
+                .child(
+                    clip_preview_uniform_list(
+                        "clip-preview-text-list",
+                        ClipPreviewKind::Text,
+                        rows,
+                    )
+                    .flex_1()
+                    .min_h(px(0.0)),
+                )
         }
     }
 
@@ -7281,10 +8540,15 @@ impl Launcher {
             linear_color_stop(rgba((bg & 0xffff_ff00) | 0x38), 1.0),
         );
 
-        let show_primary = self.page != LauncherPage::Uninstaller
-            || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress);
-        let show_actions = self.page != LauncherPage::Uninstaller
-            || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress);
+        // The visual pages (pomodoro, weather) have no result rows and
+        // no actions menu: only the burger stays in their footer.
+        let visual_only = matches!(self.page, LauncherPage::Pomodoro | LauncherPage::Weather);
+        let show_primary = !visual_only
+            && (self.page != LauncherPage::Uninstaller
+                || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress));
+        let show_actions = !visual_only
+            && (self.page != LauncherPage::Uninstaller
+                || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress));
 
         div()
             .id("footer-overlay")
@@ -7628,11 +8892,16 @@ impl Launcher {
             ))
             .child(
                 div()
+                    .min_w(px(0.0))
+                    .flex_1()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .overflow_hidden()
                     .child(
                         div()
+                            .min_w(px(0.0))
+                            .flex_none()
                             .text_size(px(14.0))
                             .text_color(if selected {
                                 rgb(0xffffff)
@@ -7644,18 +8913,28 @@ impl Launcher {
                             } else {
                                 FontWeight::NORMAL
                             })
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_overflow(TextOverflow::Truncate(SharedString::new_static("…")))
                             .child(result.title.clone()),
                     )
                     .when_some(subtitle, |row, sub| {
                         row.child(
                             div()
+                                .min_w(px(0.0))
+                                .flex_1()
                                 .text_size(px(12.0))
                                 .text_color(rgb(COLOR_TEXT_DIM))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_overflow(TextOverflow::Truncate(SharedString::new_static(
+                                    "…",
+                                )))
                                 .child(sub),
                         )
                     }),
             )
-            .child(div().flex_1())
+            .child(div().flex_none())
             .when_some(result.accessory.clone(), |row, accessory| {
                 // An accessory can be a shortcut, written in token form
                 // by the command crate. Render it with this platform's
@@ -8081,6 +9360,12 @@ impl Render for Launcher {
         let is_clipboard = self.page == LauncherPage::Clipboard;
         let is_files = self.page == LauncherPage::Files;
         let is_brew = self.page == LauncherPage::Brew;
+        let is_text = self.page == LauncherPage::Text;
+        let is_pomodoro = self.page == LauncherPage::Pomodoro;
+        let is_weather = self.page == LauncherPage::Weather;
+        let is_notes = self.page == LauncherPage::Notes;
+        let is_media = self.page == LauncherPage::Media;
+        let is_tabs = self.page == LauncherPage::Tabs;
         let is_ports = self.page == LauncherPage::Ports;
         let is_processes = self.page == LauncherPage::Processes;
         let is_uninstaller = self.page == LauncherPage::Uninstaller;
@@ -8125,6 +9410,33 @@ impl Render for Launcher {
             .when(is_brew, |view| {
                 view.child(self.search_row(window, cx))
                     .child(self.brew_subheader())
+                    .child(self.results_list(cx))
+            })
+            .when(is_text, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.text_subheader())
+                    .child(self.results_list(cx))
+            })
+            .when(is_pomodoro, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.pomodoro_page_view(cx))
+            })
+            .when(is_weather, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.weather_page_view(cx))
+            })
+            .when(is_notes, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.notes_subheader())
+                    .child(self.results_list(cx))
+            })
+            .when(is_media, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.media_page_view(cx))
+            })
+            .when(is_tabs, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.tabs_subheader())
                     .child(self.results_list(cx))
             })
             .when(is_ports, |view| {
@@ -8401,9 +9713,7 @@ pub fn collect_hotkey_bindings(
     }
     for (name, cfg) in &settings.quicklinks.command_items {
         if let Some(ref hk) = cfg.hotkey {
-            if !hk.is_empty()
-                && !quicklinks_file.quicklinks.iter().any(|q| &q.name == name)
-            {
+            if !hk.is_empty() && !quicklinks_file.quicklinks.iter().any(|q| &q.name == name) {
                 bindings.push((
                     hk.clone(),
                     corvo_platform::HotkeyIntent::OpenUrl(name.clone()),
@@ -8603,7 +9913,10 @@ pub fn run(
                         } else {
                             smol::spawn(async move {
                                 if let Err(err) = corvo_platform::tile_window(None, &action_id) {
-                                    corvo_platform::diagnostics::record_error("launcher", "headless_tile_failed");
+                                    corvo_platform::diagnostics::record_error(
+                                        "launcher",
+                                        "headless_tile_failed",
+                                    );
                                     eprintln!("corvo: headless tile window error: {err}");
                                 }
                             })
@@ -8614,7 +9927,10 @@ pub fn run(
                         let path_str = path.to_string_lossy().to_string();
                         smol::spawn(async move {
                             if let Err(err) = corvo_platform::open_app(&path_str) {
-                                corvo_platform::diagnostics::record_error("launcher", "app_open_failed");
+                                corvo_platform::diagnostics::record_error(
+                                    "launcher",
+                                    "app_open_failed",
+                                );
                                 eprintln!("corvo: open app error: {err}");
                             }
                         })
@@ -8715,10 +10031,8 @@ fn execute_system_action_intent(action_id: &str, cx: &mut App) {
                         // launcher while it ran.
                         let title = target_id.clone();
                         cx.spawn(async move |cx| {
-                            let result = smol::unblock(move || {
-                                corvo_platform::run_shell(&shell_cmd)
-                            })
-                            .await;
+                            let result =
+                                smol::unblock(move || corvo_platform::run_shell(&shell_cmd)).await;
                             if let Err(error) = result {
                                 let notice = ToastNotice::failure(
                                     ToastCategory::System,
@@ -9005,6 +10319,12 @@ fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
                     LauncherPage::Files => launcher.open_files_page(window, cx),
                     LauncherPage::Emoji => launcher.open_emoji_page(window, cx),
                     LauncherPage::Brew => launcher.open_brew_page(BrewPageMode::Search, window, cx),
+                    LauncherPage::Text => launcher.open_text_page("", window, cx),
+                    LauncherPage::Pomodoro => launcher.open_pomodoro_page(window, cx),
+                    LauncherPage::Weather => launcher.open_weather_page("", window, cx),
+                    LauncherPage::Notes => launcher.open_notes_page(window, cx),
+                    LauncherPage::Media => launcher.open_media_page(window, cx),
+                    LauncherPage::Tabs => launcher.open_tabs_page(window, cx),
                     LauncherPage::Ports => launcher.open_ports_page(window, cx),
                     LauncherPage::Processes => launcher.open_processes_page("", window, cx),
                     _ => {
@@ -9283,8 +10603,7 @@ fn launcher_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
         // `Bounds::centered` works from the visible bounds, which leave
         // out the menu bar, so this has to use the same rect.
         let visible = display.visible_bounds();
-        let target_center =
-            visible.origin.y + visible.size.height * LAUNCHER_CENTER_FRACTION;
+        let target_center = visible.origin.y + visible.size.height * LAUNCHER_CENTER_FRACTION;
         bounds.origin.y = (target_center - window_size.height / 2.0)
             .max(visible.origin.y + px(LAUNCHER_TOP_MARGIN));
     }
@@ -9317,6 +10636,118 @@ fn window_kind() -> WindowKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn clipboard_preview_card_keeps_a_constant_height(cx: &mut gpui::TestAppContext) {
+        struct ProbeView {
+            line_count: usize,
+            card_height: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
+        }
+
+        impl Render for ProbeView {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let probe = self.card_height.clone();
+                let rows = (0..self.line_count)
+                    .map(|index| format!("line {index}"))
+                    .collect();
+                // The exact clipboard pane structure: a bounded pane, a
+                // flex_1 card, and the virtualized row list inside it.
+                div().size_full().flex().flex_col().child(
+                    div()
+                        .id("probe-pane")
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("probe-card")
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .w_full()
+                                .relative()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    clip_preview_uniform_list(
+                                        "probe-list",
+                                        ClipPreviewKind::Text,
+                                        rows,
+                                    )
+                                    .flex_1()
+                                    .min_h(px(0.0)),
+                                )
+                                .child(
+                                    gpui::canvas(
+                                        |_bounds, _window, _cx| {},
+                                        move |bounds, _, _, _| probe.set(bounds.size.height),
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                ),
+                        )
+                        .child(div().id("probe-info").flex_none().h(px(60.0))),
+                )
+            }
+        }
+
+        let card_height = std::rc::Rc::new(std::cell::Cell::new(gpui::Pixels::ZERO));
+        let window = cx.add_window({
+            let card_height = card_height.clone();
+            move |_, _| ProbeView {
+                line_count: 5,
+                card_height,
+            }
+        });
+        let handle = gpui::AnyWindowHandle::from(window);
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let short = card_height.get();
+        assert!(short > px(100.0), "card should be tall, got {short:?}");
+
+        window
+            .update(cx, |view: &mut ProbeView, _window, _cx| {
+                view.line_count = 5_000;
+            })
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let long = card_height.get();
+
+        assert_eq!(short, long, "the card must not grow with content length");
+    }
+
+    #[test]
+    fn cap_preview_text_passes_small_texts_through() {
+        assert_eq!(cap_preview_text("hello\nworld"), "hello\nworld");
+        assert_eq!(cap_preview_text(""), "");
+    }
+
+    #[test]
+    fn cap_preview_text_caps_line_count_with_a_marker() {
+        let many_lines = (0..(CLIP_PREVIEW_MAX_LINES + 50))
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capped = cap_preview_text(&many_lines);
+        assert_eq!(capped.lines().count(), CLIP_PREVIEW_MAX_LINES + 1);
+        assert!(capped.ends_with("… 50 more lines not shown"));
+    }
+
+    #[test]
+    fn cap_preview_text_shows_part_of_a_single_huge_line() {
+        let huge = "a".repeat(CLIP_PREVIEW_MAX_CHARS * 3);
+        let capped = cap_preview_text(&huge);
+        assert!(capped.starts_with('a'));
+        assert!(capped.chars().count() <= CLIP_PREVIEW_MAX_CHARS + 64);
+        assert!(capped.ends_with("… 1 more lines not shown"));
+    }
 
     fn size(compact: bool, force: bool, page: LauncherPage, query: &str) -> PaletteSize {
         palette_size(compact, force, page, query, false, false, false)
@@ -9360,39 +10791,15 @@ mod tests {
     fn an_open_overlay_expands_the_panel() {
         // The actions menu and the burger menu need room to draw.
         assert_eq!(
-            palette_size(
-                true,
-                false,
-                LauncherPage::Root,
-                "",
-                true,
-                false,
-                false
-            ),
+            palette_size(true, false, LauncherPage::Root, "", true, false, false),
             PaletteSize::Extended
         );
         assert_eq!(
-            palette_size(
-                true,
-                false,
-                LauncherPage::Root,
-                "",
-                false,
-                true,
-                false
-            ),
+            palette_size(true, false, LauncherPage::Root, "", false, true, false),
             PaletteSize::Extended
         );
         assert_eq!(
-            palette_size(
-                true,
-                false,
-                LauncherPage::Root,
-                "",
-                false,
-                false,
-                true
-            ),
+            palette_size(true, false, LauncherPage::Root, "", false, false, true),
             PaletteSize::Extended
         );
     }

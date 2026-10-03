@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::process::Command as ProcessCommand;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -444,11 +443,14 @@ fn load_items(mode: &QueryMode, query: &str) -> Result<Vec<BrewItem>, String> {
     parser(&output).ok_or_else(|| "Homebrew returned invalid JSON".into())
 }
 
+/// Homebrew queries run while the user types; anything slower than this
+/// is treated as hung and killed instead of parking the task forever.
+const BREW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn run_brew(args: &[&str]) -> Result<String, String> {
-    ProcessCommand::new(brew_executable())
-        .args(args)
-        .output()
-        .map_err(|error| format!("Could not start brew: {error}"))
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    corvo_platform::run_process_with_timeout(&brew_executable(), &owned, BREW_TIMEOUT)
+        .map_err(|error| format!("Could not run brew: {error}"))
         .and_then(|output| {
             if output.status.success() {
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -464,26 +466,15 @@ fn run_brew(args: &[&str]) -> Result<String, String> {
 }
 
 fn run_brew_search(scope: &str, query: &str) -> Result<String, String> {
-    ProcessCommand::new(brew_executable())
-        .args(["search", scope, query])
-        .output()
-        .map_err(|error| format!("Could not start brew: {error}"))
-        .and_then(|output| {
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-            } else {
-                let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if is_empty_search_result(&error) {
-                    Ok(String::new())
-                } else {
-                    Err(if error.is_empty() {
-                        format!("brew exited with {}", output.status)
-                    } else {
-                        error
-                    })
-                }
-            }
-        })
+    run_brew(&["search", scope, query]).or_else(|error| {
+        // A search with no hits exits non-zero with this message; that
+        // is an empty result set, not a failure.
+        if is_empty_search_result(&error) {
+            Ok(String::new())
+        } else {
+            Err(error)
+        }
+    })
 }
 
 fn is_empty_search_result(error: &str) -> bool {
@@ -704,11 +695,9 @@ mod tests {
     fn menu_shows_brew_actions_in_launcher_order() {
         let results = menu_results();
         assert_eq!(results[0].title, "Clear Cache");
-        assert!(
-            results
-                .iter()
-                .any(|result| result.title == "Show Installed")
-        );
+        assert!(results
+            .iter()
+            .any(|result| result.title == "Show Installed"));
         assert!(results.iter().any(|result| result.title == "Upgrade All"));
     }
 

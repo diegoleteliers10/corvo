@@ -1,0 +1,17 @@
+[package]
+name = "corvo-text-utilities"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+corvo-core = { workspace = true }
+corvo-platform = { workspace = true }
+hex = { workspace = true }
+serde_json = "1"
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+smol = { workspace = true }
+uuid = { workspace = true }

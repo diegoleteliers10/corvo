@@ -44,8 +44,8 @@ jobs:
       - name: Check
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
-      - name: Test local diagnostics
-        run: cargo test -p corvo-platform --lib --target ${{ matrix.target }} diagnostics
+      - name: Test workspace
+        run: cargo test --workspace --target ${{ matrix.target }}
 
       - name: Test Windows platform
         if: runner.os == 'Windows'

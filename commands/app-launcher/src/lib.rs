@@ -262,7 +262,9 @@ impl Command for AppLauncherCommand {
                 },
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TRASH),
                 group: ActionGroup::Destructive,
-                hotkey: Some("enter"),
+                // No hint: Enter belongs to the primary action, and a
+                // destructive row should not advertise it.
+                hotkey: None,
             });
         }
         actions

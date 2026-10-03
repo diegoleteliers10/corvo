@@ -191,7 +191,14 @@ impl PlatformOps for MacPlatform {
 
 /// In-process clipboard copy using NSPasteboard.
 pub fn copy_to_pasteboard(text: &str) {
-    let pboard = NSPasteboard::generalPasteboard();
+    write_string_to_pasteboard(&NSPasteboard::generalPasteboard(), text);
+}
+
+/// Writes `text` to the given pasteboard, replacing its contents.
+///
+/// Tests drive this with a uniquely named pasteboard so the suite never
+/// clobbers what the user actually copied.
+pub fn write_string_to_pasteboard(pboard: &NSPasteboard, text: &str) {
     pboard.clearContents();
     let ns_string = NSString::from_str(text);
     unsafe {
@@ -2230,12 +2237,17 @@ pub fn is_launch_at_login_enabled() -> bool {
         }
     }
     let output = std::process::Command::new("osascript")
-        .args(["-e", "tell application \"System Events\" to get name of every login item"])
+        .args([
+            "-e",
+            "tell application \"System Events\" to get name of every login item",
+        ])
         .output();
     if let Ok(output) = output {
         if output.status.success() {
             let names = String::from_utf8_lossy(&output.stdout);
-            return names.split(',').any(|name| name.trim().eq_ignore_ascii_case("Corvo"));
+            return names
+                .split(',')
+                .any(|name| name.trim().eq_ignore_ascii_case("Corvo"));
         }
     }
     false
@@ -2265,7 +2277,8 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
         }
         // Always remove the LaunchAgent when bundled to prevent double-launch.
         if let Some(home) = std::env::var_os("HOME") {
-            let plist_path = std::path::Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
+            let plist_path =
+                std::path::Path::new(&home).join("Library/LaunchAgents/sh.corvo.corvo.plist");
             if plist_path.exists() {
                 let _ = std::process::Command::new("launchctl")
                     .args(["unload", "-w", &plist_path.to_string_lossy()])
@@ -2285,7 +2298,8 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 
             if enabled {
                 let _ = std::fs::create_dir_all(&launch_agents_dir);
-                let target_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/corvo"));
+                let target_exe = std::env::current_exe()
+                    .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/corvo"));
                 let plist_content = format!(
                     r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2403,21 +2417,46 @@ fn unimplemented_os(what: &str) -> PlatformError {
     PlatformError::Unsupported(format!("macos {what} arrives in phase 4"))
 }
 
+/// Shows a macOS notification. Runs on the timer thread, where waiting
+/// the ~100ms for osascript is acceptable.
+pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
+    let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape(body),
+        escape(title)
+    );
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(PlatformError::Os(format!("osascript exited with {status}"))),
+        Err(error) => Err(PlatformError::Os(format!(
+            "could not start osascript: {error}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MacPlatform;
-    use super::PlatformOps;
-
     #[test]
     fn copy_text_roundtrips_unicode() {
-        let platform = MacPlatform;
+        // A uniquely named pasteboard keeps the roundtrip off the real
+        // clipboard; the old version wrote "🚀 hello üòÄ" over whatever
+        // the user had copied whenever the suite ran.
+        let pboard = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
         let text = "🚀 hello üòÄ";
-        platform.copy_text(text).expect("copy_text writes");
-        let pasted = std::process::Command::new("/usr/bin/pbpaste")
-            .output()
-            .expect("pbpaste runs");
-        assert!(pasted.status.success());
-        assert_eq!(String::from_utf8_lossy(&pasted.stdout).trim_end(), text);
+        super::write_string_to_pasteboard(&pboard, text);
+        let pasted = unsafe { pboard.stringForType(objc2_app_kit::NSPasteboardTypeString) };
+        assert_eq!(
+            pasted.as_ref().map(|s| s.to_string()),
+            Some(text.to_string())
+        );
     }
 
     #[test]
@@ -2488,4 +2527,3 @@ mod tests {
         }
     }
 }
-

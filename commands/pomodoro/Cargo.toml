@@ -1,0 +1,11 @@
+[package]
+name = "corvo-pomodoro"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-platform = { workspace = true }
+smol = { workspace = true }

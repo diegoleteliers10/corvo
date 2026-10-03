@@ -223,10 +223,10 @@ pub fn get_system_settings() -> Vec<SystemSettingDef> {
         },
         SystemSettingDef {
             id: "background-security",
-            title: "Background Security Improvements",
-            keywords: "background security improvements system security rapid response patches",
+            title: "Login Items & Extensions",
+            keywords: "login items background items extensions startup launch agents allowed blocked",
             icon: phosphor_svgs::style::regular::SHIELD_CHECK,
-            execution: ActionExecution::OpenUrl("x-apple.systempreferences:com.apple.Privacy-Security-Settings.extension".into()),
+            execution: ActionExecution::OpenUrl("x-apple.systempreferences:com.apple.LoginItems-Settings.extension".into()),
         },
         SystemSettingDef {
             id: "battery",

@@ -15,10 +15,41 @@ pub enum StartupDecision {
 
 #[cfg(unix)]
 fn socket_path() -> PathBuf {
+    // Suffix the UID: without it every local user competes for the same
+    // path, and on macOS (no XDG_RUNTIME_DIR) that path is in the
+    // shared /tmp. Another user's resident could then swallow toggles
+    // or block binding outright.
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("corvo.sock")
+        .join(format!("corvo-{}.sock", unsafe { libc::getuid() }))
+}
+
+/// The pre-UID socket path. Residents built before the suffix live
+/// there; they register the same global hotkey, which double-fires.
+#[cfg(unix)]
+fn legacy_socket_path() -> PathBuf {
+    std::env::temp_dir().join("corvo.sock")
+}
+
+/// Warns when an older Corvo resident is still alive: both register
+/// the same global hotkey and macOS delivers the event to each, so
+/// toggles land twice and the launcher looks flaky.
+#[cfg(unix)]
+fn warn_about_legacy_resident() {
+    let legacy = legacy_socket_path();
+    if legacy == socket_path() {
+        return;
+    }
+    if std::os::unix::net::UnixStream::connect(&legacy).is_ok() {
+        crate::diagnostics::record_error("ipc", "legacy_resident_conflict");
+        eprintln!(
+            "corvo: an older Corvo resident is still running ({} answers). \
+             Both register the same hotkey and toggles will misfire — \
+             quit the older Corvo.",
+            legacy.display()
+        );
+    }
 }
 
 /// Checks whether another process owns the resident slot and asks it to toggle.
@@ -27,14 +58,19 @@ pub fn try_send_toggle() -> StartupDecision {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
-    let Ok(mut stream) = UnixStream::connect(socket_path()) else {
-        return StartupDecision::StartResident;
-    };
-    if stream.write_all(TOGGLE).is_ok() {
-        StartupDecision::ToggleExisting
-    } else {
-        StartupDecision::StartResident
+    // The current socket first; fall back to the legacy path so the
+    // binary can still drive a pre-UID resident during upgrades.
+    let mut decided = StartupDecision::StartResident;
+    for path in [socket_path(), legacy_socket_path()] {
+        if let Ok(mut stream) = UnixStream::connect(&path) {
+            if stream.write_all(TOGGLE).is_ok() {
+                return StartupDecision::ToggleExisting;
+            }
+        } else {
+            decided = StartupDecision::StartResident;
+        }
     }
+    decided
 }
 
 /// Serves toggle requests on a background thread.
@@ -43,6 +79,7 @@ pub fn serve(tx: smol::channel::Sender<()>) {
     use std::io::{ErrorKind, Read};
     use std::os::unix::net::UnixListener;
 
+    warn_about_legacy_resident();
     let path = socket_path();
     let listener = match UnixListener::bind(&path) {
         Ok(listener) => listener,
@@ -209,76 +246,73 @@ pub fn serve(tx: smol::channel::Sender<()>) {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    std::thread::spawn(move || {
-        loop {
-            let pipe = unsafe {
-                CreateNamedPipeW(
-                    pipe_name.as_ptr(),
-                    PIPE_ACCESS_DUPLEX,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    255,
-                    0,
-                    64,
-                    0,
-                    ptr::null_mut(),
-                )
-            };
-            if pipe == INVALID_HANDLE_VALUE {
-                crate::diagnostics::record_error("ipc", "pipe_create_failed");
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                continue;
-            }
+    std::thread::spawn(move || loop {
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                pipe_name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                255,
+                0,
+                64,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if pipe == INVALID_HANDLE_VALUE {
+            crate::diagnostics::record_error("ipc", "pipe_create_failed");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        }
 
-            let connected = unsafe { ConnectNamedPipe(pipe, ptr::null_mut()) } != 0
-                || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-            if connected {
-                let tx = tx.clone();
-                let pipe = pipe as usize;
-                std::thread::spawn(move || {
-                    let pipe = pipe as Handle;
-                    let mut buffer = [0u8; 64];
-                    let mut bytes_read = 0;
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_millis(500);
-                    let mut bytes_available = 0;
-                    let data_ready = loop {
-                        let peeked = unsafe {
-                            PeekNamedPipe(
-                                pipe,
-                                ptr::null_mut(),
-                                0,
-                                ptr::null_mut(),
-                                &mut bytes_available,
-                                ptr::null_mut(),
-                            )
-                        } != 0;
-                        if !peeked || bytes_available > 0 || std::time::Instant::now() >= deadline {
-                            break peeked && bytes_available > 0;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    };
-                    let read = data_ready
-                        && unsafe {
-                            ReadFile(
-                                pipe,
-                                buffer.as_mut_ptr(),
-                                buffer.len() as u32,
-                                &mut bytes_read,
-                                ptr::null_mut(),
-                            )
-                        } != 0;
-                    if read && buffer[..bytes_read as usize].trim_ascii() == b"toggle" {
-                        let _ = tx.try_send(());
+        let connected = unsafe { ConnectNamedPipe(pipe, ptr::null_mut()) } != 0
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        if connected {
+            let tx = tx.clone();
+            let pipe = pipe as usize;
+            std::thread::spawn(move || {
+                let pipe = pipe as Handle;
+                let mut buffer = [0u8; 64];
+                let mut bytes_read = 0;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                let mut bytes_available = 0;
+                let data_ready = loop {
+                    let peeked = unsafe {
+                        PeekNamedPipe(
+                            pipe,
+                            ptr::null_mut(),
+                            0,
+                            ptr::null_mut(),
+                            &mut bytes_available,
+                            ptr::null_mut(),
+                        )
+                    } != 0;
+                    if !peeked || bytes_available > 0 || std::time::Instant::now() >= deadline {
+                        break peeked && bytes_available > 0;
                     }
-                    unsafe {
-                        let _ = DisconnectNamedPipe(pipe);
-                        let _ = CloseHandle(pipe);
-                    }
-                });
-            } else {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                let read = data_ready
+                    && unsafe {
+                        ReadFile(
+                            pipe,
+                            buffer.as_mut_ptr(),
+                            buffer.len() as u32,
+                            &mut bytes_read,
+                            ptr::null_mut(),
+                        )
+                    } != 0;
+                if read && buffer[..bytes_read as usize].trim_ascii() == b"toggle" {
+                    let _ = tx.try_send(());
+                }
                 unsafe {
+                    let _ = DisconnectNamedPipe(pipe);
                     let _ = CloseHandle(pipe);
                 }
+            });
+        } else {
+            unsafe {
+                let _ = CloseHandle(pipe);
             }
         }
     });

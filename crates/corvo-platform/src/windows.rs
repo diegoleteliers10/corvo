@@ -123,6 +123,72 @@ pub fn set_launcher_window_region(handle: isize, radius: f32) {
     }
 }
 
+/// Checks whether the clipboard carries a password manager's exclusion
+/// marker. Windows password managers (1Password, Bitwarden, KeePass) put
+/// `ExcludeClipboardContentFromMonitorProcessing`, or
+/// `CanIncludeInClipboardHistory` with value 0, on sensitive entries so
+/// clipboard monitors skip them.
+pub fn clipboard_is_concealed() -> bool {
+    use std::ffi::c_void;
+
+    #[allow(non_snake_case)]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(window: isize) -> i32;
+        fn CloseClipboard() -> i32;
+        fn RegisterClipboardFormatW(name: *const u16) -> u32;
+        fn IsClipboardFormatAvailable(format: u32) -> i32;
+        fn GetClipboardData(format: u32) -> isize;
+    }
+    #[allow(non_snake_case)]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalLock(handle: isize) -> *mut c_void;
+        fn GlobalUnlock(handle: isize) -> i32;
+    }
+
+    fn registered_format(name: &str) -> u32 {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // Registering a format that the setter never used only creates
+        // the atom; it does not put anything on the clipboard.
+        unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
+    }
+
+    fn format_available(format: u32) -> bool {
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+    }
+
+    if unsafe { OpenClipboard(0) } == 0 {
+        return false;
+    }
+    let mut concealed = false;
+    if format_available(registered_format(
+        "ExcludeClipboardContentFromMonitorProcessing",
+    )) {
+        concealed = true;
+    } else {
+        let include_format = registered_format("CanIncludeInClipboardHistory");
+        if format_available(include_format) {
+            // Value 0 asks monitors to skip the entry; anything else is
+            // an explicit "include" from the writing app.
+            let handle = unsafe { GetClipboardData(include_format) };
+            if handle != 0 {
+                let locked = unsafe { GlobalLock(handle) } as *const u32;
+                if !locked.is_null() {
+                    concealed = unsafe { *locked } == 0;
+                    unsafe {
+                        let _ = GlobalUnlock(handle);
+                    };
+                }
+            }
+        }
+    }
+    unsafe {
+        let _ = CloseClipboard();
+    };
+    concealed
+}
+
 pub fn supports_app_uninstall_path(path: &Path) -> bool {
     appx_family_name(path).is_some()
         || (path
@@ -888,9 +954,8 @@ const SW_SHOWNORMAL: i32 = 1;
 /// Saved window frames, so "Restore Previous Size" has something to
 /// restore. Keyed by the process id.
 fn restore_cache() -> &'static std::sync::Mutex<std::collections::HashMap<u32, WinRect>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u32, WinRect>>,
-    > = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, WinRect>>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -1525,8 +1590,7 @@ fn set_physical_monitor_brightness(delta_percent: i32) -> PlatformResult<usize> 
     ) -> i32 {
         let search = &mut *(data as *mut Search);
         let mut count = 0u32;
-        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &mut count) } == 0
-            && count > 0
+        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &mut count) } == 0 && count > 0
         {
             let mut monitors = vec![PhysicalMonitor(0); count as usize];
             if unsafe { GetPhysicalMonitorsFromHMONITOR(monitor, count, monitors.as_mut_ptr()) }
@@ -1543,8 +1607,7 @@ fn set_physical_monitor_brightness(delta_percent: i32) -> PlatformResult<usize> 
                     if unsafe { GetMonitorBrightness(*handle, &mut current) } != 0 {
                         continue;
                     }
-                    let target =
-                        (current as i32 + search.delta).clamp(0, 100) as u32;
+                    let target = (current as i32 + search.delta).clamp(0, 100) as u32;
                     if unsafe { SetMonitorBrightness(*handle, target) } != 0 {
                         search.changed += 1;
                     }
@@ -1572,9 +1635,7 @@ fn set_physical_monitor_brightness(delta_percent: i32) -> PlatformResult<usize> 
 
 pub fn adjust_brightness_with_level(delta: f32) -> PlatformResult<f32> {
     if !delta.is_finite() {
-        return Err(PlatformError::Os(
-            "brightness change must be finite".into(),
-        ));
+        return Err(PlatformError::Os("brightness change must be finite".into()));
     }
     let delta_percent = (delta * 100.0).round() as i32;
     if delta_percent == 0 {
@@ -1587,9 +1648,7 @@ pub fn adjust_brightness_with_level(delta: f32) -> PlatformResult<f32> {
 }
 
 fn no_brightness_control() -> PlatformError {
-    PlatformError::Unsupported(
-        "this display has no software brightness control".into(),
-    )
+    PlatformError::Unsupported("this display has no software brightness control".into())
 }
 
 // -------------------------------------------------------------------------
@@ -1842,7 +1901,7 @@ fn run(program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> PlatformResult<()
 /// the shell accepts the request, and it reports a real failure code, so
 /// the caller never waits on a helper process and never sees a false error
 /// after a successful launch.
-fn shell_execute(verb: &str, target: &str) -> PlatformResult<()> {
+pub(crate) fn shell_execute(verb: &str, target: &str) -> PlatformResult<()> {
     #[allow(non_snake_case)]
     #[link(name = "shell32")]
     unsafe extern "system" {
@@ -1889,7 +1948,7 @@ fn shell_execute(verb: &str, target: &str) -> PlatformResult<()> {
     }
 }
 
-fn run_powershell(script: &str) -> PlatformResult<()> {
+pub(crate) fn run_powershell(script: &str) -> PlatformResult<()> {
     let encoded = base64_encode(
         &script
             .encode_utf16()
@@ -2019,8 +2078,7 @@ fn cached_icon_for_key(key: &str) -> Option<PathBuf> {
     if !cached.is_file() {
         return None;
     }
-    if image::open(&cached)
-        .is_ok_and(|image| image.to_rgba8().pixels().any(|pixel| pixel[3] != 0))
+    if image::open(&cached).is_ok_and(|image| image.to_rgba8().pixels().any(|pixel| pixel[3] != 0))
     {
         Some(cached)
     } else {
@@ -2069,8 +2127,7 @@ fn fill_start_app_icons(apps: &mut [AppEntry]) {
             .strip_prefix("shell:AppsFolder\\")
         {
             let key = app_id.to_lowercase();
-            app.icon_png = cached_icon_for_key(&key)
-                .or_else(|| cache_native_icon(&app.path, &key));
+            app.icon_png = cached_icon_for_key(&key).or_else(|| cache_native_icon(&app.path, &key));
         }
     }
 
@@ -2209,8 +2266,8 @@ fn fill_shortcut_icons(apps: &mut [AppEntry]) {
             .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("lnk"))
     }) {
         let key = app.path.to_string_lossy().to_lowercase();
-        app.icon_png = cached_shortcut_icon(&app.path)
-            .or_else(|| cache_native_icon(&app.path, &key));
+        app.icon_png =
+            cached_shortcut_icon(&app.path).or_else(|| cache_native_icon(&app.path, &key));
         if app.icon_png.is_none() {
             crate::diagnostics::record_error("icons", "shortcut_extract_failed");
         }
@@ -2312,6 +2369,27 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
             .status();
         Ok(())
     }
+}
+
+/// Shows a Windows toast. The script travels to PowerShell base64
+/// encoded, so title and body only need PowerShell literal escaping
+/// (a single quote doubles); the cmd.exe quoting traps do not apply.
+pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
+    let title = title.replace('\'', "''");
+    let body = body.replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n\
+         $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)\n\
+         $texts = $template.GetElementsByTagName('text')\n\
+         $null = $texts.Item(0).AppendChild($template.CreateTextNode('{title}'))\n\
+         $null = $texts.Item(1).AppendChild($template.CreateTextNode('{body}'))\n\
+         $toast = [Windows.UI.Notifications.ToastNotification]::new($template)\n\
+         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Corvo')\n\
+         $notifier.Show($toast)\n\
+         exit 0"
+    );
+    run_powershell(&script)
 }
 
 #[cfg(test)]
@@ -2503,7 +2581,11 @@ mod tests {
         for gap in [0, 12] {
             let top = rect("top-half", &SCREEN, gap);
             let bottom = rect("bottom-half", &SCREEN, gap);
-            assert_eq!(top.height(), bottom.height(), "halves differ with gap {gap}");
+            assert_eq!(
+                top.height(),
+                bottom.height(),
+                "halves differ with gap {gap}"
+            );
             assert!(top.bottom <= bottom.top, "halves overlap");
         }
     }
@@ -2517,7 +2599,10 @@ mod tests {
                 .collect();
             thirds.sort_by_key(|frame| frame.left);
             for pair in thirds.windows(2) {
-                assert!(pair[0].right <= pair[1].left, "thirds overlap with gap {gap}");
+                assert!(
+                    pair[0].right <= pair[1].left,
+                    "thirds overlap with gap {gap}"
+                );
             }
         }
     }
@@ -2547,7 +2632,10 @@ mod tests {
         let inset = rect("left-half", &SCREEN, 12);
         assert!(inset.left > flush.left, "the gap must inset the left edge");
         assert!(inset.top > flush.top, "the gap must inset the top edge");
-        assert!(inset.width() < flush.width(), "the gap must shrink the tile");
+        assert!(
+            inset.width() < flush.width(),
+            "the gap must shrink the tile"
+        );
     }
 
     #[test]
@@ -2621,7 +2709,10 @@ mod tests {
             frame.width() > 0 && frame.height() > 0,
             "a huge gap collapsed the tile: {frame:?}"
         );
-        assert!(frame.right <= tiny.right, "a huge gap pushed the tile off-screen");
+        assert!(
+            frame.right <= tiny.right,
+            "a huge gap pushed the tile off-screen"
+        );
     }
 }
 
@@ -2684,16 +2775,26 @@ fn enable_shutdown_privilege() -> PlatformResult<()> {
     }
 
     let mut token = 0isize;
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) }
-        == 0
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    } == 0
     {
         return Err(PlatformError::Os("could not open the process token".into()));
     }
-    let name: Vec<u16> = "SeShutdownPrivilege".encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = "SeShutdownPrivilege"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut luid = Luid { low: 0, high: 0 };
     if unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) } == 0 {
         unsafe { CloseHandle(token) };
-        return Err(PlatformError::Os("could not look up SeShutdownPrivilege".into()));
+        return Err(PlatformError::Os(
+            "could not look up SeShutdownPrivilege".into(),
+        ));
     }
     let mut privileges = TokenPrivileges {
         count: 1,
@@ -2793,7 +2894,9 @@ pub fn empty_recycle_bin() -> PlatformResult<()> {
         0
     };
     if items == 0 {
-        return Err(PlatformError::Unsupported("the Recycle Bin is already empty".into()));
+        return Err(PlatformError::Unsupported(
+            "the Recycle Bin is already empty".into(),
+        ));
     }
     let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
     let hr = unsafe { SHEmptyRecycleBinW(0, root.as_ptr(), flags) };
@@ -2955,10 +3058,19 @@ pub fn toggle_dark_mode() -> PlatformResult<String> {
         .chain(std::iter::once(0))
         .collect();
     let mut key = 0isize;
-    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &mut key) }
-        != ERROR_SUCCESS
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            &mut key,
+        )
+    } != ERROR_SUCCESS
     {
-        return Err(PlatformError::Os("could not open the theme registry key".into()));
+        return Err(PlatformError::Os(
+            "could not open the theme registry key".into(),
+        ));
     }
     let read = |key: isize, name: &[u16]| -> Option<u32> {
         let mut kind = REG_DWORD;
@@ -2994,8 +3106,14 @@ pub fn toggle_dark_mode() -> PlatformResult<String> {
     // `SystemUsesLightTheme` is the shell's own setting. The old script
     // read `AppsUseLightTheme` and wrote both, which desynchronised the
     // two whenever the user had set them differently.
-    let apps: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain(std::iter::once(0)).collect();
-    let system: Vec<u16> = "SystemUsesLightTheme".encode_utf16().chain(std::iter::once(0)).collect();
+    let apps: Vec<u16> = "AppsUseLightTheme"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let system: Vec<u16> = "SystemUsesLightTheme"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let current = read(key, &system).or_else(|| read(key, &apps)).unwrap_or(1);
     let next = if current == 1 { 0 } else { 1 };
     // Write back only the value that was read, so an independent
@@ -3008,14 +3126,12 @@ pub fn toggle_dark_mode() -> PlatformResult<String> {
     unsafe { RegCloseKey(key) };
 
     // Without this, open windows keep the old colours until they restart.
-    let name: Vec<u16> = "ImmersiveColorSet".encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = "ImmersiveColorSet"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
-        SendNotifyMessageW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            name.as_ptr() as isize,
-        );
+        SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, name.as_ptr() as isize);
     }
     Ok(if next == 0 {
         "Dark theme".to_string()
@@ -3089,12 +3205,14 @@ fn send_media_key(virtual_key: u16) -> PlatformResult<()> {
         },
     ];
     let sent = unsafe {
-        SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<InputRecord>() as i32)
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<InputRecord>() as i32,
+        )
     };
     if sent != inputs.len() as u32 {
-        return Err(PlatformError::Os(
-            "Windows rejected the key event".into(),
-        ));
+        return Err(PlatformError::Os("Windows rejected the key event".into()));
     }
     Ok(())
 }
@@ -3197,11 +3315,7 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
     #[allow(non_snake_case)]
     #[link(name = "cfgmgr32")]
     unsafe extern "system" {
-        fn CM_Locate_DevNodeW(
-            dev_inst: *mut u32,
-            device_id: *const u16,
-            flags: u32,
-        ) -> u32;
+        fn CM_Locate_DevNodeW(dev_inst: *mut u32, device_id: *const u16, flags: u32) -> u32;
         fn CM_Request_Device_EjectW(
             dev_inst: u32,
             veto: *mut u32,
@@ -3300,13 +3414,7 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
             reserved: 0,
         };
         let found = unsafe {
-            SetupDiEnumDeviceInterfaces(
-                info,
-                0,
-                &GUID_DEVINTERFACE_VOLUME,
-                index,
-                &mut interface,
-            )
+            SetupDiEnumDeviceInterfaces(info, 0, &GUID_DEVINTERFACE_VOLUME, index, &mut interface)
         };
         if found == 0 {
             break;
@@ -3369,13 +3477,7 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
         let mut veto = 0u32;
         let mut veto_name = vec![0u16; MAX_PATH as usize];
         let result = unsafe {
-            CM_Request_Device_EjectW(
-                target,
-                &mut veto,
-                veto_name.as_mut_ptr(),
-                MAX_PATH,
-                0,
-            )
+            CM_Request_Device_EjectW(target, &mut veto, veto_name.as_mut_ptr(), MAX_PATH, 0)
         };
         if result == CR_SUCCESS {
             ejected += 1;
@@ -3396,7 +3498,9 @@ pub fn eject_removable_disks() -> PlatformResult<String> {
     if ejected > 0 {
         Ok(format!("ejected {ejected} drive(s)"))
     } else if refusals.is_empty() {
-        Err(PlatformError::Unsupported("no removable drive is connected".into()))
+        Err(PlatformError::Unsupported(
+            "no removable drive is connected".into(),
+        ))
     } else {
         Err(PlatformError::Os(refusals.join("; ")))
     }
@@ -3494,7 +3598,11 @@ mod native_action_tests {
         // The shell value drives the toggle. The app value is left alone
         // unless the shell value is absent, so the two cannot drift.
         let has_system = true;
-        let writes = if has_system { vec!["SystemUsesLightTheme"] } else { vec!["AppsUseLightTheme"] };
+        let writes = if has_system {
+            vec!["SystemUsesLightTheme"]
+        } else {
+            vec!["AppsUseLightTheme"]
+        };
         assert_eq!(writes, vec!["SystemUsesLightTheme"]);
         assert!(!writes.contains(&"AppsUseLightTheme"));
     }
@@ -3502,7 +3610,13 @@ mod native_action_tests {
     #[test]
     fn the_toggle_label_follows_the_value() {
         // The result string is the detail line in the toast.
-        let describe = |light: u32| if light == 0 { "Dark theme" } else { "Light theme" };
+        let describe = |light: u32| {
+            if light == 0 {
+                "Dark theme"
+            } else {
+                "Light theme"
+            }
+        };
         assert_eq!(describe(0), "Dark theme");
         assert_eq!(describe(1), "Light theme");
     }

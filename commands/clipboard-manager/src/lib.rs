@@ -7,8 +7,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 use chrono::{DateTime, Local};
 
 use corvo_core::{
-    Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult, phosphor_svgs, search_match_score,
+    phosphor_svgs, search_match_score, Action, ActionGroup, Command, CommandAction, CommandError,
+    ExecutionContext, Icon, SearchContext, SearchResult,
 };
 
 const MAX_ENTRY_CHARS: usize = 100_000;
@@ -85,14 +85,20 @@ pub fn set_preferences(value: ClipboardPreferences) {
     }
 }
 
+/// The clipboard data directory, falling back to a scratch path when
+/// the OS reports no home directory instead of panicking.
+fn project_data_dir() -> PathBuf {
+    directories::ProjectDirs::from("", "", "corvo")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir().join("corvo"))
+}
+
 fn history_file_path() -> PathBuf {
-    let dirs = directories::ProjectDirs::from("", "", "corvo").expect("corvo: no home directory");
-    dirs.data_dir().join("clipboard_history.json")
+    project_data_dir().join("clipboard_history.json")
 }
 
 pub fn images_dir_path() -> PathBuf {
-    let dirs = directories::ProjectDirs::from("", "", "corvo").expect("corvo: no home directory");
-    dirs.data_dir().join("clipboard_images")
+    project_data_dir().join("clipboard_images")
 }
 
 fn simple_hash(bytes: &[u8]) -> u64 {
@@ -237,10 +243,13 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
         let count = corvo_platform::clipboard_change_count();
         history.last_change_count = count;
         if preferences().enabled && !corvo_platform::clipboard_is_concealed() {
-            let source = corvo_platform::frontmost_app_info()
-                .map(|(_, name)| name)
-                .filter(|name| name != "Corvo" && name != "corvo")
-                .unwrap_or_else(|| "Fastty".into());
+            let source = match corvo_platform::frontmost_app_info() {
+                Some((_, name)) if name != "Corvo" && name != "corvo" => name,
+                // Corvo itself copied (an Action::Copy from the
+                // launcher); no frontmost info at all stays unattributed.
+                Some(_) => "Corvo".into(),
+                None => "Unknown".into(),
+            };
 
             if let Some(png_bytes) = current_clipboard_image() {
                 let hash = simple_hash(&png_bytes);
@@ -420,7 +429,7 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
                 .map(|(_, name)| name)
                 .filter(|name| name != "Corvo" && name != "corvo")
         })
-        .unwrap_or_else(|| "Fastty".into());
+        .unwrap_or_else(|| "Unknown".into());
 
     // 1. Check for image content first
     if let Some(png_bytes) = current_clipboard_image() {

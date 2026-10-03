@@ -6,8 +6,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub mod hotkey;
 pub mod diagnostics;
+pub mod hotkey;
 pub mod ipc;
 pub mod permissions;
 pub mod updates;
@@ -225,7 +225,12 @@ pub fn clipboard_change_count() -> isize {
 pub fn clipboard_is_concealed() -> bool {
     #[cfg(target_os = "macos")]
     return macos::clipboard_is_concealed();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return windows::clipboard_is_concealed();
+    // Linux: arboard exposes no way to enumerate the selection's MIME
+    // types, so `x-kde-passwordManagerHint` cannot be detected. Treated
+    // as not concealed until format enumeration exists.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return false;
 }
 
@@ -589,6 +594,209 @@ pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<Str
     }
 }
 
+/// Runs a process until it exits and both output pipes close, or the deadline passes.
+pub fn run_process_with_timeout(
+    program: &str,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn()?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("stdout pipe is missing"))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("stderr pipe is missing"))?;
+    let stdout_cancelled = Arc::clone(&cancelled);
+    let stderr_cancelled = Arc::clone(&cancelled);
+    let stdout_reader =
+        std::thread::spawn(move || read_process_pipe(stdout_pipe, stdout_cancelled));
+    let stderr_reader =
+        std::thread::spawn(move || read_process_pipe(stderr_pipe, stderr_cancelled));
+
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if stdout_reader.is_finished() && stderr_reader.is_finished() => {
+                break Ok(status);
+            }
+            Ok(_) => {}
+            Err(error) => break Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{program} did not finish within {} seconds",
+                    timeout.as_secs_f64()
+                ),
+            ));
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    };
+    if result.is_err() {
+        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(unix)]
+        unsafe {
+            // The child starts a new process group. Kill all members that keep its pipes open.
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("stdout reader failed"));
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("stderr reader failed"));
+    let status = result?;
+    Ok(std::process::Output {
+        status,
+        stdout: stdout??,
+        stderr: stderr??,
+    })
+}
+
+#[cfg(unix)]
+fn read_process_pipe<P: std::io::Read + std::os::fd::AsRawFd>(
+    mut pipe: P,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(target_os = "windows")]
+fn read_process_pipe<P: std::io::Read + std::os::windows::io::AsRawHandle>(
+    mut pipe: P,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut std::ffi::c_void,
+            buffer: *mut std::ffi::c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            bytes_available: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
+    }
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut available = 0;
+        let success = unsafe {
+            PeekNamedPipe(
+                pipe.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if success == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(109) {
+                break;
+            }
+            return Err(error);
+        }
+        if available == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+        let count = pipe.read(&mut buffer[..(available as usize).min(8192)])?;
+        if count == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
+    Ok(output)
+}
+
+#[cfg(all(test, unix))]
+mod process_timeout_tests {
+    use super::run_process_with_timeout;
+    use std::time::{Duration, Instant};
+
+    fn assert_shell_timeout(script: &str) {
+        let start = Instant::now();
+        let result = run_process_with_timeout(
+            "sh",
+            &["-c".into(), script.into()],
+            Duration::from_millis(150),
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_includes_pipes_after_parent_exit() {
+        assert_shell_timeout("sleep 10 & exit 0");
+    }
+
+    #[test]
+    fn timeout_stops_parent_and_descendant() {
+        assert_shell_timeout("sleep 10 & wait");
+    }
+
+    #[test]
+    fn captures_output_before_deadline() {
+        let output = run_process_with_timeout(
+            "sh",
+            &["-c".into(), "printf out; printf err >&2".into()],
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
+}
+
 /// Executes a shell command on the host platform.
 pub fn run_shell(cmd: &str) -> PlatformResult<()> {
     #[cfg(target_os = "windows")]
@@ -647,16 +855,10 @@ pub fn open_url(url: &str) -> PlatformResult<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        let status = std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .creation_flags(0x0800_0000)
-            .spawn();
-        if status.is_ok() {
-            Ok(())
-        } else {
-            Err(PlatformError::Os(format!("failed to open URL {url}")))
-        }
+        // ShellExecuteW hands the URL straight to the shell. `cmd /c
+        // start` would reparse the URL as a command line, so characters
+        // like `&`, `|`, or `%VAR%` could run arbitrary commands.
+        windows::shell_execute("open", url)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -667,6 +869,16 @@ pub fn open_url(url: &str) -> PlatformResult<()> {
             Err(PlatformError::Os(format!("failed to open URL {url}")))
         }
     }
+}
+
+/// Shows a desktop notification, best effort per platform.
+pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::notify(title, body);
+    #[cfg(target_os = "windows")]
+    return windows::notify(title, body);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::notify(title, body);
 }
 
 /// The platform implementation for the OS this binary was built for.

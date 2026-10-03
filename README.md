@@ -15,6 +15,17 @@ A native application launcher for macOS, Linux, and Windows. Written in Rust wit
 - **File Search**: Search files with configurable scopes and ignore rules.
 - **Auto-Updater**: Automatic update checks with cryptographic signature verification.
 
+- **Text Utilities**: Convert case, encode text, format JSON, generate UUIDs, and calculate hashes.
+- **Pomodoro**: Start focus and break timers with desktop notifications.
+- **Weather**: Get current conditions and a three-day forecast from wttr.in.
+- **Notes**: Edit local Markdown notes with autosave, tables, code colors, and text selection.
+- **Process Control**: Find and terminate processes on macOS, Windows, and Linux.
+- **Homebrew**: Manage packages and services on macOS.
+- **Media Control**: Control Spotify and Music on macOS.
+- **Browser Tabs**: Search Chrome, Brave, and Edge tabs and bookmarks on macOS.
+
+See [the extensions plan](EXTENSIONS_PLAN.md) for platform limits and remaining work.
+
 ## Installation
 
 ### macOS (Homebrew)

@@ -1628,7 +1628,9 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
     {
         config_dir.join("autostart")
     } else {
-        return Err(PlatformError::Os("could not resolve autostart directory".into()));
+        return Err(PlatformError::Os(
+            "could not resolve autostart directory".into(),
+        ));
     };
 
     let desktop_path = autostart_dir.join("corvo.desktop");
@@ -1643,9 +1645,33 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
             .map_err(|e| PlatformError::Os(format!("failed to write autostart desktop entry: {e}")))
     } else {
         if desktop_path.exists() {
-            let _ = std::fs::remove_file(desktop_path);
+            let _ = std::fs::remove_file(&desktop_path);
         }
         Ok(())
+    }
+}
+
+/// Shows a desktop notification through `notify-send`, the standard
+/// freedesktop.org client that every major desktop ships.
+pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
+    let status = Command::new("notify-send")
+        .arg("-a")
+        .arg("Corvo")
+        .arg("-t")
+        .arg("10000")
+        .arg(title)
+        .arg(body)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| PlatformError::Os(format!("could not run notify-send: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(PlatformError::Os(format!(
+            "notify-send exited with {status}"
+        )))
     }
 }
 
@@ -1664,10 +1690,10 @@ mod tests {
 
     #[test]
     fn ignores_hidden_desktop_application() {
-        assert!(
-            parse_desktop_entry("[Desktop Entry]\nType=Application\nName=Hidden\nNoDisplay=true\n")
-                .is_some_and(|entry| entry.hidden)
-        );
+        assert!(parse_desktop_entry(
+            "[Desktop Entry]\nType=Application\nName=Hidden\nNoDisplay=true\n"
+        )
+        .is_some_and(|entry| entry.hidden));
     }
 
     #[test]
@@ -1679,10 +1705,7 @@ mod tests {
 
     #[test]
     fn launch_at_login_toggles_autostart_entry() {
-        let dir = std::env::temp_dir().join(format!(
-            "corvo-autostart-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("corvo-autostart-test-{}", std::process::id()));
         let prior = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         let _ = std::fs::remove_dir_all(&dir);

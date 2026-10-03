@@ -1,6 +1,6 @@
 [package]
 name = "corvo"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 description = "A lightweight native launcher"
 publish = false
@@ -52,6 +52,12 @@ members = [
     "commands/web-search-fallback",
     "commands/kill-process",
     "commands/brew",
+    "commands/text-utilities",
+    "commands/pomodoro",
+    "commands/weather",
+    "commands/notes",
+    "commands/media-control",
+    "commands/browser-tabs",
 ]
 
 [workspace.dependencies]
@@ -69,8 +75,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 semver = { version = "1.0", default-features = false, features = ["std", "serde"] }
 sha2 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
 minisign-verify = "0.2"
 hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "v7"] }
 
 [dependencies]
 corvo-app-launcher = { path = "commands/app-launcher" }
@@ -83,9 +92,15 @@ corvo-emoji-picker = { path = "commands/emoji-picker" }
 corvo-file-search = { path = "commands/file-search" }
 corvo-kill-process = { path = "commands/kill-process" }
 corvo-platform = { path = "crates/corvo-platform" }
+corvo-pomodoro = { path = "commands/pomodoro" }
+corvo-weather = { path = "commands/weather" }
+corvo-notes = { path = "commands/notes" }
+corvo-media-control = { path = "commands/media-control" }
+corvo-browser-tabs = { path = "commands/browser-tabs" }
 corvo-quicklinks = { path = "commands/quicklinks" }
 corvo-snippets = { path = "commands/snippets" }
 corvo-system-actions = { path = "commands/system-actions" }
+corvo-text-utilities = { path = "commands/text-utilities" }
 corvo-ui = { path = "crates/corvo-ui" }
 corvo-web-search-fallback = { path = "commands/web-search-fallback" }
 corvo-window-management = { path = "commands/window-management" }

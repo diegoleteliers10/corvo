@@ -1,0 +1,11 @@
+[package]
+name = "corvo-browser-tabs"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+serde_json = "1"
+smol = { workspace = true }

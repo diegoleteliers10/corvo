@@ -275,14 +275,51 @@ impl Default for Settings {
     }
 }
 
+/// (modified time, size) stamp of settings.toml, the key of the
+/// [`Settings::load`] cache.
+type SettingsStamp = (std::time::SystemTime, u64);
+type SettingsCache = RwLock<Option<(SettingsStamp, Settings)>>;
+
 impl Settings {
+    fn cache() -> &'static SettingsCache {
+        static CACHE: std::sync::OnceLock<SettingsCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| RwLock::new(None))
+    }
+
+    /// Loads settings.toml, going to disk only when the file changed.
+    ///
+    /// Search refreshes call this on every keystroke, so the parsed
+    /// value is cached behind the file's (mtime, size). Saves and manual
+    /// edits change the stamp and invalidate it. A missing or malformed
+    /// file is never cached, so a fix takes effect on the next load.
     pub fn load() -> Self {
-        let dirs = ProjectDirs::from("", "", "corvo");
-        if let Some(dirs) = dirs {
-            load_or_create(&dirs, "settings.toml", &Settings::default())
-        } else {
-            Settings::default()
+        let Some(dirs) = ProjectDirs::from("", "", "corvo") else {
+            return Settings::default();
+        };
+        let path = dirs.config_dir().join("settings.toml");
+
+        if let Ok(meta) = fs::metadata(&path) {
+            let stamp = (
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                meta.len(),
+            );
+            if let Ok(cache) = Self::cache().read() {
+                if let Some((cached_stamp, cached)) = cache.as_ref() {
+                    if *cached_stamp == stamp {
+                        return cached.clone();
+                    }
+                }
+            }
         }
+
+        let (settings, stamp) =
+            load_or_create_stamped(&dirs, "settings.toml", &Settings::default());
+        if let Some(stamp) = stamp {
+            if let Ok(mut cache) = Self::cache().write() {
+                *cache = Some((stamp, settings.clone()));
+            }
+        }
+        settings
     }
 
     pub fn config_dir() -> Option<PathBuf> {
@@ -298,7 +335,20 @@ impl Settings {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, toml_str)
+        fs::write(&path, toml_str)?;
+        // Refresh the load cache with what was just written: two saves
+        // inside the filesystem's timestamp resolution can otherwise
+        // leave a stale first save cached under the same (mtime, size).
+        if let Ok(meta) = fs::metadata(&path) {
+            let stamp = (
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                meta.len(),
+            );
+            if let Ok(mut cache) = Self::cache().write() {
+                *cache = Some((stamp, self.clone()));
+            }
+        }
+        Ok(())
     }
 
     pub fn result_item(&self, result_id: &str, title: &str) -> Option<&AppConfig> {
@@ -814,7 +864,7 @@ impl ConfigService {
     /// Loads the TOML files and writes defaults for the missing ones. A
     /// malformed file falls back to defaults so the app stays usable.
     pub fn load() -> Self {
-        let dirs = ProjectDirs::from("", "", "corvo").expect("corvo: no home directory");
+        let dirs = project_dirs_or_scratch();
         let settings = load_or_create(&dirs, "settings.toml", &Settings::default());
         let snippets = load_or_create(&dirs, "snippets.toml", &SnippetsFile::default());
         let quicklinks = load_or_create(&dirs, "quicklinks.toml", &QuicklinksFile::default());
@@ -930,21 +980,57 @@ impl ConfigService {
     }
 }
 
+fn project_dirs_or_scratch() -> ProjectDirs {
+    ProjectDirs::from("", "", "corvo").unwrap_or_else(|| {
+        // No home directory (container, service account): keep running
+        // with an ephemeral config instead of panicking at startup.
+        // from_path only fails on a relative or empty path, and a temp
+        // dir is always absolute.
+        ProjectDirs::from_path(std::env::temp_dir().join("corvo"))
+            .expect("temp dir cannot serve as the project path")
+    })
+}
+
 fn load_or_create<T>(dirs: &ProjectDirs, file: &str, default: &T) -> T
+where
+    T: Serialize + Clone + for<'de> Deserialize<'de>,
+{
+    load_or_create_stamped(dirs, file, default).0
+}
+
+/// Same as [`load_or_create`], plus the (mtime, size) of the file when
+/// the returned value came from a successful on-disk parse. `None`
+/// means the value is a default and must not be cached.
+fn load_or_create_stamped<T>(
+    dirs: &ProjectDirs,
+    file: &str,
+    default: &T,
+) -> (T, Option<(std::time::SystemTime, u64)>)
 where
     T: Serialize + Clone + for<'de> Deserialize<'de>,
 {
     let path = dirs.config_dir().join(file);
     match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<T>(&text).ok().unwrap_or_else(|| {
-            log::error!("configuration_parse_failed");
-            eprintln!("corvo: {file} is malformed, using defaults");
-            default.clone()
-        }),
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::error!("configuration_read_failed");
+        Ok(text) => {
+            // The stamp is taken before the read is parsed: a file that
+            // changes mid-load yields an older stamp, so the next load
+            // re-reads instead of serving the fresh content as cached.
+            let stamp = fs::metadata(&path).ok().map(|meta| {
+                (
+                    meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    meta.len(),
+                )
+            });
+            match toml::from_str::<T>(&text) {
+                Ok(value) => (value, stamp),
+                Err(_) => {
+                    log::error!("configuration_parse_failed");
+                    eprintln!("corvo: {file} is malformed, using defaults");
+                    (default.clone(), None)
+                }
             }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if fs::create_dir_all(dirs.config_dir()).is_err() {
                 log::error!("configuration_directory_failed");
             }
@@ -959,7 +1045,15 @@ where
                     eprintln!("corvo: cannot serialize default {file}: {err}");
                 }
             }
-            default.clone()
+            (default.clone(), None)
+        }
+        // A file that exists but cannot be read (permissions, a locked
+        // file, a transient error) keeps its contents untouched; only a
+        // missing file gets the defaults written to disk.
+        Err(error) => {
+            log::error!("configuration_read_failed");
+            eprintln!("corvo: cannot read {file} ({error}), using defaults without overwriting it");
+            (default.clone(), None)
         }
     }
 }
