@@ -1144,12 +1144,7 @@ mod tests {
         assert_eq!(requirement, expected);
     }
 
-    /// An ad-hoc signature has no identifier, so `codesign` comments the
-    /// designated line out with a leading `# `. The requirement still has
-    /// to parse, because the caller reads it before it checks for an ad-hoc
-    /// build. Without stripping the marker, a local build reported "cannot
-    /// read the code requirement" instead of "unexpected signing identity",
-    /// which points the user at the wrong problem.
+    /// Read an ad-hoc requirement from a fixture without an Apple signature.
     #[test]
     fn reads_the_requirement_of_an_adhoc_build() {
         use std::process::Command as Cmd;
@@ -1158,7 +1153,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let bundle = dir.join("Adhoc.app");
         std::fs::create_dir_all(bundle.join("Contents/MacOS")).expect("bundle layout");
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>adhoc</string>
+<key>CFBundleIdentifier</key><string>sh.corvo.adhoc-test</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>"#,
+        )
+        .expect("bundle metadata");
         std::fs::copy("/bin/echo", bundle.join("Contents/MacOS/adhoc")).expect("binary");
+        let unsigned = Cmd::new("codesign")
+            .arg("--remove-signature")
+            .arg(bundle.join("Contents/MacOS/adhoc"))
+            .output()
+            .expect("codesign runs");
+        assert!(
+            unsigned.status.success(),
+            "could not remove the fixture signature"
+        );
         let signed = Cmd::new("codesign")
             .args(["--force", "--sign", "-"])
             .arg(&bundle)

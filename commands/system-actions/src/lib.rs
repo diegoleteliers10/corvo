@@ -233,11 +233,17 @@ mod tests {
     }
 
     #[test]
-    fn execute_returns_run_shell_for_action() {
+    fn execute_returns_the_platform_trash_action() {
         let cmd = SystemActionsCommand;
         let ctx = ExecutionContext::default();
         let action =
             smol::block_on(cmd.execute("system-actions:action:empty-trash", &ctx)).unwrap();
+        #[cfg(target_os = "windows")]
+        assert!(matches!(
+            action,
+            Action::RunNative(corvo_core::NativeAction::EmptyRecycleBin)
+        ));
+        #[cfg(not(target_os = "windows"))]
         match action {
             Action::RunShell(cmd) => assert!(!cmd.is_empty()),
             _ => panic!("expected RunShell"),
@@ -250,10 +256,18 @@ mod tests {
     fn every_action_and_setting_has_a_payload() {
         for action in get_system_actions() {
             assert!(!action.id.is_empty(), "action id must not be empty");
-            assert!(!action.title.is_empty(), "action {} needs a title", action.id);
+            assert!(
+                !action.title.is_empty(),
+                "action {} needs a title",
+                action.id
+            );
             match &action.execution {
                 ActionExecution::RunShell(cmd) => {
-                    assert!(!cmd.trim().is_empty(), "action {} needs a shell command", action.id)
+                    assert!(
+                        !cmd.trim().is_empty(),
+                        "action {} needs a shell command",
+                        action.id
+                    )
                 }
                 ActionExecution::OpenUrl(_) => {}
                 ActionExecution::AdjustBrightness(_)
@@ -272,9 +286,11 @@ mod tests {
                 ActionExecution::OpenUrl(url) => {
                     assert!(!url.trim().is_empty(), "setting {} needs a URL", setting.id)
                 }
-                ActionExecution::AdjustBrightness(_)
-                | ActionExecution::AdjustVolume(_) => {
-                    panic!("setting {} must open a page, not adjust hardware", setting.id)
+                ActionExecution::AdjustBrightness(_) | ActionExecution::AdjustVolume(_) => {
+                    panic!(
+                        "setting {} must open a page, not adjust hardware",
+                        setting.id
+                    )
                 }
                 ActionExecution::Native(_) => {}
             }
@@ -393,7 +409,10 @@ mod tests {
             "software-update",
             "privacy-security",
         ] {
-            assert!(ids.contains(&expected), "missing system setting: {expected}");
+            assert!(
+                ids.contains(&expected),
+                "missing system setting: {expected}"
+            );
         }
     }
 }

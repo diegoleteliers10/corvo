@@ -434,8 +434,13 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn parses_various_hotkey_formats() {
+        let primary = if cfg!(target_os = "macos") {
+            Modifiers::SUPER
+        } else {
+            Modifiers::CONTROL
+        };
         let (mods, code) = parse_hotkey_string("cmd+space").expect("cmd+space");
-        assert!(mods.contains(Modifiers::SUPER));
+        assert!(mods.contains(primary));
         assert_eq!(code, Code::Space);
 
         let (mods, code) = parse_hotkey_string("ctrl+alt+t").expect("ctrl+alt+t");
@@ -445,7 +450,7 @@ mod tests {
 
         let (mods, code) = parse_hotkey_string("⌥⌘←").expect("unicode symbols");
         assert!(mods.contains(Modifiers::ALT));
-        assert!(mods.contains(Modifiers::SUPER));
+        assert!(mods.contains(primary));
         assert_eq!(code, Code::ArrowLeft);
 
         let (mods, code) = parse_hotkey_string("f12").expect("f12");

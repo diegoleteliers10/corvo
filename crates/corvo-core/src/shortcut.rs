@@ -362,7 +362,15 @@ mod tests {
 
     #[test]
     fn punctuation_keys_survive() {
-        assert_eq!(keycaps("cmd+,"), vec!["⌘".to_string(), ",".to_string()]);
+        let expected_modifier = if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl"
+        };
+        assert_eq!(
+            keycaps("cmd+,"),
+            vec![expected_modifier.to_string(), ",".to_string()]
+        );
     }
 
     #[test]

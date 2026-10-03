@@ -174,6 +174,7 @@ connection such as CDP. History needs a separate SQLite reader.
 - Preserve unreadable settings files. Cache settings by file time and size.
 - Open Windows URLs with `ShellExecuteW`.
 - Respect Windows clipboard concealment markers.
+- Apply file search exclusions through native path components on each OS.
 - Encode quicklink arguments before URL substitution. Append an argument
   when the URL has no placeholder.
 

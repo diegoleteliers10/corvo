@@ -387,15 +387,17 @@ fn expand_env_vars(scope: &str) -> Option<PathBuf> {
 }
 
 fn is_ignored(path: &Path, patterns: &[String]) -> bool {
-    let path = path.to_string_lossy();
-    let segments = path.split(std::path::MAIN_SEPARATOR);
+    let segments = path.components();
     patterns
         .iter()
         .filter(|pattern| !pattern.is_empty())
         .any(|pattern| {
-            segments
-                .clone()
-                .any(|segment| segment.eq_ignore_ascii_case(pattern.as_str()))
+            segments.clone().any(|segment| {
+                segment
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(pattern.as_str())
+            })
         })
 }
 
@@ -536,5 +538,14 @@ mod tests {
         assert!(is_ignored(Path::new("/home/u/Node_Modules/pkg"), &patterns));
         assert!(is_ignored(Path::new("/home/u/NODE_MODULES/pkg"), &patterns));
         assert!(!is_ignored(Path::new("/home/u/src/pkg"), &patterns));
+        assert!(!is_ignored(
+            Path::new("/home/u/my_node_modules/pkg"),
+            &patterns
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(is_ignored(
+            Path::new(r"C:\Users\u\Node_Modules\pkg"),
+            &patterns
+        ));
     }
 }

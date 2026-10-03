@@ -18,6 +18,7 @@
 - Pass browser URLs as AppleScript arguments.
 - Preserve unreadable settings files and cache settings reads.
 - Encode quicklink arguments before URL substitution.
+- Apply file search exclusions to both slash formats on Windows.
 - Use per-user Unix IPC sockets with a legacy socket fallback.
 - Open Windows URLs through the native Shell API and respect clipboard concealment markers.
 

@@ -797,6 +797,37 @@ mod process_timeout_tests {
     }
 }
 
+#[cfg(all(test, target_os = "windows"))]
+mod windows_process_timeout_tests {
+    use super::run_process_with_timeout;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn captures_windows_output_before_deadline() {
+        let output = run_process_with_timeout(
+            "cmd",
+            &["/C".into(), "echo out&echo err 1>&2".into()],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err");
+    }
+
+    #[test]
+    fn windows_timeout_does_not_wait_for_descendant_pipes() {
+        let start = Instant::now();
+        let result = run_process_with_timeout(
+            "cmd",
+            &["/C".into(), "ping -n 6 127.0.0.1 >nul".into()],
+            Duration::from_millis(150),
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+}
+
 /// Executes a shell command on the host platform.
 pub fn run_shell(cmd: &str) -> PlatformResult<()> {
     #[cfg(target_os = "windows")]
