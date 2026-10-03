@@ -778,16 +778,30 @@ mod tests {
 
     #[test]
     fn reveal_action_targets_the_file_manager() {
+        #[cfg(target_os = "windows")]
         let path = std::path::Path::new(r"C:\Program Files\7-Zip\7zFM.exe");
-        let action = reveal_action(path);
-        let Action::RunShell(command) = action else {
+        #[cfg(target_os = "macos")]
+        let path = std::path::Path::new("/Applications/7zFM.app");
+        #[cfg(target_os = "linux")]
+        let path = std::path::Path::new("/usr/share/applications/7zFM.desktop");
+        let Action::RunShell(command) = reveal_action(path) else {
             panic!("reveal must run a shell command");
         };
-        assert!(command.contains("7zFM.exe"), "got {command}");
         #[cfg(target_os = "macos")]
-        assert!(command.starts_with("open -R "), "got {command}");
+        assert!(
+            command.starts_with("open -R ") && command.contains("7zFM.app"),
+            "got {command}"
+        );
         #[cfg(target_os = "windows")]
-        assert!(command.contains("explorer.exe /select,"), "got {command}");
+        assert!(
+            command.contains("explorer.exe /select,") && command.contains("7zFM.exe"),
+            "got {command}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            command.starts_with("xdg-open ") && command.contains("/usr/share/applications"),
+            "got {command}"
+        );
     }
 
     #[test]

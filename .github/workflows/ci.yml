@@ -45,7 +45,7 @@ jobs:
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
       - name: Test workspace
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --workspace --no-fail-fast --target ${{ matrix.target }}
 
       - name: Test Windows platform
         if: runner.os == 'Windows'
