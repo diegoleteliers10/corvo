@@ -14,21 +14,15 @@ corvo/
 ├── Cargo.toml                 # workspace root — lists every crate as a member
 ├── crates/
 │   ├── corvo-core/           # Command trait, CommandRegistry, SearchResult, Action
+│   ├── corvo-ext/            # extension kit: list, actions, cache, prefs, routing, feedback
 │   ├── corvo-platform/       # PlatformOps trait + linux/windows/macos implementations
 │   ├── corvo-ui/             # GPUI window, layer_shell/popup, rendering
-│   ├── corvo-config/         # settings, hotkeys, persistence
-│   └── commands/
-│       ├── app-launcher/
-│       ├── file-search/
-│       ├── clipboard-manager/
-│       ├── calculator/
-│       ├── snippets/
-│       ├── window-management/
-│       ├── emoji-picker/
-│       ├── quicklinks/
-│       ├── system-actions/
-│       └── web-search-fallback/
-└── src/main.rs                 # binary entrypoint — wires the registry and the UI
+│   └── corvo-config/         # settings, hotkeys, persistence
+├── commands/                  # one crate per extension (20 today)
+│   ├── app-launcher/          # ... browser-tabs/ and the rest
+├── templates/extension/       # the copy-me starting point for a new command
+├── book/                      # the extension docs, published on GitHub Pages
+└── src/main.rs                # binary entrypoint — wires the registry and the UI
 ```
 
 Each crate under `commands/` implements the `Command` trait from
@@ -37,20 +31,29 @@ crate. **`src/main.rs` is never edited to add a command.**
 
 ## 2. Adding a new command — the only workflow you should follow
 
-1. Create `crates/commands/<name>/` with a standard `Cargo.toml` and
-   `src/lib.rs`.
-2. Depend only on `corvo-core` (and `corvo-platform` if the command
-   needs OS-level actions — see §4). Never depend on `corvo-ui`.
+1. Copy `templates/extension/` to `commands/<name>/` and rename the
+   package to `corvo-<name>`. The template demonstrates the whole
+   contract and carries the edit checklist in its header.
+2. Depend only on `corvo-core` and `corvo-ext` (the kit: list
+   builders, actions, `TtlCache`, prefs, routing), plus
+   `corvo-platform` if the command needs OS-level actions — see §4.
+   Never depend on `corvo-ui`.
 3. Implement `Command` for a struct in that crate (see §3 for the exact
    interface).
 4. Call `corvo_core::register_command!(YourCommandType)` once in that
    crate's `lib.rs`. Do not touch `CommandRegistry` itself.
-5. Add exactly one line to the workspace root `Cargo.toml`: the new crate
-   as a member, and one line to `src/main.rs`'s `Cargo.toml` dependencies
-   list so it gets linked into the binary. This is the only place outside
+5. Add exactly two lines to the workspace root `Cargo.toml`: the new
+   crate as a `[workspace] members` entry, and one `[dependencies]`
+   entry so it links into the binary. This is the only place outside
    the new crate that should change.
-6. Run `cargo check --workspace` and `cargo clippy --workspace` before
+6. Run `cargo check --workspace`, `cargo clippy --workspace
+   --all-targets -- -D warnings`, and `cargo test --workspace` before
    considering the task done.
+
+The published guide with the module reference and the PR checklist is
+the extension book (`book/src/`, rendered at
+https://diegoleteliers10.github.io/corvo/). A paste-ready prompt
+version of the standard lives in `PROMPT.md`.
 
 **Out of scope for a "new command" task — do not touch these unless the
 task explicitly asks for it:** `corvo-ui`, `corvo-platform`,
@@ -75,10 +78,18 @@ pub trait Command: Send + Sync {
 
 - `search` must be fast and non-blocking. If the command needs disk or
   network I/O, do it on a background task and cache; `search` itself
-  should read from the cache.
+  should read from the cache. Use `corvo_ext::cache::TtlCache` — the
+  pattern is: a static cache, a `fetch_*` warm-up the UI runs through
+  `smol::unblock`, and `cache().get(ttl)` in `search`.
 - `execute` returns an `Action` (`Open`, `Copy`, `RunShell`, `ShowToast`,
   `CloseWindow`). It does not directly manipulate the window — the UI
   layer interprets the `Action`.
+- Build rows and menus with the kit, not by hand:
+  `corvo_ext::list` (rows, sections, open entries, empty states,
+  the fuzzy tail), `corvo_ext::actions` (menu builders),
+  `corvo_ext::routing` (id namespaces, page queries),
+  `corvo_ext::prefs` (per-extension TOML settings),
+  `corvo_ext::feedback` (toasts).
 - Fuzzy matching and ranking: use `fff-search` (the search core behind
   FFF, built on the `frizbee` SIMD fuzzy matcher) as the shared matching
   engine across commands, not a one-off matcher per crate. It also gives

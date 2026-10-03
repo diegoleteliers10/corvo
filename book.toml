@@ -1,0 +1,16 @@
+[book]
+title = "Corvo Extensions"
+authors = ["Diego Letelier"]
+description = "The guide to building extensions (commands) for Corvo, a lightweight native launcher."
+src = "book/src"
+language = "en"
+
+[build]
+create-missing = false
+build-dir = "target/book"
+
+[output.html]
+default-theme = "dark"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/diegoleteliers10/corvo"
+edit-url-template = "https://github.com/diegoleteliers10/corvo/edit/main/book/{path}"

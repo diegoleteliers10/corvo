@@ -21,10 +21,20 @@ A native application launcher for macOS, Linux, and Windows. Written in Rust wit
 - **Notes**: Edit local Markdown notes with autosave, tables, code colors, and text selection.
 - **Process Control**: Find and terminate processes on macOS, Windows, and Linux.
 - **Homebrew**: Manage packages and services on macOS.
-- **Media Control**: Control Spotify and Music on macOS.
-- **Browser Tabs**: Search Chrome, Brave, and Edge tabs and bookmarks on macOS.
+- **Media Control**: Play/pause and skip on macOS (Spotify, Music), Windows (System Media Transport Controls), and Linux (MPRIS) — browser playback included.
+- **Per-browser extensions**: Chrome, Brave, Edge, Firefox, Arc, Dia, Safari, and Aside each get tabs, bookmarks, and their real app icon wherever the browser is installed.
 
 See [the extensions plan](EXTENSIONS_PLAN.md) for platform limits and remaining work.
+
+## Extensions
+
+Corvo extensions are native Rust crates compiled into the launcher — no plugins, no scripts. The guide to building one, including the module reference (`list`, `actions`, `cache`, `preferences`) and the pull-request standard, lives at **[the extension book](https://diegoleteliers10.github.io/corvo/)** (source in [`book/`](book/src/SUMMARY.md)).
+
+Quick start: copy [`templates/extension/`](templates/extension/) into `commands/`, rename it, and follow the checklist in its header. If a coding agent writes it for you, paste [`PROMPT.md`](PROMPT.md) into the session first.
+
+## Contributing
+
+Pull requests welcome — extension changes are reviewed against the checklist in [CONTRIBUTING.md](CONTRIBUTING.md): tests, OS parity, no blocking on the search path, and honest empty states. The [agent prompt](PROMPT.md) and the book's [examples page](book/src/examples.md) cover the rest.
 
 ## Installation
 
@@ -65,7 +75,9 @@ The first instance stays resident in memory. Run the binary again to toggle the 
 ## Project Structure
 
 - `crates/corvo-core`: Command trait and link-time registry.
+- `crates/corvo-ext`: Extension kit — list, actions, cache, preferences, routing, feedback.
 - `crates/corvo-platform`: Operating system APIs, global shortcuts, and window operations.
 - `crates/corvo-ui`: GPUI interface, launcher palette, and settings window.
 - `crates/corvo-config`: Configuration models, file persistence, and LMDB storage.
 - `commands/*`: Built-in command crates.
+- `book/`: The extension documentation (published on GitHub Pages).
