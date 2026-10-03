@@ -28,6 +28,9 @@ pub use processes::{
 
 #[cfg(target_os = "macos")]
 mod app_uninstall;
+/// Chrome DevTools Protocol client; compiled everywhere so its parsing
+/// tests run on every OS, but only wired on Windows and Linux.
+pub mod cdp;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -910,6 +913,228 @@ pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
     return windows::notify(title, body);
     #[cfg(all(unix, not(target_os = "macos")))]
     return linux::notify(title, body);
+}
+
+/// What the now-playing media page paints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NowPlaying {
+    pub app: String,
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+}
+
+/// One transport action on the active media player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaTransport {
+    Toggle,
+    Next,
+    Previous,
+}
+
+/// Parses the `state|title|artist|app` line the macOS and Windows
+/// backends emit. An empty or short line yields `None`.
+fn parse_now_playing_line(text: &str) -> Option<NowPlaying> {
+    let text = text.trim();
+    if text.is_empty() || text == "none" {
+        return None;
+    }
+    let mut parts = text.splitn(4, '|');
+    let state = parts.next()?;
+    let title = parts.next().unwrap_or("Unknown track").to_string();
+    let artist = parts.next().unwrap_or("").to_string();
+    let app = parts.next().unwrap_or("Player").to_string();
+    Some(NowPlaying {
+        app,
+        title,
+        artist,
+        playing: state.eq_ignore_ascii_case("playing"),
+    })
+}
+
+/// Reads the active media player. Blocking; callers run it through an
+/// unblock executor. macOS goes through AppleScript to Spotify or
+/// Music, Windows reads SMTC, Linux reads MPRIS over the session bus.
+pub fn media_now_playing() -> Option<NowPlaying> {
+    #[cfg(target_os = "macos")]
+    return macos::media_now_playing();
+    #[cfg(target_os = "windows")]
+    return windows::media_now_playing();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::media_now_playing();
+}
+
+/// Runs a transport control on the active media player. Returns false
+/// when no player runs or the platform refuses the command.
+pub fn media_transport(action: MediaTransport) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::media_transport(action);
+    #[cfg(target_os = "windows")]
+    return windows::media_transport(action);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::media_transport(action);
+}
+
+/// One open browser tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserTab {
+    pub title: String,
+    pub url: String,
+}
+
+/// Which AppleScript focus flavor a browser speaks. Chromium browsers
+/// take `set active tab index of window`; Safari takes
+/// `set current tab of window`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleScriptFocus {
+    ChromiumTabIndex,
+    SafariCurrentTab,
+}
+
+/// Enumerates one browser's open tabs. macOS drives the application
+/// through AppleScript; Windows and Linux read the browser's CDP
+/// endpoint when it runs with `--remote-debugging-port`. Blocking; the
+/// UI calls it through an unblock executor.
+pub fn browser_tabs(app_name: &str, cdp_port: Option<u16>) -> Vec<BrowserTab> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cdp_port;
+        macos::browser_tabs(app_name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_name;
+        cdp_port
+            .and_then(cdp::list_tabs)
+            .unwrap_or_default()
+    }
+}
+
+/// Brings the tab with this URL to the front of its browser. The URL
+/// always travels as AppleScript argument data on macOS, never inside
+/// the script text.
+pub fn focus_browser_tab(
+    app_name: &str,
+    focus: AppleScriptFocus,
+    cdp_port: Option<u16>,
+    url: &str,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cdp_port;
+        macos::focus_browser_tab(app_name, focus, url)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app_name, focus);
+        cdp_port.is_some_and(|port| cdp::focus_tab_by_url(port, url))
+    }
+}
+
+/// The browser's profile directory on this OS, built from its
+/// Chromium-layout location per platform: `Google/Chrome` on macOS,
+/// `Google\Chrome\User Data` on Windows, `google-chrome` on Linux.
+pub fn browser_data_candidates(
+    macos_relative: &str,
+    windows_relative: &str,
+    linux_relative: &str,
+) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (windows_relative, linux_relative);
+        home_dir()
+            .map(|home| {
+                vec![home.join("Library").join("Application Support").join(macos_relative)]
+            })
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (macos_relative, linux_relative);
+        std::env::var_os("LOCALAPPDATA")
+            .map(|local| vec![PathBuf::from(local).join(windows_relative)])
+            .unwrap_or_default()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = (macos_relative, windows_relative);
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|home| home.join(".config")));
+        config
+            .map(|config| vec![config.join(linux_relative)])
+            .unwrap_or_default()
+    }
+}
+
+/// Whether the browser is installed on this OS: the app bundle exists
+/// on macOS, the executable exists under a Program Files root on
+/// Windows, the `.desktop` entry exists on Linux. Filesystem stats
+/// only, so the launcher search path may call it.
+pub fn browser_app_installed(
+    macos_bundle: &str,
+    windows_exe: &str,
+    linux_desktop: &str,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (windows_exe, linux_desktop);
+        macos::app_bundle_candidates(macos_bundle)
+            .iter()
+            .any(|bundle| bundle.is_dir())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (macos_bundle, linux_desktop);
+        windows::exe_candidates(windows_exe)
+            .iter()
+            .any(|exe| exe.is_file())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = (macos_bundle, windows_exe);
+        linux::desktop_file(linux_desktop).is_some()
+    }
+}
+
+/// The browser's real application icon as a cached PNG, ready for
+/// `Icon::Image`. macOS renders the bundle's icon; Windows extracts
+/// the executable's icon; Linux resolves the `.desktop` entry's theme
+/// icon. Extraction runs once per browser and is cached, but the first
+/// call can spawn a converter, so keep it off the search path.
+pub fn browser_app_icon(
+    macos_bundle: &str,
+    windows_exe: &str,
+    linux_desktop: &str,
+) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (windows_exe, linux_desktop);
+        macos::app_bundle_candidates(macos_bundle)
+            .iter()
+            .find(|bundle| bundle.is_dir())
+            .and_then(|bundle| macos::extract_app_icon(bundle))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (macos_bundle, linux_desktop);
+        windows::exe_candidates(windows_exe)
+            .iter()
+            .find(|exe| exe.is_file())
+            .and_then(|exe| windows::exe_app_icon(exe))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = (macos_bundle, windows_exe);
+        linux::desktop_app_icon(linux_desktop)
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The platform implementation for the OS this binary was built for.

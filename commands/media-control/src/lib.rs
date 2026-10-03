@@ -1,7 +1,7 @@
 //! Media control for the active player: play/pause, next, previous,
-//! and what is playing right now. macOS only, through AppleScript to
-//! the first running player among Spotify and Music, following the
-//! cfg-gated pattern `brew` set.
+//! and what is playing right now. The OS backend lives in
+//! `corvo-platform`: AppleScript to Spotify or Music on macOS, SMTC on
+//! Windows, MPRIS on Linux.
 //!
 //! Quick commands: `play`, `pause`, `next`, and `prev` act from root
 //! search immediately; the dedicated page shows the now-playing view.
@@ -10,15 +10,7 @@ use corvo_core::{
     phosphor_svgs, Action, Command, CommandError, ExecutionContext, Icon, SearchContext,
     SearchResult,
 };
-
-/// What the now-playing page paints.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NowPlaying {
-    pub app: String,
-    pub title: String,
-    pub artist: String,
-    pub playing: bool,
-}
+pub use corvo_platform::NowPlaying;
 
 fn now_playing_cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, NowPlaying)>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, NowPlaying)>>>
@@ -28,8 +20,8 @@ fn now_playing_cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, 
 
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Reads the active player. Blocking (one osascript round trip); the
-/// UI calls it through its unblock executor.
+/// Reads the active player. Blocking (one OS round trip); the UI calls
+/// it through its unblock executor.
 pub fn fetch_now_playing() -> Option<NowPlaying> {
     if let Ok(guard) = now_playing_cache().lock() {
         if let Some((fetched_at, cached)) = guard.as_ref() {
@@ -38,93 +30,38 @@ pub fn fetch_now_playing() -> Option<NowPlaying> {
             }
         }
     }
-    let fetched = read_player()?;
+    let fetched = corvo_platform::media_now_playing()?;
     if let Ok(mut guard) = now_playing_cache().lock() {
         *guard = Some((std::time::Instant::now(), fetched.clone()));
     }
     Some(fetched)
 }
 
-/// The cached value only, never spawning AppleScript: safe on the
-/// search path.
+/// The cached value only, never touching the OS: safe on the search
+/// path.
 pub fn cached_now_playing() -> Option<NowPlaying> {
     let guard = now_playing_cache().lock().ok()?;
     let (fetched_at, cached) = guard.as_ref()?;
     (fetched_at.elapsed() < CACHE_TTL).then(|| cached.clone())
 }
 
-/// One AppleScript round trip: the first running player reports
-/// `state|title|artist|app`, or an empty string when none runs.
-fn player_script() -> &'static str {
-    r#"if application "Spotify" is running then
-  tell application "Spotify"
-    (player state as string) & "|" & (name of current track) & "|" & (artist of current track) & "|Spotify"
-  end tell
-else if application "Music" is running then
-  tell application "Music"
-    (player state as string) & "|" & (name of current track) & "|" & (artist of current track) & "|Music"
-  end tell
-else
-  ""
-end if"#
-}
-
-fn read_player() -> Option<NowPlaying> {
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(player_script())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    let mut parts = text.splitn(4, '|');
-    let state = parts.next()?;
-    let title = parts.next().unwrap_or("Unknown track").to_string();
-    let artist = parts.next().unwrap_or("").to_string();
-    let app = parts.next().unwrap_or("Player").to_string();
-    Some(NowPlaying {
-        app,
-        title,
-        artist,
-        playing: state.eq_ignore_ascii_case("playing"),
-    })
-}
-
 /// Runs a transport control on the active player. `action` is one of
 /// `toggle`, `next`, or `previous`. Returns false when no player runs.
 pub fn control(action: &str) -> bool {
-    let command = match action {
-        "toggle" => "playpause",
-        "next" => "next track",
-        "previous" => "previous track",
+    let transport = match action {
+        "toggle" => corvo_platform::MediaTransport::Toggle,
+        "next" => corvo_platform::MediaTransport::Next,
+        "previous" => corvo_platform::MediaTransport::Previous,
         _ => return false,
     };
-    let script = format!(
-        r#"if application "Spotify" is running then
-  tell application "Spotify" to {command}
-else if application "Music" is running then
-  tell application "Music" to {command}
-else
-  return "none"
-end if"#
-    );
-    let Ok(output) = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-    else {
-        return false;
-    };
+    let sent = corvo_platform::media_transport(transport);
     // Invalidate the cache so the next read reflects the change.
-    if let Ok(mut guard) = now_playing_cache().lock() {
-        *guard = None;
+    if sent {
+        if let Ok(mut guard) = now_playing_cache().lock() {
+            *guard = None;
+        }
     }
-    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != "none"
+    sent
 }
 
 fn control_result(action: &str, label: &str, score: i32) -> SearchResult {
@@ -171,9 +108,6 @@ fn open_result(score: i32) -> SearchResult {
 #[derive(Default)]
 pub struct MediaControlCommand;
 
-// macOS only, like brew: the registration itself compiles away on the
-// other platforms.
-#[cfg(target_os = "macos")]
 corvo_core::register_command!(MediaControlCommand);
 
 #[async_trait::async_trait]
@@ -258,7 +192,7 @@ impl Command for MediaControlCommand {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

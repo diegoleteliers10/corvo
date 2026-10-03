@@ -884,7 +884,8 @@ pub enum LauncherPage {
     Weather,
     Notes,
     Media,
-    Tabs,
+    /// One page per browser extension; the id picks the browser.
+    Browser(corvo_browser_tabs::BrowserId),
     Ports,
     Processes,
     Uninstaller,
@@ -1631,7 +1632,7 @@ impl Launcher {
             LauncherPage::Weather => launcher.refresh_weather(cx),
             LauncherPage::Notes => launcher.refresh_notes(cx),
             LauncherPage::Media => launcher.refresh_media(cx),
-            LauncherPage::Tabs => launcher.refresh_tabs(cx),
+            LauncherPage::Browser(browser) => launcher.refresh_browser(browser, cx),
             LauncherPage::Ports => launcher.refresh_ports(cx),
             LauncherPage::Processes => launcher.refresh_processes(cx),
             LauncherPage::Uninstaller => {}
@@ -1888,7 +1889,7 @@ impl Launcher {
             LauncherPage::Weather => self.refresh_weather(cx),
             LauncherPage::Notes => self.refresh_notes(cx),
             LauncherPage::Media => self.refresh_media(cx),
-            LauncherPage::Tabs => self.refresh_tabs(cx),
+            LauncherPage::Browser(browser) => self.refresh_browser(browser, cx),
             LauncherPage::Ports => self.refresh_ports(cx),
             LauncherPage::Processes => self.refresh_processes(cx),
             LauncherPage::Uninstaller => {
@@ -1942,7 +1943,7 @@ impl Launcher {
             || self.page == LauncherPage::Weather
             || self.page == LauncherPage::Notes
             || self.page == LauncherPage::Media
-            || self.page == LauncherPage::Tabs
+            || matches!(self.page, LauncherPage::Browser(_))
             || self.page == LauncherPage::Ports
             || self.page == LauncherPage::Processes
         {
@@ -2730,7 +2731,7 @@ impl Launcher {
                 || self.page == LauncherPage::Weather
                 || self.page == LauncherPage::Notes
                 || self.page == LauncherPage::Media
-                || self.page == LauncherPage::Tabs
+                || matches!(self.page, LauncherPage::Browser(_))
                 || self.page == LauncherPage::Ports
                 || self.page == LauncherPage::Processes
                 || self.page == LauncherPage::Uninstaller
@@ -2957,8 +2958,13 @@ impl Launcher {
         cx.notify();
     }
 
-    fn open_tabs_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.page = LauncherPage::Tabs;
+    fn open_browser_page(
+        &mut self,
+        browser: corvo_browser_tabs::BrowserId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = LauncherPage::Browser(browser);
         self.query.clear();
         self.cursor_idx = 0;
         self.cursor_visible = true;
@@ -2969,7 +2975,7 @@ impl Launcher {
         self.actions.clear();
         self.burger_menu_open = false;
         self.filter_dropdown_open = false;
-        self.refresh_tabs(cx);
+        self.refresh_browser(browser, cx);
         self.sync_palette_size(window, cx);
         cx.notify();
     }
@@ -4345,27 +4351,36 @@ impl Launcher {
         .detach();
     }
 
-    /// Warms the AppleScript tab cache off the search path, then runs
+    /// Warms one browser's tab cache off the search path, then runs
     /// the cache-reading command search.
-    fn refresh_tabs(&mut self, cx: &mut Context<Self>) {
+    fn refresh_browser(
+        &mut self,
+        browser: corvo_browser_tabs::BrowserId,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            smol::unblock(corvo_browser_tabs::fetch_tabs).await;
+            smol::unblock(move || corvo_browser_tabs::fetch_tabs(browser)).await;
             let _ = this.update(cx, |launcher, cx| {
-                if launcher.page == LauncherPage::Tabs {
-                    launcher.refresh_tabs_search(cx);
+                if launcher.page == LauncherPage::Browser(browser) {
+                    launcher.refresh_browser_search(browser, cx);
                 }
             });
         })
         .detach();
-        self.refresh_tabs_search(cx);
+        self.refresh_browser_search(browser, cx);
     }
 
-    fn refresh_tabs_search(&mut self, cx: &mut Context<Self>) {
+    fn refresh_browser_search(
+        &mut self,
+        browser: corvo_browser_tabs::BrowserId,
+        cx: &mut Context<Self>,
+    ) {
+        let command_id = browser.spec().id;
         let Some(command) = self
             .registry
             .commands()
             .iter()
-            .find(|command| command.id() == "browser-tabs")
+            .find(|command| command.id() == command_id)
             .cloned()
         else {
             return;
@@ -4379,9 +4394,13 @@ impl Launcher {
                 max_results: 200,
                 store: Some(store),
             };
-            let results = command.search(&format!("tabs-page:{filter}"), &ctx).await;
+            let results = command
+                .search(&format!("{}-page:{filter}", browser.spec().id), &ctx)
+                .await;
             let _ = this.update(cx, |launcher, cx| {
-                if launcher.search_seq == seq && launcher.page == LauncherPage::Tabs {
+                if launcher.search_seq == seq
+                    && launcher.page == LauncherPage::Browser(browser)
+                {
                     launcher.results = results;
                     launcher.rebuild_root_flat_items();
                     launcher.selected = launcher
@@ -4666,7 +4685,7 @@ impl Launcher {
             .child("NOTES")
     }
 
-    fn tabs_subheader(&self) -> Div {
+    fn browser_subheader(&self, browser: corvo_browser_tabs::BrowserId) -> Div {
         div()
             .flex_none()
             .px_4()
@@ -4674,7 +4693,7 @@ impl Launcher {
             .text_size(px(12.0))
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(COLOR_TEXT_DIM))
-            .child("BROWSER TABS")
+            .child(SharedString::from(browser.spec().name.to_uppercase()))
     }
 
     fn refresh_ports(&mut self, cx: &mut Context<Self>) {
@@ -5324,9 +5343,12 @@ impl Launcher {
             self.open_media_page(window, cx);
             return;
         }
-        if result.id == "browser-tabs:open" {
-            self.open_tabs_page(window, cx);
-            return;
+        // Every browser extension opens its own page.
+        for browser in corvo_browser_tabs::BrowserId::ALL {
+            if result.id == format!("{}:open", browser.spec().id) {
+                self.open_browser_page(browser, window, cx);
+                return;
+            }
         }
         if let Some(filter) = result.id.strip_prefix("kill-process:open-processes") {
             let filter = filter.strip_prefix(':').unwrap_or_default();
@@ -6132,33 +6154,36 @@ impl Launcher {
             .chars()
             .skip(self.port_cursor_idx)
             .collect::<String>();
-        let placeholder = if self.page == LauncherPage::Brew {
-            match self.brew_page_mode {
+        let placeholder: SharedString = if let LauncherPage::Browser(browser) = self.page {
+            SharedString::from(format!(
+                "Search {} tabs and bookmarks...",
+                browser.spec().name
+            ))
+        } else if self.page == LauncherPage::Brew {
+            SharedString::from(match self.brew_page_mode {
                 BrewPageMode::Installed => "Filter installed packages...",
                 BrewPageMode::Upgrades => "Filter available upgrades...",
                 BrewPageMode::Services => "Filter Homebrew services...",
                 BrewPageMode::Search => "Search formulae and casks...",
-            }
+            })
         } else if self.page == LauncherPage::Text {
-            "Type text to transform, or leave empty to use the clipboard..."
+            "Type text to transform, or leave empty to use the clipboard...".into()
         } else if self.page == LauncherPage::Pomodoro {
-            "Minutes for a custom focus, or leave empty for 25..."
+            "Minutes for a custom focus, or leave empty for 25...".into()
         } else if self.page == LauncherPage::Weather {
-            "City name, or leave empty for your location..."
+            "City name, or leave empty for your location...".into()
         } else if self.page == LauncherPage::Notes {
-            "Search notes, or type a new one and press Enter..."
+            "Search notes, or type a new one and press Enter...".into()
         } else if self.page == LauncherPage::Media {
-            "Now playing..."
-        } else if self.page == LauncherPage::Tabs {
-            "Search open tabs and bookmarks..."
+            "Now playing...".into()
         } else if self.page == LauncherPage::Ports {
-            "Filter or enter a port (e.g. 3000)..."
+            "Filter or enter a port (e.g. 3000)...".into()
         } else if self.page == LauncherPage::Processes {
-            "Filter processes by name or PID..."
+            "Filter processes by name or PID...".into()
         } else if self.page == LauncherPage::Files {
-            "Search files and folders..."
+            "Search files and folders...".into()
         } else {
-            "Search for apps and commands..."
+            "Search for apps and commands...".into()
         };
 
         let input_view = if self.query.is_empty() {
@@ -9365,7 +9390,7 @@ impl Render for Launcher {
         let is_weather = self.page == LauncherPage::Weather;
         let is_notes = self.page == LauncherPage::Notes;
         let is_media = self.page == LauncherPage::Media;
-        let is_tabs = self.page == LauncherPage::Tabs;
+        let is_browser = matches!(self.page, LauncherPage::Browser(_));
         let is_ports = self.page == LauncherPage::Ports;
         let is_processes = self.page == LauncherPage::Processes;
         let is_uninstaller = self.page == LauncherPage::Uninstaller;
@@ -9434,9 +9459,13 @@ impl Render for Launcher {
                 view.child(self.search_row(window, cx))
                     .child(self.media_page_view(cx))
             })
-            .when(is_tabs, |view| {
+            .when(is_browser, |view| {
+                let browser = match self.page {
+                    LauncherPage::Browser(browser) => browser,
+                    _ => return view,
+                };
                 view.child(self.search_row(window, cx))
-                    .child(self.tabs_subheader())
+                    .child(self.browser_subheader(browser))
                     .child(self.results_list(cx))
             })
             .when(is_ports, |view| {
@@ -10324,7 +10353,9 @@ fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
                     LauncherPage::Weather => launcher.open_weather_page("", window, cx),
                     LauncherPage::Notes => launcher.open_notes_page(window, cx),
                     LauncherPage::Media => launcher.open_media_page(window, cx),
-                    LauncherPage::Tabs => launcher.open_tabs_page(window, cx),
+                    LauncherPage::Browser(browser) => {
+                        launcher.open_browser_page(browser, window, cx)
+                    }
                     LauncherPage::Ports => launcher.open_ports_page(window, cx),
                     LauncherPage::Processes => launcher.open_processes_page("", window, cx),
                     _ => {

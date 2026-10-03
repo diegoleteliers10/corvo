@@ -1675,6 +1675,157 @@ pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
     }
 }
 
+/// The MPRIS bus-name prefix every media player owns.
+const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
+
+/// Lists MPRIS player bus names on the session bus, sorted so player
+/// choice is deterministic.
+fn mpris_player_names(conn: &zbus::blocking::Connection) -> Vec<String> {
+    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(conn) else {
+        return Vec::new();
+    };
+    let Ok(names) = dbus.list_names() else {
+        return Vec::new();
+    };
+    let mut players: Vec<String> = names
+        .into_iter()
+        .map(|name| name.to_string())
+        .filter(|name| name.starts_with(MPRIS_PREFIX) && !name.ends_with(".MPRIS"))
+        .collect();
+    players.sort();
+    players
+}
+
+/// A proxy on one player's `org.mpris.MediaPlayer2.Player` interface.
+fn player_proxy(
+    conn: &zbus::blocking::Connection,
+    name: &str,
+) -> zbus::Result<zbus::blocking::Proxy<'static>> {
+    zbus::blocking::Proxy::new(
+        conn,
+        name.to_owned(),
+        "/org/mpris/MediaPlayer2",
+        "org.mpris.MediaPlayer2.Player",
+    )
+}
+
+/// Picks the player a read or transport applies to: the first one
+/// reporting `Playing`, else the first by name. macOS commits to
+/// Spotify-then-Music; here the playing session is the honest choice.
+fn pick_mpris_player(
+    conn: &zbus::blocking::Connection,
+    names: &[String],
+) -> Option<(String, bool)> {
+    let mut fallback: Option<(String, bool)> = None;
+    for name in names {
+        let Ok(proxy) = player_proxy(conn, name) else { continue };
+        let Ok(status) = proxy.get_property::<String>("PlaybackStatus") else {
+            continue;
+        };
+        if status == "Playing" {
+            return Some((name.clone(), true));
+        }
+        if fallback.is_none() {
+            fallback = Some((name.clone(), false));
+        }
+    }
+    fallback
+}
+
+/// Reads the chosen MPRIS player. Blocking D-Bus calls; callers run it
+/// through an unblock executor.
+pub fn media_now_playing() -> Option<super::NowPlaying> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let names = mpris_player_names(&conn);
+    let Some((name, playing)) = pick_mpris_player(&conn, &names) else {
+        return None;
+    };
+    let Ok(proxy) = player_proxy(&conn, &name) else {
+        return None;
+    };
+    let Ok(mut metadata) = proxy.get_property::<std::collections::HashMap<
+        String,
+        zbus::zvariant::OwnedValue,
+    >>("Metadata")
+    else {
+        return None;
+    };
+    let title = metadata
+        .remove("xesam:title")
+        .and_then(|value| String::try_from(value).ok())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "Unknown track".into());
+    let artist = metadata
+        .remove("xesam:artist")
+        .and_then(|value| Vec::<String>::try_from(value).ok())
+        .map(|names| names.join(", "))
+        .unwrap_or_default();
+    let app = identity_property(&conn, &name)
+        .unwrap_or_else(|| name.trim_start_matches(MPRIS_PREFIX).to_owned());
+    Some(super::NowPlaying {
+        app,
+        title,
+        artist,
+        playing,
+    })
+}
+
+/// The human player name (`org.mpris.MediaPlayer2.Identity`), falling
+/// back to the bus-name suffix.
+fn identity_property(conn: &zbus::blocking::Connection, name: &str) -> Option<String> {
+    let proxy = zbus::blocking::Proxy::new(
+        conn,
+        name.to_owned(),
+        "/org/mpris/MediaPlayer2",
+        "org.mpris.MediaPlayer2",
+    )
+    .ok()?;
+    proxy
+        .get_property::<String>("Identity")
+        .ok()
+        .filter(|identity| !identity.is_empty())
+}
+
+/// Runs a transport control on the same player `media_now_playing`
+/// would report.
+pub fn media_transport(action: super::MediaTransport) -> bool {
+    let method = match action {
+        super::MediaTransport::Toggle => "PlayPause",
+        super::MediaTransport::Next => "Next",
+        super::MediaTransport::Previous => "Previous",
+    };
+    let Ok(conn) = zbus::blocking::Connection::session() else {
+        return false;
+    };
+    let names = mpris_player_names(&conn);
+    let Some((name, _)) = pick_mpris_player(&conn, &names) else {
+        return false;
+    };
+    let Ok(proxy) = player_proxy(&conn, &name) else {
+        return false;
+    };
+    proxy.call_method(method, &()).is_ok()
+}
+
+/// The `.desktop` file for an application id such as `google-chrome`.
+pub(crate) fn desktop_file(desktop: &str) -> Option<PathBuf> {
+    let file_name = format!("{desktop}.desktop");
+    application_directories()
+        .into_iter()
+        .map(|directory| directory.join(&file_name))
+        .find(|path| path.is_file())
+}
+
+/// One application's icon from its `.desktop` file name (for example
+/// `google-chrome`), for extensions that want a single app's icon
+/// without a full application scan.
+pub fn desktop_app_icon(desktop: &str) -> Option<PathBuf> {
+    let path = desktop_file(desktop)?;
+    let contents = fs::read_to_string(path).ok()?;
+    let entry = parse_desktop_entry(&contents)?;
+    entry.icon.as_deref().and_then(resolve_desktop_icon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_desktop_entry, parse_wmctrl_line};

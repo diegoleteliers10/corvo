@@ -2112,6 +2112,23 @@ fn cache_native_icon(source: &Path, key: &str) -> Option<PathBuf> {
     Some(target)
 }
 
+/// Where a browser executable can live: the per-user install first,
+/// then the two Program Files roots.
+pub(crate) fn exe_candidates(exe: &str) -> Vec<PathBuf> {
+    ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(|root| std::env::var_os(root))
+        .map(|root| PathBuf::from(root).join(exe))
+        .collect()
+}
+
+/// One executable's icon as a cached PNG, for extensions that want a
+/// single app's icon without a full application scan.
+pub fn exe_app_icon(exe: &Path) -> Option<PathBuf> {
+    let key = exe.to_string_lossy().to_lowercase();
+    cached_icon_for_key(&key).or_else(|| cache_native_icon(exe, &key))
+}
+
 fn fill_start_app_icons(apps: &mut [AppEntry]) {
     let Some(cache_dir) = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -2392,9 +2409,124 @@ pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
     run_powershell(&script)
 }
 
+/// PowerShell preamble that loads the SMTC WinRT projection and exposes
+/// `Await $winrtOperation $resultType`, the classic bridge that turns an
+/// `IAsyncOperation<T>` into a task .NET can wait on. Windows PowerShell
+/// 5.1 ships `System.WindowsRuntimeSystemExtensions`; PowerShell 7 does
+/// not project WinRT, which is why this goes through powershell.exe.
+fn smtc_preamble() -> &'static str {
+    r#"$ErrorActionPreference = 'Stop'
+$null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+})[0]
+function Await($WinRtTask, $ResultType) {
+    $task = $asTask.MakeGenericMethod($ResultType).Invoke($null, @($WinRtTask))
+    if (-not $task.Wait(5000)) { throw 'media task timed out' }
+    return $task.Result
+}
+$manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$session = $manager.GetCurrentSession()
+"#
+}
+
+/// Reads the current SMTC session. One PowerShell round trip returning
+/// `state|title|artist|SourceAppUserModelId`, or `none` without a
+/// session.
+pub fn media_now_playing() -> Option<super::NowPlaying> {
+    let script = format!(
+        "{}\n\
+         if ($null -eq $session) {{ Write-Output 'none'; exit 0 }}\n\
+         $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])\n\
+         $status = $session.GetPlaybackInfo().PlaybackStatus.ToString()\n\
+         Write-Output ($status + '|' + $props.Title + '|' + ($props.Artist -join ' ') + '|' + $session.SourceAppUserModelId)\n\
+         exit 0",
+        smtc_preamble()
+    );
+    let output = powershell_output(&script).ok()?;
+    super::parse_now_playing_line(&output).map(|mut playing| {
+        playing.app = friendly_media_app(&playing.app);
+        playing
+    })
+}
+
+/// Runs a transport control on the current SMTC session.
+pub fn media_transport(action: super::MediaTransport) -> bool {
+    let method = match action {
+        super::MediaTransport::Toggle => "TryTogglePlayPauseAsync",
+        super::MediaTransport::Next => "TrySkipNextAsync",
+        super::MediaTransport::Previous => "TrySkipPreviousAsync",
+    };
+    let script = format!(
+        "{}\n\
+         if ($null -eq $session) {{ Write-Output 'none'; exit 0 }}\n\
+         $null = Await ($session.{method}()) ([bool])\n\
+         Write-Output 'ok'\n\
+         exit 0",
+        smtc_preamble()
+    );
+    match powershell_output(&script) {
+        Ok(output) => output.trim() == "ok",
+        Err(_) => false,
+    }
+}
+
+/// Turns an SMTC `SourceAppUserModelId` into a friendly player name:
+/// `SpotifyAB.Spotify-Computer.Spotify` becomes `Spotify`, and
+/// `C:\...\chrome.exe` becomes `Chrome`.
+fn friendly_media_app(aumid: &str) -> String {
+    let lowered = aumid.trim().to_lowercase();
+    let known = [
+        ("spotify", "Spotify"),
+        ("chrome", "Chrome"),
+        ("msedge", "Edge"),
+        ("edge", "Edge"),
+        ("brave", "Brave"),
+        ("firefox", "Firefox"),
+        ("mediaplayer", "Media Player"),
+        ("zunemusic", "Media Player"),
+        ("itunes", "iTunes"),
+        ("vlc", "VLC"),
+    ];
+    for (needle, name) in known {
+        if lowered.contains(needle) {
+            return name.into();
+        }
+    }
+    let stem = lowered
+        .strip_suffix(".exe")
+        .unwrap_or(&lowered)
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(&lowered);
+    if stem.is_empty() {
+        return "Player".into();
+    }
+    // Packaged ids end with the app segment: take it verbatim.
+    let tail = stem.rsplit('.').next().unwrap_or(stem);
+    let mut chars = tail.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Player".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friendly_media_app_maps_known_and_unknown_ids() {
+        assert_eq!(
+            friendly_media_app("SpotifyAB.Spotify-Computer.Spotify"),
+            "Spotify"
+        );
+        assert_eq!(friendly_media_app("C:\\apps\\chrome.exe"), "Chrome");
+        assert_eq!(friendly_media_app("Microsoft.MicrosoftEdge.Stable"), "Edge");
+        assert_eq!(friendly_media_app("com.someone.coolplayer"), "Coolplayer");
+        assert_eq!(friendly_media_app(""), "Player");
+    }
 
     #[test]
     fn launcher_region_follows_client_bounds_after_resize() {

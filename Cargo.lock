@@ -1189,6 +1189,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-platform",
  "serde_json",
  "smol",
 ]
@@ -1270,6 +1271,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-platform",
  "smol",
 ]
 
@@ -1309,6 +1311,7 @@ dependencies = [
  "smol",
  "sysinfo",
  "ureq",
+ "zbus",
 ]
 
 [[package]]

@@ -3,6 +3,17 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
+# Unreleased
+
+## Extensions
+
+- Give every browser its own extension and launcher page: Google Chrome, Brave, Microsoft Edge, Firefox, Arc, Dia, Safari, and Aside. Each shows its real application icon, its open tabs, and its bookmarks, and appears only while that browser is installed.
+- Remove the unified Browser Tabs page and command.
+- Read live tabs on Windows and Linux from the browser's Chrome DevTools endpoint when it runs with `--remote-debugging-port`. Focus a tab by URL through the same endpoint.
+- Read Safari bookmarks from `Bookmarks.plist` and Chromium bookmarks from each profile's `Bookmarks` JSON on all three systems.
+- Show a hint row on a browser page with no tabs: how to launch the browser with its debugging port on Windows and Linux, or to open the browser on macOS.
+- Bring Media Control to Windows through System Media Transport Controls and to Linux through MPRIS. Chrome, Edge, and Brave playback works through those sessions.
+
 # Corvo 0.3.6
 
 ## Launcher

@@ -64,3 +64,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = "5"

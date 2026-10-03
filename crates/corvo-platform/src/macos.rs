@@ -2442,6 +2442,173 @@ pub fn notify(title: &str, body: &str) -> PlatformResult<()> {
     }
 }
 
+/// Reads the first running player among Spotify and Music. One
+/// osascript round trip returning `state|title|artist|app`.
+pub fn media_now_playing() -> Option<super::NowPlaying> {
+    let script = r#"if application "Spotify" is running then
+  tell application "Spotify"
+    (player state as string) & "|" & (name of current track) & "|" & (artist of current track) & "|Spotify"
+  end tell
+else if application "Music" is running then
+  tell application "Music"
+    (player state as string) & "|" & (name of current track) & "|" & (artist of current track) & "|Music"
+  end tell
+else
+  ""
+end if"#;
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    super::parse_now_playing_line(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Runs a transport control on the first running player among Spotify
+/// and Music.
+pub fn media_transport(action: super::MediaTransport) -> bool {
+    let command = match action {
+        super::MediaTransport::Toggle => "playpause",
+        super::MediaTransport::Next => "next track",
+        super::MediaTransport::Previous => "previous track",
+    };
+    let script = format!(
+        r#"if application "Spotify" is running then
+  tell application "Spotify" to {command}
+else if application "Music" is running then
+  tell application "Music" to {command}
+else
+  return "none"
+end if"#
+    );
+    let Ok(output) = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != "none"
+}
+
+/// Where a browser bundle can live: `~/Applications` before
+/// `/Applications`.
+pub(crate) fn app_bundle_candidates(bundle: &str) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join("Applications").join(bundle));
+    }
+    candidates.push(std::path::PathBuf::from("/Applications").join(bundle));
+    candidates
+}
+
+/// Lists one browser's tabs through AppleScript: `name` and `URL` of
+/// every tab of every window, interleaved one per line. Safari and
+/// every Chromium browser answer this shape.
+pub fn browser_tabs(app_name: &str) -> Vec<super::BrowserTab> {
+    let script = format!(
+        r#"if application "{app_name}" is running then
+  tell application "{app_name}"
+    set output to ""
+    repeat with w in windows
+      repeat with t in tabs of w
+        set output to output & (name of t) & linefeed & (URL of t) & linefeed
+      end repeat
+    end repeat
+    return output
+  end tell
+else
+  return ""
+end if"#
+    );
+    let Ok(output) = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    // The output interleaves name and URL lines; focusing later finds
+    // the tab by URL, so window indices are not needed here.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut tabs = Vec::new();
+    while let Some(title) = lines.next() {
+        let Some(url) = lines.next() else { break };
+        tabs.push(super::BrowserTab {
+            title: title.to_owned(),
+            url: url.to_owned(),
+        });
+    }
+    tabs
+}
+
+/// Builds the focus script. The URL travels as `argv` data, never
+/// inside the script text.
+fn focus_tab_command(
+    app_name: &str,
+    focus: super::AppleScriptFocus,
+    url: &str,
+) -> std::process::Command {
+    let set_tab = match focus {
+        // Chromium browsers refuse `set active tab of window to t` but
+        // take the index form; Safari is the other way around.
+        super::AppleScriptFocus::ChromiumTabIndex => r#"set wIndex to 0
+    repeat with w in windows
+      set wIndex to wIndex + 1
+      set tIndex to 0
+      repeat with t in tabs of w
+        set tIndex to tIndex + 1
+        if (URL of t) is targetURL then
+          set active tab index of window wIndex to tIndex
+          set index of window wIndex to 1
+          return "ok"
+        end if
+      end repeat
+    end repeat"#,
+        super::AppleScriptFocus::SafariCurrentTab => r#"repeat with w in windows
+    repeat with t in tabs of w
+      if (URL of t) is targetURL then
+        set current tab of w to t
+        set index of w to 1
+        return "ok"
+      end if
+    end repeat
+  end repeat"#,
+    };
+    let script = format!(
+        r#"on run argv
+set targetURL to item 1 of argv
+tell application "{app_name}"
+  activate
+  {set_tab}
+end tell
+return "missing"
+end run"#
+    );
+    let mut command = std::process::Command::new("osascript");
+    command.arg("-e").arg(script).arg(url);
+    command
+}
+
+/// Brings the tab with this URL to the front of its browser.
+pub fn focus_browser_tab(
+    app_name: &str,
+    focus: super::AppleScriptFocus,
+    url: &str,
+) -> bool {
+    let Ok(output) = focus_tab_command(app_name, focus, url).output() else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2457,6 +2624,20 @@ mod tests {
             pasted.as_ref().map(|s| s.to_string()),
             Some(text.to_string())
         );
+    }
+
+    #[test]
+    fn focus_passes_the_url_as_data() {
+        let url = "https://example.test/\"\\\n& do shell script \"bad\"";
+        let command = super::focus_tab_command(
+            "Aside",
+            crate::AppleScriptFocus::ChromiumTabIndex,
+            url,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[2], url);
+        assert!(!args[1].to_string_lossy().contains(url));
+        assert!(args[1].to_string_lossy().contains("item 1 of argv"));
     }
 
     #[test]
