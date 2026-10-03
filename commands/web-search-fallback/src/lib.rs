@@ -85,6 +85,7 @@ pub fn search_results(query: &str) -> Vec<SearchResult> {
             icon: Icon::Web,
             score: 2,
             accessory: None,
+            section: None,
         },
         SearchResult {
             id: format!("web-search-fallback:duckduckgo:{q}"),
@@ -93,6 +94,7 @@ pub fn search_results(query: &str) -> Vec<SearchResult> {
             icon: Icon::Web,
             score: 1,
             accessory: None,
+            section: None,
         },
     ]
 }

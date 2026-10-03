@@ -329,6 +329,7 @@ fn note_result(note: &Note, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::NOTE_PENCIL),
         score,
         accessory: Some(note.created_at.clone()),
+        section: None,
     }
 }
 
@@ -349,6 +350,7 @@ fn create_result(input: &str, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::PLUS),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -360,6 +362,7 @@ fn open_result(score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::NOTE_PENCIL),
         score,
         accessory: None,
+        section: None,
     }
 }
 

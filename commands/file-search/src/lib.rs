@@ -95,6 +95,7 @@ fn search_files_command_result(query: &str) -> Option<SearchResult> {
         } else {
             "Files".into()
         }),
+        section: None,
     })
 }
 
@@ -273,6 +274,7 @@ fn file_search_result(path: &Path, score: i32, is_dir: bool) -> SearchResult {
         },
         score,
         accessory: Some(if is_dir { "Folder" } else { "File" }.into()),
+        section: None,
     }
 }
 

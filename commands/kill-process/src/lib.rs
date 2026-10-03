@@ -95,6 +95,7 @@ fn open_ports_result() -> SearchResult {
         icon: Icon::Glyph("⌁"),
         score: 1000,
         accessory: Some("Port Manager".into()),
+        section: None,
     }
 }
 
@@ -110,6 +111,7 @@ fn open_processes_result(filter: &str) -> SearchResult {
         icon: Icon::System,
         score: 1001,
         accessory: Some("Port Manager".into()),
+        section: None,
     }
 }
 
@@ -125,6 +127,7 @@ fn ports_unavailable_result(error: &str) -> SearchResult {
         icon: Icon::System,
         score: 900,
         accessory: None,
+        section: None,
     }
 }
 
@@ -179,6 +182,7 @@ fn port_results(
                 icon: Icon::System,
                 score,
                 accessory: Some("TCP".into()),
+                section: None,
             })
         })
         .take(max_results)
@@ -244,6 +248,7 @@ fn build_results(
                     }
                 },
             accessory: Some(format!("{:.1}% CPU", process.cpu_percent)),
+            section: None,
         })
         .collect()
 }

@@ -291,6 +291,7 @@ fn control_row(key: &str, label: &str, score: i32) -> SearchResult {
         icon: action_icon(key.split(':').next().unwrap_or("status")),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -309,6 +310,7 @@ fn status_row(score: i32) -> SearchResult {
                 icon: action_icon("status"),
                 score,
                 accessory: Some(current.phase_label().to_owned()),
+                section: None,
             }
         }
         None => SearchResult {
@@ -318,6 +320,7 @@ fn status_row(score: i32) -> SearchResult {
             icon: action_icon("status"),
             score,
             accessory: None,
+            section: None,
         },
     }
 }
@@ -341,6 +344,7 @@ fn control_results(custom_minutes: Option<u64>) -> Vec<SearchResult> {
             icon: action_icon("start"),
             score: 960,
             accessory: None,
+            section: None,
         });
         let break_minutes = DEFAULT_BREAK.as_secs() / 60;
         results.push(SearchResult {
@@ -350,6 +354,7 @@ fn control_results(custom_minutes: Option<u64>) -> Vec<SearchResult> {
             icon: action_icon("break"),
             score: 950,
             accessory: None,
+            section: None,
         });
     }
     results
@@ -363,6 +368,7 @@ fn open_result(score: i32) -> SearchResult {
         icon: action_icon("status"),
         score,
         accessory: None,
+        section: None,
     }
 }
 

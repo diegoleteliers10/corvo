@@ -125,6 +125,7 @@ impl Command for QuicklinksCommand {
                         icon: Icon::Link,
                         score: 900,
                         accessory: link.hotkey.clone(),
+                        section: None,
                     });
                 }
                 let score = if q.is_empty() {
@@ -146,6 +147,7 @@ impl Command for QuicklinksCommand {
                     icon: Icon::Link,
                     score,
                     accessory: link.hotkey.clone(),
+                    section: None,
                 })
             })
             .collect();

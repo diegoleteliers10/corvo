@@ -91,6 +91,7 @@ impl Command for SystemActionsCommand {
                         icon: Icon::Svg(action.icon),
                         score,
                         accessory: Some("System Action".into()),
+                        section: None,
                     });
                 }
             }
@@ -129,6 +130,7 @@ impl Command for SystemActionsCommand {
                         icon: Icon::Svg(setting.icon),
                         score,
                         accessory: Some("System Setting".into()),
+                        section: None,
                     });
                 }
             }

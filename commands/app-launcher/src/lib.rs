@@ -179,6 +179,7 @@ impl Command for AppLauncherCommand {
                     icon: entry.icon_png.clone().map(Icon::Image).unwrap_or(Icon::App),
                     score: 1100,
                     accessory: Some("Application".into()),
+                    section: None,
                 })
                 .collect()
         } else {
@@ -207,6 +208,7 @@ impl Command for AppLauncherCommand {
                         icon: entry.icon_png.clone().map(Icon::Image).unwrap_or(Icon::App),
                         score,
                         accessory: Some("Application".into()),
+                        section: None,
                     }
                 })
                 .collect()

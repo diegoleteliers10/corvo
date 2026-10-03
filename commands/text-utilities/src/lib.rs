@@ -93,6 +93,7 @@ fn open_result(input: &str, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::TEXT_AA),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -305,6 +306,7 @@ fn cache_and_render(mut utilities: Vec<Utility>, max_results: usize) -> Vec<Sear
             icon: category_icon(utility.category),
             score: utility.score,
             accessory: Some(utility.category.to_owned()),
+            section: None,
         })
         .collect()
 }

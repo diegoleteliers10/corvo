@@ -50,6 +50,10 @@ pub struct SearchResult {
     pub score: i32,
     /// Right-aligned hint, for example a hotkey or a unit.
     pub accessory: Option<String>,
+    /// Group label for list sections. Consecutive rows sharing a
+    /// section render under one header; rows without one land in the
+    /// default group.
+    pub section: Option<String>,
 }
 
 /// A system operation performed through the platform's own API.

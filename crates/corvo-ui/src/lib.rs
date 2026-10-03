@@ -979,6 +979,14 @@ enum RootFlatItem {
     Row(usize),
 }
 
+/// The list header of one section: the section label, or the default
+/// group label for unsectioned rows.
+fn section_header(section: Option<&str>) -> SharedString {
+    section
+        .map(SharedString::from)
+        .unwrap_or_else(|| SharedString::from("Results"))
+}
+
 #[derive(Clone, Debug)]
 enum ClipboardFlatItem {
     Header(SharedString),
@@ -3170,33 +3178,22 @@ impl Launcher {
         self.root_to_flat.clear();
         self.root_to_flat.resize(self.results.len(), 0);
 
-        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
-            for (kind, title) in [("formula", "Formulae"), ("cask", "Casks")] {
-                let matching: Vec<_> = self
-                    .results
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, result)| result.id.split(':').nth(2) == Some(kind))
-                    .map(|(index, _)| index)
-                    .collect();
-                if matching.is_empty() {
-                    continue;
-                }
-                self.root_flat_items
-                    .push(RootFlatItem::Header(title.into()));
-                for result_index in matching {
-                    self.root_to_flat[result_index] = self.root_flat_items.len();
-                    self.root_flat_items.push(RootFlatItem::Row(result_index));
-                }
-            }
-            return;
-        }
-
+        // Consecutive rows sharing a section land under one header;
+        // rows without a section fall into the default group.
+        let mut current: Option<String> = None;
         if !self.results.is_empty() {
-            self.root_flat_items
-                .push(RootFlatItem::Header("Results".into()));
+            current = self.results[0].section.clone();
+            self.root_flat_items.push(RootFlatItem::Header(
+                section_header(current.as_deref()),
+            ));
         }
-        for res_idx in 0..self.results.len() {
+        for (res_idx, result) in self.results.iter().enumerate() {
+            if result.section != current {
+                current = result.section.clone();
+                self.root_flat_items.push(RootFlatItem::Header(
+                    section_header(current.as_deref()),
+                ));
+            }
             self.root_to_flat[res_idx] = self.root_flat_items.len();
             self.root_flat_items.push(RootFlatItem::Row(res_idx));
         }
@@ -3231,21 +3228,7 @@ impl Launcher {
     }
 
     fn select_result_index(&mut self, result_index: usize, cx: &mut Context<Self>) {
-        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
-            let visible_position = self
-                .root_flat_items
-                .iter()
-                .filter_map(|item| match item {
-                    RootFlatItem::Row(index) => Some(*index),
-                    RootFlatItem::Header(_) => None,
-                })
-                .position(|index| index == result_index);
-            if let Some(visible_position) = visible_position {
-                self.select(visible_position, cx);
-            }
-        } else {
-            self.select(result_index, cx);
-        }
+        self.select(result_index, cx);
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -3286,25 +3269,6 @@ impl Launcher {
             self.selected = index.min(self.results.len().saturating_sub(1));
             let row = self.selected / self.emoji_column_count;
             self.emoji_scroll_handle.scroll_to_item(row);
-            cx.notify();
-            return;
-        }
-
-        if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
-            let Some(result_index) = self
-                .root_flat_items
-                .iter()
-                .filter_map(|item| match item {
-                    RootFlatItem::Row(result_index) => Some(*result_index),
-                    RootFlatItem::Header(_) => None,
-                })
-                .nth(index)
-            else {
-                return;
-            };
-            self.selected = result_index;
-            let flat_idx = self.root_to_flat.get(result_index).copied().unwrap_or(0);
-            self.results_scroll_handle.scroll_to_item(flat_idx);
             cx.notify();
             return;
         }
@@ -3364,15 +3328,6 @@ impl Launcher {
             visible
                 .iter()
                 .position(|index| *index == focused)
-                .unwrap_or(0)
-        } else if self.page == LauncherPage::Brew && self.brew_page_mode == BrewPageMode::Upgrades {
-            self.root_flat_items
-                .iter()
-                .filter_map(|item| match item {
-                    RootFlatItem::Row(result_index) => Some(*result_index),
-                    RootFlatItem::Header(_) => None,
-                })
-                .position(|result_index| result_index == self.selected)
                 .unwrap_or(0)
         } else {
             self.selected
@@ -8886,10 +8841,7 @@ impl Launcher {
             return self.calculator_card(index, result, cx);
         }
         let selected = index == self.selected;
-        let is_brew_upgrade = self.page == LauncherPage::Brew
-            && self.brew_page_mode == BrewPageMode::Upgrades
-            && result.id.starts_with("brew:outdated:");
-        let subtitle = if is_brew_upgrade || is_category_subtitle(result) {
+        let subtitle = if is_category_subtitle(result) {
             None
         } else {
             result.subtitle.clone()

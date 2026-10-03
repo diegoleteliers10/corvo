@@ -211,6 +211,7 @@ fn open_result(input: &str, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::CLOUD_SUN),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -229,6 +230,7 @@ fn conditions_result(weather: &Weather, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::CLOUD_SUN),
         score,
         accessory: Some("Now".into()),
+        section: None,
     }
 }
 

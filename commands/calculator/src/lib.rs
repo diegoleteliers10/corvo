@@ -55,6 +55,7 @@ impl Command for CalculatorCommand {
             icon: Icon::Calculator,
             score: 100_000,
             accessory,
+            section: None,
         }]
     }
 

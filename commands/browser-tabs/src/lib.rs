@@ -327,6 +327,7 @@ fn opener_result(id: BrowserId, score: i32) -> SearchResult {
         icon: browser_icon(id),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -338,6 +339,7 @@ fn tab_result(id: BrowserId, tab: &Tab, score: i32) -> SearchResult {
         icon: browser_icon(id),
         score,
         accessory: Some("Tab".into()),
+        section: None,
     }
 }
 
@@ -349,6 +351,7 @@ fn bookmark_result(id: BrowserId, bookmark: &Bookmark, score: i32) -> SearchResu
         icon: Icon::Link,
         score,
         accessory: Some("Bookmark".into()),
+        section: None,
     }
 }
 
@@ -384,6 +387,7 @@ fn hint_result(id: BrowserId) -> Option<SearchResult> {
         icon: Icon::Svg(phosphor_svgs::style::regular::INFO),
         score: 1,
         accessory: None,
+        section: None,
     })
 }
 

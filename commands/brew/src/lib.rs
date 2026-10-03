@@ -94,6 +94,7 @@ impl Command for BrewCommand {
                 icon: Icon::System,
                 score: 900,
                 accessory: None,
+                section: None,
             }];
         }
         results_for_items(items, mode, &search_query, ctx.max_results)
@@ -239,16 +240,28 @@ fn results_for_items(
                 BrewItemKind::Cask => ("Cask", "cask", Icon::App),
                 BrewItemKind::Service => ("Service", "service", Icon::System),
             };
-            let subtitle = if let Some(status) = item.status.as_deref() {
-                format!("Service · {status}")
+            let subtitle = if mode == QueryMode::Outdated {
+                // The section header names the kind and the accessory
+                // carries the version jump; a subtitle would repeat
+                // both.
+                None
+            } else if let Some(status) = item.status.as_deref() {
+                Some(format!("Service · {status}"))
             } else {
                 match (&item.version, &item.latest_version) {
                     (Some(current), Some(latest)) if current != latest => {
-                        format!("{kind} · {current} → {latest}")
+                        Some(format!("{kind} · {current} → {latest}"))
                     }
-                    (Some(current), _) => format!("{kind} · {current}"),
-                    _ => kind.to_string(),
+                    (Some(current), _) => Some(format!("{kind} · {current}")),
+                    _ => Some(kind.to_string()),
                 }
+            };
+            // Upgrade lists group formulae before casks; other modes
+            // stay flat.
+            let section = match (mode, kind_segment) {
+                (QueryMode::Outdated, "formula") => Some("Formulae".into()),
+                (QueryMode::Outdated, "cask") => Some("Casks".into()),
+                _ => None,
             };
             Some(SearchResult {
                 id: format!(
@@ -262,7 +275,7 @@ fn results_for_items(
                     item.name
                 ),
                 title: item.name,
-                subtitle: Some(subtitle),
+                subtitle,
                 icon,
                 score,
                 accessory: match mode {
@@ -281,14 +294,19 @@ fn results_for_items(
                     ),
                     _ => None,
                 },
+                section,
             })
         })
         .collect();
     results.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.title.cmp(&right.title))
+        // Sections stay contiguous so the UI groups them under one
+        // header: formulae first, then casks.
+        section_rank(left).cmp(&section_rank(right)).then_with(|| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.title.cmp(&right.title))
+        })
     });
     results.truncate(max_results);
     results
@@ -301,6 +319,16 @@ fn mode_name(mode: QueryMode) -> &'static str {
         QueryMode::Outdated => "outdated",
         QueryMode::Search => "search",
         QueryMode::Services => "services",
+    }
+}
+
+/// Sort order of a section label: formulae before casks, everything
+/// else alongside the unsectioned rows.
+fn section_rank(result: &SearchResult) -> u8 {
+    match result.section.as_deref() {
+        Some("Formulae") => 0,
+        Some("Casks") => 1,
+        _ => 0,
     }
 }
 
@@ -381,6 +409,7 @@ fn menu_results() -> Vec<SearchResult> {
         icon: Icon::Glyph("🍺"),
         score: 900 - index as i32,
         accessory: Some("Brew".into()),
+        section: None,
     })
     .collect()
 }

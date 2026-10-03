@@ -63,6 +63,7 @@ impl Command for SnippetsCommand {
                 icon: Icon::Snippet,
                 score,
                 accessory: s.keyword.clone(),
+                section: None,
             })
             .collect();
         results.sort_by_key(|result| std::cmp::Reverse(result.score));

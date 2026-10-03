@@ -759,6 +759,7 @@ impl Command for ClipboardManagerCommand {
                             icon,
                             score: 50,
                             accessory: Some(accessory),
+                            section: None,
                         }
                     })
                     .collect();
@@ -810,6 +811,7 @@ impl Command for ClipboardManagerCommand {
                         icon,
                         score,
                         accessory: Some(accessory),
+                        section: None,
                     }
                 })
                 .collect();
@@ -823,6 +825,7 @@ impl Command for ClipboardManagerCommand {
                 icon: Icon::Clipboard,
                 score: 990,
                 accessory: Some("cmd+alt+c".into()),
+                section: None,
             }];
         }
 
@@ -838,6 +841,7 @@ impl Command for ClipboardManagerCommand {
                 icon: Icon::Clipboard,
                 score,
                 accessory: Some("cmd+alt+c".into()),
+                section: None,
             });
         }
         results

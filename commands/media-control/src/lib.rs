@@ -76,6 +76,7 @@ fn control_result(action: &str, label: &str, score: i32) -> SearchResult {
         }),
         score,
         accessory: None,
+        section: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn now_playing_result(playing: &NowPlaying, score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::MUSIC_NOTES),
         score,
         accessory: Some(if playing.playing { "Playing" } else { "Paused" }.into()),
+        section: None,
     }
 }
 
@@ -102,6 +104,7 @@ fn open_result(score: i32) -> SearchResult {
         icon: Icon::Svg(phosphor_svgs::style::regular::MUSIC_NOTES),
         score,
         accessory: None,
+        section: None,
     }
 }
 

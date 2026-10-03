@@ -208,6 +208,7 @@ impl Command for WindowManagementCommand {
                         icon: Icon::Svg(phosphor_svgs::style::regular::SQUARES_FOUR),
                         score,
                         accessory: layout.hotkey.clone(),
+                        section: None,
                     });
                 }
             }
@@ -235,6 +236,7 @@ impl Command for WindowManagementCommand {
                     icon: Icon::Svg(action.icon),
                     score,
                     accessory: Some(hotkey.unwrap_or("Window Action").into()),
+                    section: None,
                 });
             }
         }

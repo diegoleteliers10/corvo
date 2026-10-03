@@ -1129,6 +1129,7 @@ impl Command for EmojiPickerCommand {
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
                 score: 1000,
                 accessory: Some("cmd+alt+space".into()),
+                section: None,
             }];
         }
 
@@ -1144,6 +1145,7 @@ impl Command for EmojiPickerCommand {
                 icon: Icon::Svg(phosphor_svgs::style::regular::SMILEY),
                 score: score + 120,
                 accessory: Some("cmd+alt+space".into()),
+                section: None,
             });
         }
         results
@@ -1250,6 +1252,7 @@ pub fn all_emojis() -> Vec<SearchResult> {
                         icon: Icon::Glyph(glyph),
                         score: 500,
                         accessory: Some(category.into()),
+                        section: None,
                     }
                 })
                 .collect()
@@ -1301,6 +1304,7 @@ pub fn search_emojis(query: &str, max_results: usize) -> Vec<SearchResult> {
                 icon: Icon::Glyph(glyph),
                 score,
                 accessory: Some(category.into()),
+                section: None,
             }
         })
         .collect()
