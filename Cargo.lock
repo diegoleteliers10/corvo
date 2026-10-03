@@ -1247,6 +1247,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvo-ext"
+version = "0.4.0"
+dependencies = [
+ "corvo-core",
+ "directories",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "corvo-file-search"
 version = "0.4.0"
 dependencies = [

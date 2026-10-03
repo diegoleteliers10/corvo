@@ -47,6 +47,11 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --no-fail-fast --target ${{ matrix.target }}
 
+      # The extension template is not a workspace member; this proves
+      # it still compiles and passes its tests as one.
+      - name: Check extension template
+        run: ./scripts/check-template.sh
+
       - name: Test Windows platform
         if: runner.os == 'Windows'
         run: cargo test -p corvo-platform --lib --target ${{ matrix.target }} windows

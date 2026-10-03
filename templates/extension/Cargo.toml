@@ -1,0 +1,13 @@
+[package]
+name = "corvo-example"
+version = "0.4.0"
+edition = "2021"
+description = "Example Corvo extension: rename me."
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-ext = { workspace = true }
+serde = { workspace = true }
+smol = { workspace = true }
