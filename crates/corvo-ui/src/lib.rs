@@ -27,9 +27,6 @@ use smol::channel::Receiver;
 
 const WINDOW_WIDTH: f32 = 750.0;
 const WINDOW_HEIGHT: f32 = 475.0;
-/// Height for declarative extension pages, whose Blocks, Grids, and
-/// Forms carry more content than a results list.
-const EXTENSION_WINDOW_HEIGHT: f32 = 560.0;
 const COMPACT_WINDOW_HEIGHT: f32 = 58.0;
 const ROW_HEIGHT: f32 = 38.0;
 const ICON_SIZE: f32 = 26.0;
@@ -910,9 +907,6 @@ impl BrewPageMode {
 pub enum PaletteSize {
     Compact,
     Extended,
-    /// Declarative extension pages: rich Blocks, Grids, and Forms need
-    /// more room than the standard extended palette.
-    Tall,
 }
 
 impl PaletteSize {
@@ -920,7 +914,6 @@ impl PaletteSize {
         match self {
             Self::Compact => COMPACT_WINDOW_HEIGHT * size_scale,
             Self::Extended => WINDOW_HEIGHT * size_scale,
-            Self::Tall => EXTENSION_WINDOW_HEIGHT * size_scale,
         }
     }
 }
@@ -943,8 +936,6 @@ pub fn palette_size(
         && !filter_dropdown_open
     {
         PaletteSize::Compact
-    } else if matches!(page, LauncherPage::Extension(_)) {
-        PaletteSize::Tall
     } else {
         PaletteSize::Extended
     }
@@ -4728,21 +4719,31 @@ impl Launcher {
         for block in &blocks.blocks {
             match block {
                 corvo_core::Block::Badge(badge) => {
-                    let color = Self::tone_color(badge.tone);
-                    inner = inner.child(
-                        div()
-                            .id(SharedString::from(format!("badge-{}", badge.label)))
-                            .px_2p5()
-                            .py_0p5()
-                            .rounded_full()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(color))
-                            .child(badge.label.clone()),
-                    );
+                    let color = badge.style.color_or(Self::tone_color(badge.tone));
+                    let size = badge.style.size.unwrap_or(11) as f32;
+                    let bold = badge.style.bold.unwrap_or(false);
+                    let mut pill = div()
+                        .id(SharedString::from(format!("badge-{}", badge.label)))
+                        .px_2p5()
+                        .py_0p5()
+                        .rounded_full()
+                        .text_size(px(size))
+                        .font_weight(if bold {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(rgb(color))
+                        .child(badge.label.clone());
+                    if let Some(background) = badge.style.background {
+                        pill = pill.bg(rgb(background));
+                    }
+                    inner = inner.child(pill);
                 }
                 corvo_core::Block::Hero(hero) => {
-                    let color = Self::tone_color(hero.tone);
+                    let color = hero.style.color_or(Self::tone_color(hero.tone));
+                    let value_size = hero.style.size.unwrap_or(56) as f32;
+                    let glyph_size = hero.style.glyph_size.unwrap_or(40) as f32;
                     let mut hero_view = div()
                         .id(SharedString::from(format!("hero-{}", hero.title)))
                         .flex()
@@ -4751,13 +4752,13 @@ impl Launcher {
                         .gap_1();
                     if let Some(glyph) = hero.glyph {
                         hero_view = hero_view.child(
-                            div().text_size(px(40.0)).child(glyph.to_string()),
+                            div().text_size(px(glyph_size)).child(glyph.to_string()),
                         );
                     }
                     if !hero.value.is_empty() {
                         hero_view = hero_view.child(
                             div()
-                                .text_size(px(56.0))
+                                .text_size(px(value_size))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(color))
                                 .child(hero.value.clone()),
@@ -4780,16 +4781,18 @@ impl Launcher {
                     );
                 }
                 corvo_core::Block::Progress(progress) => {
-                    let color = Self::tone_color(progress.tone);
-                    let bar_width = 340.0;
+                    let color = progress.style.color_or(Self::tone_color(progress.tone));
+                    let track = progress.style.background.unwrap_or(0x2a2f36);
+                    let bar_width = progress.style.width.unwrap_or(300) as f32;
+                    let bar_height = progress.style.height.unwrap_or(5) as f32;
                     let fill = (bar_width * (1.0 - progress.fraction)).max(0.0);
                     inner = inner.child(
                         div()
                             .id("extension-progress")
                             .w(px(bar_width))
-                            .h(px(6.0))
+                            .h(px(bar_height))
                             .rounded_full()
-                            .bg(rgb(0x2a2f36))
+                            .bg(rgb(track))
                             .child(
                                 div()
                                     .w(px(fill))
@@ -4799,14 +4802,16 @@ impl Launcher {
                             ),
                     );
                 }
-                corvo_core::Block::Markdown(markdown) => {
+                corvo_core::Block::Markdown { text, style } => {
+                    let color = style.color_or(COLOR_TEXT);
+                    let size = style.size.unwrap_or(13) as f32;
                     inner = inner.child(
                         div()
-                            .id(SharedString::from(format!("md-{}", markdown.len())))
+                            .id(SharedString::from(format!("md-{}", text.len())))
                             .max_w(px(560.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(COLOR_TEXT))
-                            .child(render_inline_markdown(markdown)),
+                            .text_size(px(size))
+                            .text_color(rgb(color))
+                            .child(render_inline_markdown(text)),
                     );
                 }
                 corvo_core::Block::Strip(cards) => {
@@ -4816,6 +4821,10 @@ impl Launcher {
                         .gap_2()
                         .max_w(px(560.0));
                     for card in cards {
+                        let color = card.style.color_or(COLOR_TEXT);
+                        let background = card.style.background.unwrap_or(0x181b1e);
+                        let glyph_size = card.style.glyph_size.unwrap_or(20) as f32;
+                        let value_size = card.style.size.unwrap_or(14) as f32;
                         let mut card_view = div()
                             .id(SharedString::from(format!("card-{}", card.title)))
                             .flex_1()
@@ -4826,10 +4835,10 @@ impl Launcher {
                             .px_3()
                             .py_1p5()
                             .rounded_lg()
-                            .bg(rgb(0x181b1e));
+                            .bg(rgb(background));
                         if let Some(glyph) = card.glyph {
                             card_view = card_view.child(
-                                div().text_size(px(20.0)).child(glyph.to_string()),
+                                div().text_size(px(glyph_size)).child(glyph.to_string()),
                             );
                         }
                         strip = strip.child(
@@ -4842,8 +4851,9 @@ impl Launcher {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(14.0))
+                                        .text_size(px(value_size))
                                         .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(color))
                                         .child(card.value.clone()),
                                 )
                                 .child(
@@ -4863,35 +4873,44 @@ impl Launcher {
                         .gap_2()
                         .justify_center();
                     for (index, button) in buttons.iter().enumerate() {
-                        let color = Self::tone_color(button.tone);
+                        let color = button.style.color_or(if button.tone == corvo_core::Tone::Neutral {
+                            COLOR_TEXT
+                        } else {
+                            Self::tone_color(button.tone)
+                        });
+                        let size = button.style.size.unwrap_or(13) as f32;
+                        let bold = button.style.bold.unwrap_or(false);
                         let focused = index == self.extension_button_focus;
                         let action_id = button.action_id.clone();
                         let command_id = match self.page {
                             LauncherPage::Extension(id) => id,
                             _ => continue,
                         };
-                        row = row.child(
-                            div()
-                                .id(SharedString::from(format!("ext-btn-{action_id}")))
-                                .px_4()
-                                .py_1p5()
-                                .rounded_lg()
-                                .when(focused, |tile| tile.bg(rgb(COLOR_ROW_SELECTED)))
-                                .when(!focused, |tile| tile.bg(rgb(0x181b1e)))
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(if button.tone == corvo_core::Tone::Neutral {
-                                    COLOR_TEXT
-                                } else {
-                                    color
-                                }))
-                                .child(button.label.clone())
-                                .on_click(cx.listener(
-                                    move |launcher, _: &ClickEvent, _window, cx| {
-                                        launcher.run_extension_action(command_id, action_id.clone(), cx);
-                                    },
-                                )),
-                        );
+                        let mut tile = div()
+                            .id(SharedString::from(format!("ext-btn-{action_id}")))
+                            .px_4()
+                            .py_1p5()
+                            .rounded_lg()
+                            .text_size(px(size))
+                            .font_weight(if bold {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(rgb(color))
+                            .child(button.label.clone());
+                        tile = match button.style.background {
+                            // An explicit background owns the tile; the
+                            // focus highlight stays for themed buttons.
+                            Some(background) => tile.bg(rgb(background)),
+                            None if focused => tile.bg(rgb(COLOR_ROW_SELECTED)),
+                            None => tile.bg(rgb(0x181b1e)),
+                        };
+                        row = row.child(tile.on_click(cx.listener(
+                            move |launcher, _: &ClickEvent, _window, cx| {
+                                launcher.run_extension_action(command_id, action_id.clone(), cx);
+                            },
+                        )));
                     }
                     inner = inner.child(row);
                 }
@@ -11382,16 +11401,17 @@ mod tests {
     }
 
     #[test]
-    fn an_extension_page_is_tall() {
-        // Declarative pages carry hero, strip, and form content; they
-        // get the tall palette and are never compact.
+    fn an_extension_page_stays_extended() {
+        // Declarative pages render inside the standard extended
+        // window: their layout must fit it, scrolling when it does
+        // not. No special height.
         assert_eq!(
             palette_size(true, false, LauncherPage::Extension("countdown"), "", false, false, false),
-            PaletteSize::Tall
+            PaletteSize::Extended
         );
         assert_eq!(
             palette_size(true, false, LauncherPage::Extension("countdown"), "2026-12-25", false, false, false),
-            PaletteSize::Tall
+            PaletteSize::Extended
         );
     }
 

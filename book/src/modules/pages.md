@@ -38,6 +38,45 @@ PageBuilder::new("Minutes for a custom focus, or leave empty for 25...")
     .build()
 ```
 
+## Style — the design is the extension's
+
+The launcher's components are generic; the design is yours. Every
+block carries an optional `Style`, and every `Some` field overrides
+the theme default:
+
+| Field | Overrides |
+|---|---|
+| `color` | the block's primary text or accent color (sRGB, e.g. `0xff6600`) |
+| `background` | the block's background fill |
+| `size` | the primary text size in px (badge label, hero value, card value, button label) |
+| `glyph_size` | the glyph size in px |
+| `width`, `height` | fixed progress-track dimensions |
+| `bold` | bold primary text |
+
+Chain `.style(...)` after any builder call to restyle what it just
+pushed; strips and button rows cascade into every card and button
+inside:
+
+```rust
+PageBuilder::new("...")
+    .badge("COUNTING DOWN", Tone::Neutral)
+    .style(Style {
+        color: Some(0x34d399),
+        background: Some(0x11342a),
+        ..Style::default()
+    })
+    .hero(None, "New year", "47 days", "2026-12-31", Tone::Accent)
+    .style(Style {
+        color: Some(0xfbbf24),   // amber value, the extension's call
+        size: Some(64),
+        ..Style::default()
+    })
+    .build()
+```
+
+`None` fields keep the theme — an extension that never styles looks
+native; one that styles everywhere looks like itself.
+
 ## Buttons and page actions
 
 Every click becomes `execute("{id}:page:{action_id}")` in your

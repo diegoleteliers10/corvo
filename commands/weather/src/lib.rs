@@ -311,6 +311,7 @@ impl Command for WeatherCommand {
                 title: day.label.clone(),
                 glyph: Some(day.glyph),
                 value: format!("{}° / {}°", day.max_c, day.min_c),
+                style: corvo_core::Style::default(),
                 subtitle: {
                     let cut: String = day.description.chars().take(14).collect();
                     cut

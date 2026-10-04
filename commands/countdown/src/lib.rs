@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use corvo_core::{
     Action, Command, CommandError, ExecutionContext, Icon, PageButton, PageView, SearchContext,
-    SearchResult, StripCard, Tone,
+    SearchResult, StripCard, Style, Tone,
 };
 use corvo_ext::pages::PageBuilder;
 use corvo_ext::{manifest, storage};
@@ -254,7 +254,17 @@ impl Command for CountdownCommand {
                         },
                         if delta < 0 { Tone::Neutral } else { Tone::Accent },
                     )
+                    .style(corvo_core::Style {
+                        color: Some(0x34d399),
+                        background: Some(0x11342a),
+                        ..Style::default()
+                    })
                     .hero(None, label.clone(), value, target_label(target), Tone::Accent)
+                    .style(corvo_core::Style {
+                        color: Some(0xfbbf24),
+                        size: Some(64),
+                        ..Style::default()
+                    })
                     .markdown(format!(
                         "- Type a new date to switch\n- Enter again to save **{label}** to the strip"
                     ))
@@ -263,16 +273,22 @@ impl Command for CountdownCommand {
                         label: "Save".into(),
                         tone: Tone::Positive,
                         hotkey: Some("enter"),
+                        style: Style::default(),
                     }]);
             }
             None => {
-                builder = builder.hero(
-                    Some("📅"),
-                    "Countdown",
-                    String::new(),
-                    "Type a date: 2026-12-25, Dec 25, or 25 December",
-                    Tone::Neutral,
-                );
+                builder = builder
+                    .hero(
+                        Some("📅"),
+                        "Countdown",
+                        String::new(),
+                        "Type a date: 2026-12-25, Dec 25, or 25 December",
+                        Tone::Neutral,
+                    )
+                    .style(corvo_core::Style {
+                        glyph_size: Some(56),
+                        ..Style::default()
+                    });
             }
         }
         let saved = saved_list();
@@ -286,10 +302,14 @@ impl Command for CountdownCommand {
                         glyph: Some("🗓"),
                         value: format_delta(delta),
                         subtitle: target_label(entry.target),
+                        style: Style::default(),
                     }
                 })
                 .collect();
-            builder = builder.strip(strip);
+            builder = builder.strip(strip).style(corvo_core::Style {
+                color: Some(0x34d399),
+                ..Style::default()
+            });
             builder = builder.buttons(
                 saved
                     .iter()
@@ -298,6 +318,7 @@ impl Command for CountdownCommand {
                         label: format!("Remove {}", entry.label),
                         tone: Tone::Destructive,
                         hotkey: None,
+                        style: Style::default(),
                     })
                     .collect(),
             );

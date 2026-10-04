@@ -5,7 +5,7 @@
 
 use corvo_core::{
     Badge, Block, Blocks, FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageView,
-    Progress, Refresh, StripCard, Tone,
+    Progress, Refresh, StripCard, Style, Tone,
 };
 
 /// A composed page under construction.
@@ -34,6 +34,7 @@ impl PageBuilder {
         self.blocks.push(Block::Badge(Badge {
             label: label.into(),
             tone,
+            style: Style::default(),
         }));
         self
     }
@@ -52,6 +53,7 @@ impl PageBuilder {
             value: value.into(),
             subtitle: subtitle.into(),
             tone,
+            style: Style::default(),
         }));
         self
     }
@@ -61,12 +63,28 @@ impl PageBuilder {
         self.blocks.push(Block::Progress(Progress {
             fraction: fraction.clamp(0.0, 1.0),
             tone,
+            style: Style::default(),
         }));
         self
     }
 
     pub fn markdown(mut self, markdown: impl Into<String>) -> Self {
-        self.blocks.push(Block::Markdown(markdown.into()));
+        self.blocks.push(Block::Markdown {
+            text: markdown.into(),
+            style: Style::default(),
+        });
+        self
+    }
+
+    /// Restyles the block that was pushed last: `Some` fields
+    /// override the launcher defaults, `None` keeps them. Chain it
+    /// after `.badge()`, `.hero()`, `.progress()`, `.markdown()`,
+    /// `.strip()`, or `.buttons()` — strips and button rows restyle
+    /// every card and button inside.
+    pub fn style(mut self, style: Style) -> Self {
+        if let Some(last) = self.blocks.last_mut() {
+            last.apply_style(style);
+        }
         self
     }
 
@@ -240,6 +258,7 @@ mod tests {
             .progress(1.4, Tone::Accent)
             .buttons(vec![PageButton {
                 action_id: "pause".into(),
+                style: Style::default(),
                 label: "Pause".into(),
                 tone: Tone::Neutral,
                 hotkey: Some("enter"),

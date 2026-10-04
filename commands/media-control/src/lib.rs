@@ -223,18 +223,21 @@ impl Command for MediaControlCommand {
                 action_id: "previous".into(),
                 label: "⏮ Previous".into(),
                 tone: Tone::Neutral,
+                style: corvo_core::Style::default(),
                 hotkey: None,
             },
             corvo_core::PageButton {
                 action_id: "toggle".into(),
                 label: "⏯ Play / Pause".into(),
                 tone: Tone::Accent,
+                style: corvo_core::Style::default(),
                 hotkey: Some("enter"),
             },
             corvo_core::PageButton {
                 action_id: "next".into(),
                 label: "⏭ Next".into(),
                 tone: Tone::Neutral,
+                style: corvo_core::Style::default(),
                 hotkey: None,
             },
         ]);

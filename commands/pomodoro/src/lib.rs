@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
-    Icon, PageButton, PageView, SearchContext, SearchResult, Tone,
+    Icon, PageButton, PageView, SearchContext, SearchResult, Style, Tone,
 };
 use corvo_ext::pages::PageBuilder;
 
@@ -343,18 +343,21 @@ fn build_page(query: &str) -> PageView {
                         label: if current.paused { "Resume" } else { "Pause" }.into(),
                         tone: Tone::Neutral,
                         hotkey: Some("enter"),
+                        style: Style::default(),
                     },
                     PageButton {
                         action_id: "skip".into(),
                         label: "Skip".into(),
                         tone: Tone::Neutral,
                         hotkey: None,
+                        style: Style::default(),
                     },
                     PageButton {
                         action_id: "stop".into(),
                         label: "Stop".into(),
                         tone: Tone::Destructive,
                         hotkey: None,
+                        style: Style::default(),
                     },
                 ]);
             if typed > 0 {
@@ -363,6 +366,7 @@ fn build_page(query: &str) -> PageView {
                     label: format!("Start Focus ({typed} min)"),
                     tone: Tone::Accent,
                     hotkey: None,
+                    style: Style::default(),
                 }]);
             }
             builder
@@ -380,6 +384,7 @@ fn build_page(query: &str) -> PageView {
                     } else {
                         Tone::Neutral
                     },
+                    style: Style::default(),
                     hotkey: None,
                 })
                 .collect();
@@ -389,6 +394,7 @@ fn build_page(query: &str) -> PageView {
                     label: format!("{custom} min"),
                     tone: Tone::Accent,
                     hotkey: None,
+                    style: Style::default(),
                 });
             }
             PageBuilder::new("Minutes for a custom focus, or leave empty for 25...")
@@ -406,12 +412,14 @@ fn build_page(query: &str) -> PageView {
                         label: format!("Start Focus ({minutes} min)"),
                         tone: Tone::Positive,
                         hotkey: None,
+                        style: Style::default(),
                     },
                     PageButton {
                         action_id: "break".into(),
                         label: "Break 5 min".into(),
                         tone: Tone::Neutral,
                         hotkey: None,
+                        style: Style::default(),
                     },
                 ])
         }

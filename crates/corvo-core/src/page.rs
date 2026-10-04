@@ -29,6 +29,36 @@ pub enum Refresh {
     Every(u64),
 }
 
+/// Optional per-block styling. The launcher's components are generic;
+/// the design is the extension's: every `Some` field overrides the
+/// theme default for that piece, every `None` field keeps it. Colors
+/// are sRGB values such as `0xff6600`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Style {
+    /// Primary text or accent color of the block.
+    pub color: Option<u32>,
+    /// Block background fill.
+    pub background: Option<u32>,
+    /// Primary text size in px (the hero value, the badge label, the
+    /// card value).
+    pub size: Option<u32>,
+    /// Glyph size in px, when the block draws one.
+    pub glyph_size: Option<u32>,
+    /// Fixed width in px (progress track).
+    pub width: Option<u32>,
+    /// Fixed height in px (progress track).
+    pub height: Option<u32>,
+    /// Bold primary text.
+    pub bold: Option<bool>,
+}
+
+impl Style {
+    /// The styled color, or the theme default.
+    pub fn color_or(self, default: u32) -> u32 {
+        self.color.unwrap_or(default)
+    }
+}
+
 /// One composed page: a vertical stack of blocks. Covers the
 /// big-number pages (countdown, timer), now-playing surfaces, and
 /// forecast strips without bespoke UI code.
@@ -46,6 +76,7 @@ pub struct Blocks {
 pub struct Badge {
     pub label: String,
     pub tone: Tone,
+    pub style: Style,
 }
 
 /// The dominant datum of a page: a small glyph, a headline, one very
@@ -57,6 +88,7 @@ pub struct Hero {
     pub value: String,
     pub subtitle: String,
     pub tone: Tone,
+    pub style: Style,
 }
 
 /// A determinate progress bar, 0.0 to 1.0.
@@ -64,6 +96,7 @@ pub struct Hero {
 pub struct Progress {
     pub fraction: f32,
     pub tone: Tone,
+    pub style: Style,
 }
 
 /// A row of small stat cards, like a three-day forecast strip.
@@ -73,6 +106,7 @@ pub struct StripCard {
     pub glyph: Option<&'static str>,
     pub value: String,
     pub subtitle: String,
+    pub style: Style,
 }
 
 /// One clickable control. `action_id` rides in the execute id
@@ -83,6 +117,7 @@ pub struct PageButton {
     pub action_id: String,
     pub label: String,
     pub tone: Tone,
+    pub style: Style,
     /// Shortcut tokens such as "cmd+enter"; the UI translates `cmd`
     /// to the platform's primary modifier.
     pub hotkey: Option<&'static str>,
@@ -94,9 +129,57 @@ pub enum Block {
     Hero(Hero),
     Progress(Progress),
     /// Rendered with the launcher's markdown subset.
-    Markdown(String),
+    Markdown { text: String, style: Style },
     Strip(Vec<StripCard>),
     Buttons(Vec<PageButton>),
+}
+
+impl Block {
+    /// Merges `style` into this block, `Some` fields winning. The
+    /// `PageBuilder::style` chain uses this to restyle the block that
+    /// was just pushed.
+    pub fn apply_style(&mut self, style: Style) {
+        match self {
+            Self::Badge(badge) => merge(&mut badge.style, style),
+            Self::Hero(hero) => merge(&mut hero.style, style),
+            Self::Progress(progress) => merge(&mut progress.style, style),
+            Self::Markdown { style: existing, .. } => merge(existing, style),
+            Self::Strip(cards) => {
+                for card in cards {
+                    merge(&mut card.style, style);
+                }
+            }
+            Self::Buttons(buttons) => {
+                for button in buttons {
+                    merge(&mut button.style, style);
+                }
+            }
+        }
+    }
+}
+
+fn merge(existing: &mut Style, incoming: Style) {
+    if incoming.color.is_some() {
+        existing.color = incoming.color;
+    }
+    if incoming.background.is_some() {
+        existing.background = incoming.background;
+    }
+    if incoming.size.is_some() {
+        existing.size = incoming.size;
+    }
+    if incoming.glyph_size.is_some() {
+        existing.glyph_size = incoming.glyph_size;
+    }
+    if incoming.width.is_some() {
+        existing.width = incoming.width;
+    }
+    if incoming.height.is_some() {
+        existing.height = incoming.height;
+    }
+    if incoming.bold.is_some() {
+        existing.bold = incoming.bold;
+    }
 }
 
 /// One structured metadata entry under a Detail page.
@@ -273,4 +356,63 @@ pub struct ExtensionManifest {
     pub icon: crate::Icon,
     pub categories: &'static [&'static str],
     pub commands: Vec<CommandSpec>,
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    #[test]
+    fn apply_style_merges_only_set_fields() {
+        let mut block = Block::Hero(Hero {
+            glyph: None,
+            title: "Focus".into(),
+            value: "24:59".into(),
+            subtitle: String::new(),
+            tone: Tone::Accent,
+            style: Style {
+                color: Some(0xf97316),
+                ..Style::default()
+            },
+        });
+        block.apply_style(Style {
+            size: Some(96),
+            color: Some(0xfbbf24),
+            ..Style::default()
+        });
+        let Block::Hero(hero) = &block else {
+            panic!("expected hero");
+        };
+        assert_eq!(hero.style.color, Some(0xfbbf24), "the later color wins");
+        assert_eq!(hero.style.size, Some(96));
+    }
+
+    #[test]
+    fn apply_style_cascades_into_strips_and_buttons() {
+        let mut block = Block::Strip(vec![StripCard {
+            title: "Sun".into(),
+            glyph: None,
+            value: "18°".into(),
+            subtitle: String::new(),
+            style: Style::default(),
+        }]);
+        block.apply_style(Style {
+            color: Some(0x38bdf8),
+            ..Style::default()
+        });
+        let Block::Strip(cards) = &block else {
+            panic!("expected strip");
+        };
+        assert_eq!(cards[0].style.color, Some(0x38bdf8));
+    }
+
+    #[test]
+    fn color_or_falls_back_to_the_theme() {
+        let styled = Style {
+            color: Some(0xff6600),
+            ..Style::default()
+        };
+        assert_eq!(styled.color_or(0x34d399), 0xff6600);
+        assert_eq!(Style::default().color_or(0x34d399), 0x34d399);
+    }
 }

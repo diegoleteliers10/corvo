@@ -18,7 +18,7 @@ pub mod shortcut;
 pub use page::{
     ArgumentKind, ArgumentSpec, Badge, Block, Blocks, CommandMode, CommandSpec, ExtensionManifest,
     FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageView, Progress, Refresh,
-    StripCard, Tone,
+    StripCard, Style, Tone,
 };
 pub use search::search_match_score;
 pub use shortcut::Primary;
