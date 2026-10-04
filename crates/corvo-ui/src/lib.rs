@@ -27,6 +27,9 @@ use smol::channel::Receiver;
 
 const WINDOW_WIDTH: f32 = 750.0;
 const WINDOW_HEIGHT: f32 = 475.0;
+/// Height for declarative extension pages, whose Blocks, Grids, and
+/// Forms carry more content than a results list.
+const EXTENSION_WINDOW_HEIGHT: f32 = 560.0;
 const COMPACT_WINDOW_HEIGHT: f32 = 58.0;
 const ROW_HEIGHT: f32 = 38.0;
 const ICON_SIZE: f32 = 26.0;
@@ -907,6 +910,9 @@ impl BrewPageMode {
 pub enum PaletteSize {
     Compact,
     Extended,
+    /// Declarative extension pages: rich Blocks, Grids, and Forms need
+    /// more room than the standard extended palette.
+    Tall,
 }
 
 impl PaletteSize {
@@ -914,6 +920,7 @@ impl PaletteSize {
         match self {
             Self::Compact => COMPACT_WINDOW_HEIGHT * size_scale,
             Self::Extended => WINDOW_HEIGHT * size_scale,
+            Self::Tall => EXTENSION_WINDOW_HEIGHT * size_scale,
         }
     }
 }
@@ -936,6 +943,8 @@ pub fn palette_size(
         && !filter_dropdown_open
     {
         PaletteSize::Compact
+    } else if matches!(page, LauncherPage::Extension(_)) {
+        PaletteSize::Tall
     } else {
         PaletteSize::Extended
     }
@@ -4704,24 +4713,23 @@ impl Launcher {
         let corvo_core::PageView::Blocks(blocks) = view else {
             return div().id("extension-blocks-fallback");
         };
-        let mut column = div()
-            .id("extension-blocks")
-            .flex_1()
-            .w_full()
+        // The scroller is top-aligned; the content child centers itself
+        // with auto margins, which collapse under overflow — a tall
+        // page scrolls instead of clipping both ends like
+        // justify-center would.
+        let mut inner = div()
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
             .gap_2()
             .px(px(24.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.extension_scroll_handle)
-            .pb(px(56.0));
+            .mt_auto()
+            .mb_auto();
         for block in &blocks.blocks {
             match block {
                 corvo_core::Block::Badge(badge) => {
                     let color = Self::tone_color(badge.tone);
-                    column = column.child(
+                    inner = inner.child(
                         div()
                             .id(SharedString::from(format!("badge-{}", badge.label)))
                             .px_2p5()
@@ -4746,15 +4754,17 @@ impl Launcher {
                             div().text_size(px(40.0)).child(glyph.to_string()),
                         );
                     }
-                    column = column.child(
+                    if !hero.value.is_empty() {
+                        hero_view = hero_view.child(
+                            div()
+                                .text_size(px(56.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(color))
+                                .child(hero.value.clone()),
+                        );
+                    }
+                    inner = inner.child(
                         hero_view
-                            .child(
-                                div()
-                                    .text_size(px(56.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(color))
-                                    .child(hero.value.clone()),
-                            )
                             .child(
                                 div()
                                     .text_size(px(14.0))
@@ -4773,7 +4783,7 @@ impl Launcher {
                     let color = Self::tone_color(progress.tone);
                     let bar_width = 340.0;
                     let fill = (bar_width * (1.0 - progress.fraction)).max(0.0);
-                    column = column.child(
+                    inner = inner.child(
                         div()
                             .id("extension-progress")
                             .w(px(bar_width))
@@ -4790,7 +4800,7 @@ impl Launcher {
                     );
                 }
                 corvo_core::Block::Markdown(markdown) => {
-                    column = column.child(
+                    inner = inner.child(
                         div()
                             .id(SharedString::from(format!("md-{}", markdown.len())))
                             .max_w(px(560.0))
@@ -4844,7 +4854,7 @@ impl Launcher {
                                 ),
                         );
                     }
-                    column = column.child(strip);
+                    inner = inner.child(strip);
                 }
                 corvo_core::Block::Buttons(buttons) => {
                     let mut row = div()
@@ -4883,11 +4893,21 @@ impl Launcher {
                                 )),
                         );
                     }
-                    column = column.child(row);
+                    inner = inner.child(row);
                 }
             }
         }
-        column
+        // The scroller wraps the self-centering content.
+        div()
+            .id("extension-blocks")
+            .flex_1()
+            .w_full()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&self.extension_scroll_handle)
+            .pb(px(56.0))
+            .child(inner)
     }
 
     fn detail_page_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -11358,6 +11378,20 @@ mod tests {
         assert_eq!(
             palette_size(true, false, LauncherPage::Root, "", false, false, true),
             PaletteSize::Extended
+        );
+    }
+
+    #[test]
+    fn an_extension_page_is_tall() {
+        // Declarative pages carry hero, strip, and form content; they
+        // get the tall palette and are never compact.
+        assert_eq!(
+            palette_size(true, false, LauncherPage::Extension("countdown"), "", false, false, false),
+            PaletteSize::Tall
+        );
+        assert_eq!(
+            palette_size(true, false, LauncherPage::Extension("countdown"), "2026-12-25", false, false, false),
+            PaletteSize::Tall
         );
     }
 

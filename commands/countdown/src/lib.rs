@@ -269,7 +269,7 @@ impl Command for CountdownCommand {
                 builder = builder.hero(
                     Some("📅"),
                     "Countdown",
-                    String::from("—"),
+                    String::new(),
                     "Type a date: 2026-12-25, Dec 25, or 25 December",
                     Tone::Neutral,
                 );
