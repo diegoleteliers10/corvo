@@ -1282,6 +1282,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-ext",
  "corvo-platform",
  "smol",
 ]
@@ -1331,6 +1332,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-ext",
  "corvo-platform",
  "smol",
 ]
@@ -1389,12 +1391,9 @@ dependencies = [
  "corvo-clipboard-manager",
  "corvo-config",
  "corvo-core",
- "corvo-media-control",
  "corvo-notes",
  "corvo-platform",
- "corvo-pomodoro",
  "corvo-system-actions",
- "corvo-weather",
  "corvo-web-search-fallback",
  "corvo-window-management",
  "gpui",
@@ -1414,6 +1413,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "corvo-core",
+ "corvo-ext",
  "serde_json",
  "smol",
  "ureq",

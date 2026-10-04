@@ -76,11 +76,11 @@ pub struct StripCard {
 }
 
 /// One clickable control. `action_id` rides in the execute id
-/// `{command-id}:page:{action_id}`; no data may be embedded here —
-/// carry state through the command itself.
+/// `{command-id}:page:{action_id}`; the page rebuilds every render,
+/// so the id may carry per-render data such as a chip's value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageButton {
-    pub action_id: &'static str,
+    pub action_id: String,
     pub label: String,
     pub tone: Tone,
     /// Shortcut tokens such as "cmd+enter"; the UI translates `cmd`

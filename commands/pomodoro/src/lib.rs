@@ -4,21 +4,28 @@
 //! Routing follows the corvo page model: root search exposes quick
 //! commands (start, pause, stop) with the live countdown as a result
 //! row, `pomodoro 40` starts a custom focus immediately, and the
-//! dedicated page (`pomodoro-page:` queries) shows the same controls.
+//! declarative page (Blocks: badge, hero countdown, progress, chip
+//! buttons) renders from `Command::page` with a one-second refresh —
+//! the launcher interprets it, this crate only owns state.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
-    Icon, SearchContext, SearchResult,
+    Icon, PageButton, PageView, SearchContext, SearchResult, Tone,
 };
+use corvo_ext::pages::PageBuilder;
 
 const DEFAULT_WORK: Duration = Duration::from_secs(25 * 60);
 const DEFAULT_BREAK: Duration = Duration::from_secs(5 * 60);
 
 /// Longest interval the parser accepts, in minutes.
 const MAX_MINUTES: u64 = 600;
+
+/// The preset chips the idle page offers.
+const PRESETS: [u64; 4] = [15, 25, 45, 60];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -265,6 +272,205 @@ fn parse_minutes(input: &str) -> Option<u64> {
         .filter(|minutes| (1..=MAX_MINUTES).contains(minutes))
 }
 
+/// The highlighted preset chip on the idle page. Crate state, so the
+/// declarative page can highlight it and Enter can start it.
+fn selected_minutes() -> &'static AtomicU64 {
+    static SELECTED: OnceLock<AtomicU64> = OnceLock::new();
+    SELECTED.get_or_init(|| AtomicU64::new(DEFAULT_WORK.as_secs() / 60))
+}
+
+/// The custom length typed into the page, remembered from the last
+/// render so `page:enter` can start it.
+fn typed_minutes() -> &'static AtomicU64 {
+    static TYPED: OnceLock<AtomicU64> = OnceLock::new();
+    TYPED.get_or_init(|| AtomicU64::new(0))
+}
+
+/// The idle page's target length: the typed custom length wins, then
+/// the selected chip, then 25.
+fn idle_minutes() -> u64 {
+    let typed = typed_minutes().load(Ordering::Relaxed);
+    if typed > 0 {
+        typed
+    } else {
+        selected_minutes().load(Ordering::Relaxed)
+    }
+}
+
+/// The minutes a page start action uses.
+fn start_minutes() -> u64 {
+    idle_minutes()
+}
+
+fn hero_tone(phase: Phase) -> Tone {
+    match phase {
+        Phase::Focus => Tone::Warning,
+        Phase::Break => Tone::Positive,
+    }
+}
+
+/// Builds the declarative page: a running timer shows badge, hero
+/// countdown, progress, and transport buttons; the idle page shows
+/// the preset chips and start buttons. `query` is the optional custom
+/// length typed into the search bar.
+fn build_page(query: &str) -> PageView {
+    let typed = parse_minutes(query).unwrap_or(0);
+    typed_minutes().store(typed, Ordering::Relaxed);
+    let builder = match snapshot() {
+        Some(current) => {
+            let elapsed = 1.0 - current.remaining.as_secs_f32() / current.duration.as_secs_f32();
+            let mut builder = PageBuilder::new("Minutes for a custom focus, or leave empty for 25...")
+                .ticking(1)
+                .badge(
+                    if current.paused {
+                        format!("{} · PAUSED", current.phase_label())
+                    } else {
+                        current.phase_label().to_string()
+                    },
+                    Tone::Neutral,
+                )
+                .hero(
+                    None,
+                    current.phase_label(),
+                    format_remaining(current.remaining),
+                    String::new(),
+                    hero_tone(current.phase),
+                )
+                .progress(elapsed, hero_tone(current.phase))
+                .buttons(vec![
+                    PageButton {
+                        action_id: if current.paused { "resume".into() } else { "pause".into() },
+                        label: if current.paused { "Resume" } else { "Pause" }.into(),
+                        tone: Tone::Neutral,
+                        hotkey: Some("enter"),
+                    },
+                    PageButton {
+                        action_id: "skip".into(),
+                        label: "Skip".into(),
+                        tone: Tone::Neutral,
+                        hotkey: None,
+                    },
+                    PageButton {
+                        action_id: "stop".into(),
+                        label: "Stop".into(),
+                        tone: Tone::Destructive,
+                        hotkey: None,
+                    },
+                ]);
+            if typed > 0 {
+                builder = builder.buttons(vec![PageButton {
+                    action_id: "start".into(),
+                    label: format!("Start Focus ({typed} min)"),
+                    tone: Tone::Accent,
+                    hotkey: None,
+                }]);
+            }
+            builder
+        }
+        None => {
+            let minutes = idle_minutes();
+            let selected = selected_minutes().load(Ordering::Relaxed);
+            let mut chips: Vec<PageButton> = PRESETS
+                .iter()
+                .map(|preset| PageButton {
+                    action_id: format!("chip:{preset}"),
+                    label: format!("{preset} min"),
+                    tone: if *preset == selected {
+                        Tone::Accent
+                    } else {
+                        Tone::Neutral
+                    },
+                    hotkey: None,
+                })
+                .collect();
+            if let Some(custom) = parse_minutes(query) {
+                chips.push(PageButton {
+                    action_id: format!("chip:{custom}"),
+                    label: format!("{custom} min"),
+                    tone: Tone::Accent,
+                    hotkey: None,
+                });
+            }
+            PageBuilder::new("Minutes for a custom focus, or leave empty for 25...")
+                .hero(
+                    None,
+                    "Focus",
+                    format!("{minutes:02}:00"),
+                    "Press Enter to start",
+                    Tone::Accent,
+                )
+                .buttons(chips)
+                .buttons(vec![
+                    PageButton {
+                        action_id: "start".into(),
+                        label: format!("Start Focus ({minutes} min)"),
+                        tone: Tone::Positive,
+                        hotkey: None,
+                    },
+                    PageButton {
+                        action_id: "break".into(),
+                        label: "Break 5 min".into(),
+                        tone: Tone::Neutral,
+                        hotkey: None,
+                    },
+                ])
+        }
+    };
+    builder.build()
+}
+
+/// Runs one `pomodoro:page:{action}` from the declarative page.
+/// Returns the toast message, or `Err(NotFound)` for unknown actions.
+fn run_page_action(action: &str) -> Result<String, CommandError> {
+    if action == "enter" {
+        return match snapshot() {
+            Some(current) if current.paused => {
+                resume().map(|phase| format!("{} resumed", phase.label())).ok_or(CommandError::NotFound)
+            }
+            Some(_) => {
+                pause().then(|| "Timer paused".to_string()).ok_or(CommandError::NotFound)
+            }
+            None => {
+                let minutes = start_minutes();
+                start(Phase::Focus, Duration::from_secs(minutes * 60));
+                Ok(format!("Focus started — {minutes} min"))
+            }
+        };
+    }
+    if let Some(minutes) = action.strip_prefix("chip:") {
+        if let Ok(minutes) = minutes.parse::<u64>() {
+            selected_minutes().store(minutes, Ordering::Relaxed);
+            return Ok(format!("Selected {minutes} min"));
+        }
+        return Err(CommandError::NotFound);
+    }
+    if action == "start" {
+        let minutes = start_minutes();
+        start(Phase::Focus, Duration::from_secs(minutes * 60));
+        return Ok(format!("Focus started — {minutes} min"));
+    }
+    if action == "break" {
+        let minutes = DEFAULT_BREAK.as_secs() / 60;
+        start(Phase::Break, Duration::from_secs(minutes * 60));
+        return Ok(format!("Break started — {minutes} min"));
+    }
+    match action {
+        "pause" => pause()
+            .then(|| "Timer paused".to_string())
+            .ok_or(CommandError::NotFound),
+        "resume" => resume()
+            .map(|phase| format!("{} resumed", phase.label()))
+            .ok_or(CommandError::NotFound),
+        "skip" => skip()
+            .then(|| "Interval skipped".to_string())
+            .ok_or(CommandError::NotFound),
+        "stop" => stop()
+            .then(|| "Timer stopped".to_string())
+            .ok_or(CommandError::NotFound),
+        _ => Err(CommandError::NotFound),
+    }
+}
+
 fn format_remaining(remaining: Duration) -> String {
     let total = remaining.as_secs();
     format!("{:02}:{:02}", total / 60, total % 60)
@@ -391,6 +597,34 @@ impl Command for PomodoroCommand {
         60
     }
 
+    fn manifest(&self) -> corvo_core::ExtensionManifest {
+        corvo_core::ExtensionManifest {
+            name: "pomodoro",
+            title: "Pomodoro",
+            description: "Focus and break timers with desktop notifications",
+            icon: action_icon("status"),
+            categories: &["Productivity"],
+            commands: vec![corvo_core::CommandSpec {
+                name: "timer",
+                title: "Pomodoro Timer",
+                description: "Start a focus or break interval, or pause, resume, skip, and stop the running one",
+                mode: corvo_core::CommandMode::View,
+                icon: Some(action_icon("status")),
+                arguments: vec![corvo_core::ArgumentSpec {
+                    name: "minutes",
+                    placeholder: "Minutes for a custom focus, or leave empty for 25...",
+                    kind: corvo_core::ArgumentKind::Text,
+                    required: false,
+                }],
+                keywords: keywords(),
+            }],
+        }
+    }
+
+    fn page(&self, query: &str) -> Option<PageView> {
+        Some(build_page(query))
+    }
+
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         // Dedicated page: the typed input is an optional custom duration.
         if let Some(page_input) = query.strip_prefix("pomodoro-page:") {
@@ -429,6 +663,11 @@ impl Command for PomodoroCommand {
         let Some(key) = result_id.strip_prefix("pomodoro:") else {
             return Err(CommandError::NotFound);
         };
+        // Declarative page actions funnel here.
+        if let Some(action) = key.strip_prefix("page:") {
+            let message = run_page_action(action)?;
+            return Ok(Action::ShowToast(message));
+        }
         let message = if key == "open" {
             return Ok(Action::ShowToast("Pomodoro Timer".into()));
         } else if key == "status" {

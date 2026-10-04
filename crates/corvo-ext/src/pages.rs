@@ -239,7 +239,7 @@ mod tests {
             .hero(None, "Focus", "24:59", "Stop at 15:00", Tone::Accent)
             .progress(1.4, Tone::Accent)
             .buttons(vec![PageButton {
-                action_id: "pause",
+                action_id: "pause".into(),
                 label: "Pause".into(),
                 tone: Tone::Neutral,
                 hotkey: Some("enter"),

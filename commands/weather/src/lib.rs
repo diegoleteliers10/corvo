@@ -9,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use corvo_core::{
-    phosphor_svgs, Action, Command, CommandError, ExecutionContext, Icon, SearchContext,
-    SearchResult,
+    phosphor_svgs, Action, Command, CommandError, ExecutionContext, Icon, PageView, SearchContext,
+    SearchResult, Tone,
 };
 
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -251,6 +251,88 @@ impl Command for WeatherCommand {
 
     fn priority(&self) -> u8 {
         60
+    }
+
+    fn manifest(&self) -> corvo_core::ExtensionManifest {
+        corvo_core::ExtensionManifest {
+            name: "weather",
+            title: "Weather",
+            description: "Current conditions and a three-day forecast from wttr.in",
+            icon: Icon::Svg(phosphor_svgs::style::regular::CLOUD_SUN),
+            categories: &["Productivity"],
+            commands: vec![corvo_core::CommandSpec {
+                name: "forecast",
+                title: "Weather",
+                description: "Show current conditions and a three-day forecast, optionally for a city",
+                mode: corvo_core::CommandMode::View,
+                icon: Some(Icon::Svg(phosphor_svgs::style::regular::CLOUD_SUN)),
+                arguments: vec![corvo_core::ArgumentSpec {
+                    name: "city",
+                    placeholder: "City name, or leave empty for your location...",
+                    kind: corvo_core::ArgumentKind::Text,
+                    required: false,
+                }],
+                keywords: &["weather", "forecast", "clima", "tiempo"],
+            }],
+        }
+    }
+
+    /// The declarative weather page: hero conditions plus the
+    /// three-day strip. Runs through the UI's unblock executor, so it
+    /// may wait on the network when the cache is cold.
+    fn page(&self, query: &str) -> Option<PageView> {
+        let city = query.trim();
+        let weather = match cached(Some(city).filter(|city| !city.is_empty())) {
+            Some(weather) => weather,
+            None => match fetch_cached(Some(city).filter(|city| !city.is_empty())) {
+                Ok(weather) => weather,
+                Err(error) => {
+                    return Some(
+                        corvo_ext::pages::PageBuilder::new("City name, or leave empty for your location...")
+                            .hero(
+                                Some("🌧️"),
+                                "Weather",
+                                String::from("—"),
+                                "Could not load the forecast",
+                                Tone::Destructive,
+                            )
+                            .markdown(format!(
+                                "# Could not load the forecast\n\n{error}\n\n- Check your connection\n- Reopen the page to retry"
+                            ))
+                            .build(),
+                    );
+                }
+            },
+        };
+        let strip = weather
+            .days
+            .iter()
+            .map(|day| corvo_core::StripCard {
+                title: day.label.clone(),
+                glyph: Some(day.glyph),
+                value: format!("{}° / {}°", day.max_c, day.min_c),
+                subtitle: {
+                    let cut: String = day.description.chars().take(14).collect();
+                    cut
+                },
+            })
+            .collect();
+        Some(
+            corvo_ext::pages::PageBuilder::new("City name, or leave empty for your location...")
+                .badge(weather.city.clone(), Tone::Neutral)
+                .hero(
+                    Some(weather.glyph),
+                    "Now",
+                    format!("{}°", weather.temperature_c),
+                    format!(
+                        "{} · feels {}° · {}% humidity · {} km/h",
+                        weather.description, weather.feels_like_c, weather.humidity, weather.wind_kph
+                    ),
+                    Tone::Accent,
+                )
+                .strip(strip)
+                .build(),
+        )
     }
 
     async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {

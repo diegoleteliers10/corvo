@@ -7,8 +7,8 @@
 //! search immediately; the dedicated page shows the now-playing view.
 
 use corvo_core::{
-    phosphor_svgs, Action, Command, CommandError, ExecutionContext, Icon, SearchContext,
-    SearchResult,
+    phosphor_svgs, Action, Command, CommandError, ExecutionContext, Icon, PageView, SearchContext,
+    SearchResult, Tone,
 };
 pub use corvo_platform::NowPlaying;
 
@@ -129,6 +129,118 @@ impl Command for MediaControlCommand {
         60
     }
 
+    fn manifest(&self) -> corvo_core::ExtensionManifest {
+        corvo_core::ExtensionManifest {
+            name: "media-control",
+            title: "Media Control",
+            description: "Play, pause, and skip the active media player",
+            icon: Icon::Svg(phosphor_svgs::style::regular::MUSIC_NOTES),
+            categories: &["Music"],
+            commands: vec![
+                corvo_core::CommandSpec {
+                    name: "now-playing",
+                    title: "Media Control",
+                    description: "Open the now-playing page with transport controls",
+                    mode: corvo_core::CommandMode::View,
+                    icon: Some(Icon::Svg(phosphor_svgs::style::regular::MUSIC_NOTES)),
+                    arguments: Vec::new(),
+                    keywords: &["media", "music", "spotify", "track"],
+                },
+                corvo_core::CommandSpec {
+                    name: "toggle",
+                    title: "Play / Pause",
+                    description: "Toggle playback on the active player",
+                    mode: corvo_core::CommandMode::NoView,
+                    icon: Some(Icon::Svg(phosphor_svgs::style::regular::PLAY)),
+                    arguments: Vec::new(),
+                    keywords: &["play", "pause"],
+                },
+                corvo_core::CommandSpec {
+                    name: "next",
+                    title: "Next Track",
+                    description: "Skip to the next track",
+                    mode: corvo_core::CommandMode::NoView,
+                    icon: Some(Icon::Svg(phosphor_svgs::style::regular::SKIP_FORWARD)),
+                    arguments: Vec::new(),
+                    keywords: &["next"],
+                },
+                corvo_core::CommandSpec {
+                    name: "previous",
+                    title: "Previous Track",
+                    description: "Return to the previous track",
+                    mode: corvo_core::CommandMode::NoView,
+                    icon: Some(Icon::Svg(phosphor_svgs::style::regular::SKIP_BACK)),
+                    arguments: Vec::new(),
+                    keywords: &["prev", "previous"],
+                },
+            ],
+        }
+    }
+
+    /// The declarative now-playing page: badge, hero track, and the
+    /// transport row. One OS read per render through the unblock
+    /// executor.
+    fn page(&self, _query: &str) -> Option<PageView> {
+        let playing = fetch_now_playing();
+        let mut builder =
+            corvo_ext::pages::PageBuilder::new("Now playing...")
+                .ticking(5);
+        match playing {
+            Some(now) => {
+                builder = builder
+                    .badge(
+                        format!(
+                            "{} · {}",
+                            if now.playing { "PLAYING" } else { "PAUSED" },
+                            now.app
+                        ),
+                        if now.playing {
+                            Tone::Positive
+                        } else {
+                            Tone::Neutral
+                        },
+                    )
+                    .hero(
+                        Some("🎧"),
+                        now.title,
+                        String::new(),
+                        now.artist,
+                        Tone::Accent,
+                    );
+            }
+            None => {
+                builder = builder.hero(
+                    Some("🎧"),
+                    "Media Control",
+                    String::new(),
+                    "No player is running",
+                    Tone::Neutral,
+                );
+            }
+        }
+        builder = builder.buttons(vec![
+            corvo_core::PageButton {
+                action_id: "previous".into(),
+                label: "⏮ Previous".into(),
+                tone: Tone::Neutral,
+                hotkey: None,
+            },
+            corvo_core::PageButton {
+                action_id: "toggle".into(),
+                label: "⏯ Play / Pause".into(),
+                tone: Tone::Accent,
+                hotkey: Some("enter"),
+            },
+            corvo_core::PageButton {
+                action_id: "next".into(),
+                label: "⏭ Next".into(),
+                tone: Tone::Neutral,
+                hotkey: None,
+            },
+        ]);
+        Some(builder.build())
+    }
+
     async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -177,6 +289,13 @@ impl Command for MediaControlCommand {
         };
         if key == "open" {
             return Ok(Action::ShowToast("Media Control".into()));
+        }
+        if let Some(action) = key.strip_prefix("page:") {
+            let action = action.to_owned();
+            let sent = smol::unblock(move || control(&action)).await;
+            return sent
+                .then(|| Action::ShowToast("Media control sent".into()))
+                .ok_or(CommandError::Platform("no player is running".into()));
         }
         if key == "status" {
             let summary = cached_now_playing()

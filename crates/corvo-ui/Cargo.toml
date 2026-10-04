@@ -11,10 +11,7 @@ corvo-clipboard-manager = { path = "../../commands/clipboard-manager" }
 corvo-config = { workspace = true }
 corvo-core = { workspace = true }
 corvo-platform = { workspace = true }
-corvo-pomodoro = { path = "../../commands/pomodoro" }
-corvo-weather = { path = "../../commands/weather" }
 corvo-notes = { path = "../../commands/notes" }
-corvo-media-control = { path = "../../commands/media-control" }
 corvo-browser-tabs = { path = "../../commands/browser-tabs" }
 corvo-system-actions = { path = "../../commands/system-actions" }
 corvo-web-search-fallback = { path = "../../commands/web-search-fallback" }

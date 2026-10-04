@@ -44,24 +44,7 @@ const COLOR_BACKGROUND: u32 = 0x17181ae6;
 const COLOR_DIVIDER: u32 = 0x282a2d;
 const COLOR_ROW_SELECTED: u32 = 0x113c30;
 const COLOR_ACCENT: u32 = 0x34d399;
-/// Pomodoro phase colors: warm for focus, mint for break.
-const POMODORO_FOCUS_COLOR: u32 = 0xf97316;
-const POMODORO_BREAK_COLOR: u32 = 0x34d399;
-/// Focus length presets on the pomodoro page, minutes.
-const POMODORO_PRESETS: &[u64] = &[15, 25, 45, 60];
 
-fn format_pomodoro_time(total_seconds: u64) -> String {
-    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
-}
-
-fn truncate_for_display(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        text.to_owned()
-    } else {
-        let cut: String = text.chars().take(limit).collect();
-        format!("{cut}…")
-    }
-}
 const COLOR_PILL: u32 = 0x222426;
 const COLOR_KEYCAP: u32 = 0x2d3034;
 const COLOR_MENU: u32 = 0x1c1e20f0;
@@ -880,15 +863,16 @@ pub enum LauncherPage {
     Files,
     Brew,
     Text,
-    Pomodoro,
-    Weather,
     Notes,
-    Media,
     /// One page per browser extension; the id picks the browser.
     Browser(corvo_browser_tabs::BrowserId),
     Ports,
     Processes,
     Uninstaller,
+    /// A declarative extension page: the command id names the
+    /// extension, and the view comes from `Command::page`. Pomodoro,
+    /// Weather, and Media Control render through this variant too.
+    Extension(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -979,6 +963,49 @@ enum RootFlatItem {
     Row(usize),
 }
 
+/// In-progress form input on an extension Form page: one text value
+/// and caret per text field, one boolean per checkbox, one selected
+/// option per select, plus the focused field index.
+#[derive(Default)]
+struct ExtensionFormState {
+    focused: usize,
+    text_values: Vec<String>,
+    text_carets: Vec<usize>,
+    checks: Vec<bool>,
+    selections: Vec<usize>,
+}
+
+impl ExtensionFormState {
+    fn reset(&mut self, fields: &[corvo_core::FormField]) {
+        self.focused = 0;
+        self.text_values = fields
+            .iter()
+            .map(|field| match field {
+                corvo_core::FormField::Text { default, .. } => default.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        self.text_carets = self.text_values.iter().map(|value| value.chars().count()).collect();
+        self.checks = fields
+            .iter()
+            .map(|field| match field {
+                corvo_core::FormField::Checkbox { default, .. } => *default,
+                _ => false,
+            })
+            .collect();
+        self.selections = fields
+            .iter()
+            .map(|field| match field {
+                corvo_core::FormField::Select { options, default, .. } => options
+                    .iter()
+                    .position(|(value, _)| value == default)
+                    .unwrap_or(0),
+                _ => 0,
+            })
+            .collect();
+    }
+}
+
 /// The list header of one section: the section label, or the default
 /// group label for unsectioned rows.
 fn section_header(section: Option<&str>) -> SharedString {
@@ -986,6 +1013,74 @@ fn section_header(section: Option<&str>) -> SharedString {
         .map(SharedString::from)
         .unwrap_or_else(|| SharedString::from("Results"))
 }
+
+/// Whether two page views have the same interactive shape: the same
+/// kind, and for Forms the same fields. A shape change resets token
+/// state; a data refresh (the ticking countdown) must not.
+fn same_page_shape(current: &corvo_core::PageView, next: &corvo_core::PageView) -> bool {
+    match (current, next) {
+        (corvo_core::PageView::Blocks(_), corvo_core::PageView::Blocks(_)) => true,
+        (
+            corvo_core::PageView::Form { fields, .. },
+            corvo_core::PageView::Form {
+                fields: next_fields, ..
+            },
+        ) => {
+            fields.len() == next_fields.len()
+                && fields
+                    .iter()
+                    .zip(next_fields.iter())
+                    .all(|(field, next_field)| field.id() == next_field.id())
+        }
+        _ => std::mem::discriminant(current) == std::mem::discriminant(next),
+    }
+}
+
+/// Minimal inline markdown for Blocks and Detail surfaces: headings,
+/// **bold**, *italic*, `code`, and paragraphs. Line-level structure
+/// only; the full renderer stays in the note editor.
+fn render_inline_markdown(markdown: &str) -> Div {
+    let mut column = div().flex().flex_col().gap_1p5();
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (size, weight, text) = if let Some(heading) = trimmed.strip_prefix("### ") {
+            (px(13.0), FontWeight::BOLD, heading.to_string())
+        } else if let Some(heading) = trimmed.strip_prefix("## ") {
+            (px(15.0), FontWeight::BOLD, heading.to_string())
+        } else if let Some(heading) = trimmed.strip_prefix("# ") {
+            (px(17.0), FontWeight::BOLD, heading.to_string())
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            (px(13.0), FontWeight::NORMAL, format!("• {}", &trimmed[2..]))
+        } else {
+            (px(13.0), FontWeight::NORMAL, trimmed.to_string())
+        };
+        column = column.child(
+            div()
+                .text_size(size)
+                .font_weight(weight)
+                .text_color(rgb(COLOR_TEXT))
+                .child(text),
+        );
+    }
+    column
+}
+
+    /// Percent-encodes one form value for the submit id.
+    fn encode_form_value(value: &str) -> String {
+        let mut encoded = String::new();
+        for byte in value.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char)
+                }
+                _ => encoded.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        encoded
+    }
 
 #[derive(Clone, Debug)]
 enum ClipboardFlatItem {
@@ -1049,17 +1144,14 @@ pub struct Launcher {
     port_argument: String,
     port_cursor_idx: usize,
     port_input_active: bool,
-    /// Whether the 1 Hz pomodoro countdown pump is in flight; the pump
-    /// re-renders the launcher once per second while a timer runs.
-    pomodoro_pump_running: bool,
-    /// Index of the highlighted pomodoro preset (idle) or control
-    /// button (running) on the pomodoro page.
-    pomodoro_selection: usize,
-    /// The forecast shown on the weather page.
-    weather_data: Option<corvo_weather::Weather>,
-    weather_error: Option<String>,
-    /// What the media page last read from the active player.
-    media_playing: Option<corvo_media_control::NowPlaying>,
+    /// The declarative view the extension page currently renders,
+    /// plus the token state the interactive views need.
+    extension_view: Option<corvo_core::PageView>,
+    extension_pump_running: bool,
+    /// Highlighted button on a Blocks page; ←/→ cycle it.
+    extension_button_focus: usize,
+    /// Focused field and per-field state on a Form page.
+    extension_form: ExtensionFormState,
     cursor_visible: bool,
     results: Vec<SearchResult>,
     selected: usize,
@@ -1577,11 +1669,10 @@ impl Launcher {
             port_argument: String::new(),
             port_cursor_idx: 0,
             port_input_active: false,
-            pomodoro_pump_running: false,
-            pomodoro_selection: 1,
-            weather_data: None,
-            weather_error: None,
-            media_playing: None,
+            extension_view: None,
+            extension_pump_running: false,
+            extension_button_focus: 0,
+            extension_form: ExtensionFormState::default(),
             cursor_visible: true,
             results: cached_initial_results(),
             selected: 0,
@@ -1636,11 +1727,11 @@ impl Launcher {
             LauncherPage::Files => launcher.refresh_files(cx),
             LauncherPage::Brew => launcher.refresh_brew(cx),
             LauncherPage::Text => launcher.refresh_text(cx),
-            LauncherPage::Pomodoro => launcher.refresh_pomodoro(cx),
-            LauncherPage::Weather => launcher.refresh_weather(cx),
             LauncherPage::Notes => launcher.refresh_notes(cx),
-            LauncherPage::Media => launcher.refresh_media(cx),
             LauncherPage::Browser(browser) => launcher.refresh_browser(browser, cx),
+            LauncherPage::Extension(command_id) => {
+                launcher.refresh_extension(command_id, false, cx)
+            }
             LauncherPage::Ports => launcher.refresh_ports(cx),
             LauncherPage::Processes => launcher.refresh_processes(cx),
             LauncherPage::Uninstaller => {}
@@ -1893,11 +1984,11 @@ impl Launcher {
             LauncherPage::Files => self.refresh_files(cx),
             LauncherPage::Brew => self.refresh_brew(cx),
             LauncherPage::Text => self.refresh_text(cx),
-            LauncherPage::Pomodoro => self.refresh_pomodoro(cx),
-            LauncherPage::Weather => self.refresh_weather(cx),
             LauncherPage::Notes => self.refresh_notes(cx),
-            LauncherPage::Media => self.refresh_media(cx),
             LauncherPage::Browser(browser) => self.refresh_browser(browser, cx),
+            LauncherPage::Extension(command_id) => {
+                self.refresh_extension(command_id, false, cx)
+            }
             LauncherPage::Ports => self.refresh_ports(cx),
             LauncherPage::Processes => self.refresh_processes(cx),
             LauncherPage::Uninstaller => {
@@ -1947,11 +2038,9 @@ impl Launcher {
             || self.page == LauncherPage::Files
             || self.page == LauncherPage::Brew
             || self.page == LauncherPage::Text
-            || self.page == LauncherPage::Pomodoro
-            || self.page == LauncherPage::Weather
             || self.page == LauncherPage::Notes
-            || self.page == LauncherPage::Media
             || matches!(self.page, LauncherPage::Browser(_))
+            || matches!(self.page, LauncherPage::Extension(_))
             || self.page == LauncherPage::Ports
             || self.page == LauncherPage::Processes
         {
@@ -2320,28 +2409,72 @@ impl Launcher {
             }
         }
 
-        // Pomodoro page: arrows move the chip or button highlight while
-        // the input is empty; up/down have no list to move here.
-        if self.page == LauncherPage::Pomodoro && mods.is_unmodified() {
-            if key == "up" || key == "down" {
-                cx.stop_propagation();
-                return;
-            }
-            if self.query.is_empty() && (key == "left" || key == "right") {
-                let options = if corvo_pomodoro::snapshot().is_some() {
-                    3
-                } else {
-                    POMODORO_PRESETS.len()
-                };
-                let options = options.max(1);
-                self.pomodoro_selection = if key == "right" {
-                    (self.pomodoro_selection + 1) % options
-                } else {
-                    (self.pomodoro_selection + options - 1) % options
-                };
-                cx.notify();
-                cx.stop_propagation();
-                return;
+        // Declarative extension pages: ←/→ cycle the highlighted
+        // button; ↑/↓ move the form-field focus; typing edits the
+        // focused form field below via the default text path.
+        if let LauncherPage::Extension(command_id) = self.page {
+            if mods.is_unmodified() {
+                let view = self.extension_view.clone();
+                let button_count = view.as_ref().map_or(0, |view| match view {
+                    corvo_core::PageView::Blocks(blocks) => blocks
+                        .blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            corvo_core::Block::Buttons(buttons) => Some(buttons.len()),
+                            _ => None,
+                        })
+                        .sum(),
+                    _ => 0,
+                });
+                if button_count > 0 && self.query.is_empty() && (key == "left" || key == "right") {
+                    self.extension_button_focus = if key == "right" {
+                        (self.extension_button_focus + 1) % button_count
+                    } else {
+                        (self.extension_button_focus + button_count - 1) % button_count
+                    };
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "up" || key == "down" {
+                    match self.extension_view.as_ref() {
+                        Some(corvo_core::PageView::Form { fields, .. }) => {
+                            let count = fields.len().max(1);
+                            self.extension_form.focused = if key == "down" {
+                                (self.extension_form.focused + 1) % count
+                            } else {
+                                (self.extension_form.focused + count - 1) % count
+                            };
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                        Some(corvo_core::PageView::Grid { .. }) => {
+                            // Grid selection follows the click target
+                            // for now; keep up/down inert so the page
+                            // does not scroll the window.
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                if key == "enter" {
+                    match self.extension_view.as_ref() {
+                        Some(corvo_core::PageView::Form { fields, .. }) => {
+                            let encoded = self.encode_form_values(fields);
+                            self.run_extension_action(command_id, format!("form:{encoded}"), cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        Some(corvo_core::PageView::Blocks(_)) if self.query.is_empty() => {
+                            self.run_extension_action(command_id, "enter".to_owned(), cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -2371,7 +2504,8 @@ impl Launcher {
                     // The visual pages have no result rows, so there is
                     // no actions menu to open on them; the burger is the
                     // only surface there.
-                    if !matches!(self.page, LauncherPage::Pomodoro | LauncherPage::Weather) {
+                    let is_visual = matches!(self.page, LauncherPage::Extension(_));
+                    if !is_visual {
                         self.toggle_actions(cx);
                     }
                     cx.stop_propagation();
@@ -2595,6 +2729,35 @@ impl Launcher {
             }
         }
 
+        // Declarative Form pages: a focused text field consumes every
+        // text-editing key — characters, backspace, delete, caret
+        // moves, and paste — so the page query stays untouched.
+        if matches!(self.page, LauncherPage::Extension(_)) {
+            if mods.is_command_alone() && key == "v" {
+                if let Some(text) = corvo_platform::read_clipboard_text() {
+                    let clean: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                    if !clean.is_empty() && self.extension_form_edit("text", Some(&clean)) {
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+            }
+            if mods.is_unmodified() {
+                let typed = keystroke
+                    .key_char
+                    .clone()
+                    .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
+                let is_edit_key = matches!(key, "backspace" | "delete" | "left" | "right")
+                    || typed.is_some();
+                if is_edit_key && self.extension_form_edit(key, typed.as_deref()) {
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+        }
+
         // Stage 5: macOS Text Editing Primitives
         // Primary+V: Paste
         if mods.is_command_alone() && key == "v" {
@@ -2724,6 +2887,13 @@ impl Launcher {
 
         // Backspace: Delete character backward
         if mods.is_unmodified() && key == "backspace" {
+            if matches!(self.page, LauncherPage::Extension(_))
+                && self.extension_form_edit(key, None)
+            {
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
             if self.backspace_char() {
                 if self.query.trim().is_empty() {
                     self.force_expanded = false;
@@ -2735,11 +2905,9 @@ impl Launcher {
                 || self.page == LauncherPage::Files
                 || self.page == LauncherPage::Brew
                 || self.page == LauncherPage::Text
-                || self.page == LauncherPage::Pomodoro
-                || self.page == LauncherPage::Weather
                 || self.page == LauncherPage::Notes
-                || self.page == LauncherPage::Media
                 || matches!(self.page, LauncherPage::Browser(_))
+            || matches!(self.page, LauncherPage::Extension(_))
                 || self.page == LauncherPage::Ports
                 || self.page == LauncherPage::Processes
                 || self.page == LauncherPage::Uninstaller
@@ -2899,37 +3067,11 @@ impl Launcher {
     }
 
     fn open_pomodoro_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.page = LauncherPage::Pomodoro;
-        self.query.clear();
-        self.cursor_idx = 0;
-        self.cursor_visible = true;
-        self.selected = 0;
-        self.results.clear();
-        self.rebuild_root_flat_items();
-        self.actions_open = false;
-        self.actions.clear();
-        self.burger_menu_open = false;
-        self.filter_dropdown_open = false;
-        self.refresh_pomodoro(cx);
-        self.sync_palette_size(window, cx);
-        cx.notify();
+        self.open_extension_page("pomodoro", "", window, cx);
     }
 
     fn open_weather_page(&mut self, city: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.page = LauncherPage::Weather;
-        self.query = city.to_string();
-        self.cursor_idx = self.query.chars().count();
-        self.cursor_visible = true;
-        self.selected = 0;
-        self.results.clear();
-        self.rebuild_root_flat_items();
-        self.actions_open = false;
-        self.actions.clear();
-        self.burger_menu_open = false;
-        self.filter_dropdown_open = false;
-        self.refresh_weather(cx);
-        self.sync_palette_size(window, cx);
-        cx.notify();
+        self.open_extension_page("weather", city, window, cx);
     }
 
     fn open_notes_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2950,20 +3092,7 @@ impl Launcher {
     }
 
     fn open_media_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.page = LauncherPage::Media;
-        self.query.clear();
-        self.cursor_idx = 0;
-        self.cursor_visible = true;
-        self.selected = 0;
-        self.results.clear();
-        self.rebuild_root_flat_items();
-        self.actions_open = false;
-        self.actions.clear();
-        self.burger_menu_open = false;
-        self.filter_dropdown_open = false;
-        self.refresh_media(cx);
-        self.sync_palette_size(window, cx);
-        cx.notify();
+        self.open_extension_page("media-control", "", window, cx);
     }
 
     fn open_browser_page(
@@ -3475,8 +3604,68 @@ impl Launcher {
         .detach();
     }
 
+    /// Root-search placeholder for a declared command with arguments:
+    /// the selected result's argument hint becomes the search bar
+    /// hint, the Raycast arguments behavior.
+    fn declared_argument_placeholder(&self) -> Option<SharedString> {
+        if self.page != LauncherPage::Root {
+            return None;
+        }
+        let result = self.selected_result()?;
+        let command_name = result.id.split(':').next()?;
+        let command = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == command_name)?;
+        let spec = command
+            .manifest()
+            .commands
+            .into_iter()
+            .find(|spec| spec.mode == corvo_core::CommandMode::View)?;
+        let argument = spec.arguments.first()?;
+        let hint = argument.placeholder;
+        (!hint.is_empty()).then(|| SharedString::from(hint))
+    }
+
     fn selected_result(&self) -> Option<&SearchResult> {
         self.results.get(self.selected)
+    }
+
+    /// Runs one declared quick command's execute id without opening
+    /// the launcher; the command's toast is the visible confirmation.
+    fn execute_declared_quick(&mut self, result_id: &str, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| result_id.starts_with(&format!("{}:", command.id())))
+            .cloned()
+        else {
+            return;
+        };
+        let result_id = result_id.to_owned();
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = command
+                .execute(&result_id, &ExecutionContext { store: Some(store) })
+                .await;
+            let _ = this.update(cx, |_launcher, cx| {
+                if let Ok(corvo_core::Action::ShowToast(message)) = &outcome {
+                    if !message.is_empty() && !message.contains(':') {
+                        show_action_toast(
+                            ToastNotice::success(
+                                ToastCategory::General,
+                                command.id().replace('-', " "),
+                                message.clone(),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn selected_result_is_port_action(&self) -> bool {
@@ -4179,82 +4368,6 @@ impl Launcher {
         .detach();
     }
 
-    fn refresh_pomodoro(&mut self, cx: &mut Context<Self>) {
-        // The visual page reads the timer state directly; the only
-        // refresh work is keeping the 1 Hz pump alive.
-        self.ensure_pomodoro_pump(cx);
-        cx.notify();
-    }
-
-    /// Re-renders once per second while a pomodoro interval runs, so the
-    /// countdown ticks. The loop exits when the timer stops, so an idle
-    /// launcher pays nothing.
-    fn ensure_pomodoro_pump(&mut self, cx: &mut Context<Self>) {
-        if self.pomodoro_pump_running || !corvo_pomodoro::is_running() {
-            return;
-        }
-        self.pomodoro_pump_running = true;
-        cx.spawn(async move |this, cx| loop {
-            smol::Timer::after(std::time::Duration::from_secs(1)).await;
-            let still_running = corvo_pomodoro::is_running();
-            let _ = this.update(cx, |launcher, cx| {
-                if !corvo_pomodoro::is_running() {
-                    launcher.pomodoro_pump_running = false;
-                }
-                if launcher.page == LauncherPage::Pomodoro {
-                    launcher.refresh_pomodoro(cx);
-                } else {
-                    cx.notify();
-                }
-            });
-            if !still_running {
-                break;
-            }
-        })
-        .detach();
-    }
-
-    fn refresh_weather(&mut self, cx: &mut Context<Self>) {
-        let city = self.query.trim().to_string();
-        self.search_seq += 1;
-        let seq = self.search_seq;
-        cx.spawn(async move |this, cx| {
-            // Debounce: wait for the typing to settle instead of firing
-            // one network fetch per keystroke. A newer keystroke bumps
-            // search_seq, and this run gives up BEFORE touching the
-            // network — checking only after the fetch still sent one
-            // request per pause, which is what made typing feel laggy.
-            smol::Timer::after(std::time::Duration::from_millis(400)).await;
-            let still_current = this
-                .update(cx, |launcher, _| launcher.search_seq == seq)
-                .unwrap_or(false);
-            if !still_current {
-                return;
-            }
-            let city_arg = city.clone();
-            let fetched = smol::unblock(move || {
-                corvo_weather::fetch_cached(Some(city_arg.as_str()).filter(|city| !city.is_empty()))
-            })
-            .await;
-            let _ = this.update(cx, |launcher, cx| {
-                if launcher.search_seq != seq || launcher.page != LauncherPage::Weather {
-                    return;
-                }
-                match fetched {
-                    Ok(weather) => {
-                        launcher.weather_data = Some(weather);
-                        launcher.weather_error = None;
-                    }
-                    Err(error) => {
-                        launcher.weather_error = Some(error);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     fn refresh_notes(&mut self, cx: &mut Context<Self>) {
         let Some(command) = self
             .registry
@@ -4285,22 +4398,6 @@ impl Launcher {
                     launcher.results_scroll_handle.scroll_to_item(0);
                     cx.notify();
                 }
-            });
-        })
-        .detach();
-    }
-
-    fn refresh_media(&mut self, cx: &mut Context<Self>) {
-        self.search_seq += 1;
-        let seq = self.search_seq;
-        cx.spawn(async move |this, cx| {
-            let playing = smol::unblock(corvo_media_control::fetch_now_playing).await;
-            let _ = this.update(cx, |launcher, cx| {
-                if launcher.search_seq != seq || launcher.page != LauncherPage::Media {
-                    return;
-                }
-                launcher.media_playing = playing;
-                cx.notify();
             });
         })
         .detach();
@@ -4369,265 +4466,954 @@ impl Launcher {
         .detach();
     }
 
-    /// The weather page: big current conditions and a three-day strip.
-    fn weather_page_view(&mut self, _cx: &mut Context<Self>) -> Stateful<Div> {
-        match (&self.weather_data, &self.weather_error) {
-            (Some(weather), _) => {
-                let days: Vec<Stateful<Div>> = weather
-                    .days
-                    .iter()
-                    .map(|day| {
-                        div()
-                            .id(SharedString::from(format!("weather-day-{}", day.label)))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap_1()
-                            .px_5()
-                            .py_3()
-                            .rounded_lg()
-                            .bg(rgb(0x141517))
-                            .border_1()
-                            .border_color(rgb(COLOR_DIVIDER))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child(day.label.clone()),
-                            )
-                            .child(div().text_size(px(26.0)).child(day.glyph))
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(COLOR_TEXT))
-                                    .child(format!("{}° / {}°", day.max_c, day.min_c)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child(truncate_for_display(&day.description, 14)),
-                            )
-                    })
-                    .collect();
-                div()
-                    .id("weather-page")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_5()
-                    .pb(px(48.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(COLOR_TEXT_DIM))
-                            .child(weather.city.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("weather-current")
-                            .flex()
-                            .items_center()
-                            .gap_5()
-                            .child(div().text_size(px(72.0)).child(weather.glyph))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .font_family("Menlo")
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(56.0))
-                                            .text_color(rgb(COLOR_TEXT))
-                                            .child(format!("{}°", weather.temperature_c)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(14.0))
-                                            .text_color(rgb(COLOR_TEXT_DIM))
-                                            .child(format!(
-                                                "{} · feels {}° · {}% humidity · {} km/h",
-                                                weather.description,
-                                                weather.feels_like_c,
-                                                weather.humidity,
-                                                weather.wind_kph
-                                            )),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("weather-days")
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .children(days),
-                    )
+    /// Opens a declarative extension page: the command id names the
+    /// extension, `query` carries its filter or argument.
+    fn open_extension_page(
+        &mut self,
+        command_id: &'static str,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = LauncherPage::Extension(command_id);
+        self.query = query.to_owned();
+        self.cursor_idx = query.chars().count();
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.actions_open = false;
+        self.actions.clear();
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.extension_view = None;
+        self.extension_button_focus = 0;
+        self.extension_form = ExtensionFormState::default();
+        self.refresh_extension(command_id, false, cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    /// Asks the command for its page view and applies it. Query edits
+    /// debounce 400 ms so a fetch-backed page does not fire a request
+    /// per keystroke; opens, actions, and pump ticks are immediate.
+    fn refresh_extension(
+        &mut self,
+        command_id: &'static str,
+        debounce: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == command_id)
+            .cloned()
+        else {
+            self.open_root_page_from_extension(cx);
+            return;
+        };
+        let query = self.query.clone();
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            if debounce {
+                smol::Timer::after(std::time::Duration::from_millis(400)).await;
+                let still_current = this
+                    .update(cx, |launcher, _| launcher.search_seq == seq)
+                    .unwrap_or(false);
+                if !still_current {
+                    return;
+                }
             }
-            (None, Some(error)) => div()
-                .id("weather-error")
+            let fetched = smol::unblock({
+                let command = command.clone();
+                let query = query.clone();
+                move || command.page(&query)
+            })
+            .await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq != seq
+                    || launcher.page != LauncherPage::Extension(command_id)
+                {
+                    return;
+                }
+                match fetched {
+                    Some(view) => {
+                        launcher.apply_extension_view(&view, cx);
+                        launcher.ensure_extension_pump(command_id, cx);
+                    }
+                    // The command stopped offering a page; go home.
+                    None => launcher.open_root_page_from_extension(cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Stores the view, resets per-view token state, and repaints.
+    fn apply_extension_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) {
+        let changed_shape = self
+            .extension_view
+            .as_ref()
+            .map(|current| !same_page_shape(current, view))
+            .unwrap_or(true);
+        self.extension_view = Some(view.clone());
+        if changed_shape {
+            self.extension_button_focus = 0;
+            if let corvo_core::PageView::Form { fields, .. } = view {
+                self.extension_form.reset(fields);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The ticking-page pump: while a page declares `Refresh::Every`,
+    /// re-ask the command at that cadence and stop when the page
+    /// closes or the cadence changes.
+    fn ensure_extension_pump(&mut self, command_id: &'static str, cx: &mut Context<Self>) {
+        let Some(period) = self.extension_view.as_ref().map(|view| match view.refresh() {
+            corvo_core::Refresh::Manual => None,
+            corvo_core::Refresh::Every(secs) => Some(secs.max(1)),
+        }) else {
+            return;
+        };
+        let Some(period) = period else {
+            return;
+        };
+        if self.extension_pump_running {
+            return;
+        }
+        self.extension_pump_running = true;
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_secs(period)).await;
+            let Ok(state) = this.update(cx, |launcher, _| {
+                (
+                    launcher.page == LauncherPage::Extension(command_id),
+                    launcher
+                        .extension_view
+                        .as_ref()
+                        .map(|view| view.refresh())
+                        == Some(corvo_core::Refresh::Every(period)),
+                )
+            }) else {
+                return;
+            };
+            let (on_page, same_cadence) = state;
+            if !on_page || !same_cadence {
+                let _ = this.update(cx, |launcher, _| launcher.extension_pump_running = false);
+                return;
+            }
+            // The refresh lands a new view, whose apply re-arms the
+            // pump — the tick continues for as long as the page stays
+            // open at this cadence.
+            let _ = this.update(cx, |launcher, cx| {
+                launcher.extension_pump_running = false;
+                launcher.refresh_extension(command_id, false, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn open_root_page_from_extension(&mut self, cx: &mut Context<Self>) {
+        self.extension_view = None;
+        self.extension_pump_running = false;
+        self.open_root_page_via(cx);
+    }
+
+    /// `open_root_page` needs a window handle; this variant covers the
+    /// async paths that only have a context.
+    fn open_root_page_via(&mut self, cx: &mut Context<Self>) {
+        self.page = LauncherPage::Root;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.selected = 0;
+        self.results.clear();
+        self.rebuild_root_flat_items();
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    /// The declarative page: renders whatever `Command::page`
+    /// returned.
+    fn extension_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let Some(view) = self.extension_view.clone() else {
+            return div()
+                .id("extension-loading")
                 .flex_1()
                 .flex()
-                .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .pb(px(48.0))
-                .child(div().text_size(px(30.0)).child("🌧️"))
                 .child(
                     div()
-                        .text_size(px(14.0))
-                        .text_color(rgb(COLOR_TEXT))
-                        .child("Could not load the forecast"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
-                        .child(truncate_for_display(error, 70)),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(COLOR_TEXT_DIM))
-                        .child("Check your connection and reopen the page to retry"),
-                ),
-            (None, None) => div()
-                .id("weather-loading")
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .pb(px(48.0))
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(rgb(COLOR_TEXT_DIM))
-                        .child("Loading forecast…"),
-                ),
+                        .child("Loading..."),
+                );
+        };
+        match view {
+            corvo_core::PageView::Blocks(_) => self.blocks_page_view(&view, cx),
+            corvo_core::PageView::Detail { .. } => self.detail_page_view(&view, cx),
+            corvo_core::PageView::Grid { .. } => self.grid_page_view(&view, cx),
+            corvo_core::PageView::Form { .. } => self.form_page_view(&view, cx),
         }
     }
 
-    /// The media page: what is playing and transport buttons.
-    fn media_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let mut page = div()
-            .id("media-page")
+    fn tone_color(tone: corvo_core::Tone) -> u32 {
+        match tone {
+            corvo_core::Tone::Neutral => COLOR_TEXT_DIM,
+            corvo_core::Tone::Accent => COLOR_ACCENT,
+            corvo_core::Tone::Positive => COLOR_ACCENT,
+            corvo_core::Tone::Warning => 0xfbbf24,
+            corvo_core::Tone::Destructive => COLOR_DESTRUCTIVE,
+        }
+    }
+
+    fn blocks_page_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let corvo_core::PageView::Blocks(blocks) = view else {
+            return div().id("extension-blocks-fallback");
+        };
+        let mut column = div()
+            .id("extension-blocks")
             .flex_1()
-            .min_h(px(0.0))
+            .w_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_4()
-            .pb(px(48.0));
-
-        match &self.media_playing {
-            Some(playing) => {
-                let badge = if playing.playing { "PLAYING" } else { "PAUSED" };
-                let badge_color = if playing.playing {
-                    rgb(POMODORO_BREAK_COLOR)
-                } else {
-                    rgb(COLOR_TEXT_DIM)
-                };
-                page = page
-                    .child(
+            .gap_3()
+            .px(px(24.0))
+            .pb(px(56.0));
+        for block in &blocks.blocks {
+            match block {
+                corvo_core::Block::Badge(badge) => {
+                    let color = Self::tone_color(badge.tone);
+                    column = column.child(
                         div()
-                            .id("media-app-badge")
-                            .px_3()
-                            .py_1()
+                            .id(SharedString::from(format!("badge-{}", badge.label)))
+                            .px_2p5()
+                            .py_0p5()
                             .rounded_full()
-                            .border_1()
-                            .border_color(badge_color)
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(badge_color)
-                            .child(format!("{badge} · {}", playing.app)),
-                    )
-                    .child(
-                        div()
-                            .id("media-title")
-                            .text_size(px(30.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(COLOR_TEXT))
-                            .child(truncate_for_display(&playing.title, 34)),
-                    )
-                    .child(
-                        div()
-                            .id("media-artist")
-                            .text_size(px(15.0))
-                            .text_color(rgb(COLOR_TEXT_DIM))
-                            .child(truncate_for_display(&playing.artist, 40)),
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(color))
+                            .child(badge.label.clone()),
                     );
-            }
-            None => {
-                page = page.child(div().text_size(px(40.0)).child("🎧")).child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(rgb(COLOR_TEXT_DIM))
-                        .child("No player is running"),
-                );
+                }
+                corvo_core::Block::Hero(hero) => {
+                    let color = Self::tone_color(hero.tone);
+                    let mut hero_view = div()
+                        .id(SharedString::from(format!("hero-{}", hero.title)))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1();
+                    if let Some(glyph) = hero.glyph {
+                        hero_view = hero_view.child(
+                            div().text_size(px(72.0)).child(glyph.to_string()),
+                        );
+                    }
+                    column = column.child(
+                        hero_view
+                            .child(
+                                div()
+                                    .text_size(px(72.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(color))
+                                    .child(hero.value.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(15.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(hero.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(hero.subtitle.clone()),
+                            ),
+                    );
+                }
+                corvo_core::Block::Progress(progress) => {
+                    let color = Self::tone_color(progress.tone);
+                    let bar_width = 340.0;
+                    let fill = (bar_width * (1.0 - progress.fraction)).max(0.0);
+                    column = column.child(
+                        div()
+                            .id("extension-progress")
+                            .w(px(bar_width))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(rgb(0x2a2f36))
+                            .child(
+                                div()
+                                    .w(px(fill))
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(rgb(color)),
+                            ),
+                    );
+                }
+                corvo_core::Block::Markdown(markdown) => {
+                    column = column.child(
+                        div()
+                            .id(SharedString::from(format!("md-{}", markdown.len())))
+                            .max_w(px(560.0))
+                            .text_size(px(13.0))
+                            .text_color(rgb(COLOR_TEXT))
+                            .child(render_inline_markdown(markdown)),
+                    );
+                }
+                corvo_core::Block::Strip(cards) => {
+                    let mut strip = div()
+                        .id("extension-strip")
+                        .flex()
+                        .gap_2()
+                        .max_w(px(560.0));
+                    for card in cards {
+                        let mut card_view = div()
+                            .id(SharedString::from(format!("card-{}", card.title)))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_0p5()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(0x181b1e));
+                        if let Some(glyph) = card.glyph {
+                            card_view = card_view.child(
+                                div().text_size(px(26.0)).child(glyph.to_string()),
+                            );
+                        }
+                        strip = strip.child(
+                            card_view
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(card.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(card.value.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(card.subtitle.clone()),
+                                ),
+                        );
+                    }
+                    column = column.child(strip);
+                }
+                corvo_core::Block::Buttons(buttons) => {
+                    let mut row = div()
+                        .id("extension-buttons")
+                        .flex()
+                        .gap_2()
+                        .justify_center();
+                    for (index, button) in buttons.iter().enumerate() {
+                        let color = Self::tone_color(button.tone);
+                        let focused = index == self.extension_button_focus;
+                        let action_id = button.action_id.clone();
+                        let command_id = match self.page {
+                            LauncherPage::Extension(id) => id,
+                            _ => continue,
+                        };
+                        row = row.child(
+                            div()
+                                .id(SharedString::from(format!("ext-btn-{action_id}")))
+                                .px_4()
+                                .py_1p5()
+                                .rounded_lg()
+                                .when(focused, |tile| tile.bg(rgb(COLOR_ROW_SELECTED)))
+                                .when(!focused, |tile| tile.bg(rgb(0x181b1e)))
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(if button.tone == corvo_core::Tone::Neutral {
+                                    COLOR_TEXT
+                                } else {
+                                    color
+                                }))
+                                .child(button.label.clone())
+                                .on_click(cx.listener(
+                                    move |launcher, _: &ClickEvent, _window, cx| {
+                                        launcher.run_extension_action(command_id, action_id.clone(), cx);
+                                    },
+                                )),
+                        );
+                    }
+                    column = column.child(row);
+                }
             }
         }
+        column
+    }
 
-        let transport: Vec<Stateful<Div>> = [
-            ("previous", "⏮", "Previous"),
-            ("toggle", "⏯", "Play / Pause"),
-            ("next", "⏭", "Next"),
-        ]
-        .iter()
-        .map(|(action, glyph, label)| {
-            let command = (*action).to_string();
+    fn detail_page_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let corvo_core::PageView::Detail {
+            markdown, metadata, ..
+        } = view
+        else {
+            return div().id("extension-detail-fallback");
+        };
+        let mut row = div()
+            .id("extension-detail")
+            .flex_1()
+            .w_full()
+            .flex()
+            .gap_4()
+            .px(px(24.0))
+            .pb(px(56.0));
+        row = row.child(
             div()
-                .id(SharedString::from(format!("media-action-{action}")))
+                .id("extension-detail-markdown")
+                .flex_1()
+                .overflow_y_scroll()
+                .track_scroll(&self.results_scroll_handle)
+                .text_size(px(13.5))
+                .text_color(rgb(COLOR_TEXT))
+                .child(render_inline_markdown(markdown)),
+        );
+        if !metadata.is_empty() {
+            let mut panel = div().id("extension-detail-metadata").w(px(220.0)).flex().flex_col().gap_2();
+            for entry in metadata {
+                match entry {
+                    corvo_core::Metadata::Label { title, text, tone } => {
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(Self::tone_color(*tone)))
+                                        .child(text.clone()),
+                                ),
+                        );
+                    }
+                    corvo_core::Metadata::Link { title, text, url } => {
+                        let url = url.clone();
+                        panel = panel.child(
+                            div()
+                                .id(SharedString::from(format!("meta-link-{url}")))
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(COLOR_ACCENT))
+                                        .child(text.clone()),
+                                )
+                                .on_click(cx.listener(move |_: &mut Self, _: &ClickEvent, _, _| {
+                                    let _ = corvo_platform::open_url(&url);
+                                })),
+                        );
+                    }
+                    corvo_core::Metadata::Tags { title, tags } => {
+                        let mut tag_row = div().flex().flex_col().gap_1();
+                        tag_row = tag_row.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(COLOR_TEXT_DIM))
+                                .child(title.clone()),
+                        );
+                        let mut tags_row = div().flex().flex_wrap().gap_1();
+                        for tag in tags {
+                            tags_row = tags_row.child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(rgb(0x181b1e))
+                                    .text_size(px(10.5))
+                                    .child(tag.clone()),
+                            );
+                        }
+                        panel = panel.child(tag_row.child(tags_row));
+                    }
+                    corvo_core::Metadata::Separator => {
+                        panel = panel.child(
+                            div().w_full().h(px(1.0)).bg(rgb(0x2a2f36)),
+                        );
+                    }
+                }
+            }
+            row = row.child(panel);
+        }
+        row
+    }
+
+    fn grid_page_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let corvo_core::PageView::Grid {
+            items, columns, ..
+        } = view
+        else {
+            return div().id("extension-grid-fallback");
+        };
+        let needle = self.query.trim().to_lowercase();
+        let visible: Vec<&corvo_core::GridItem> = items
+            .iter()
+            .filter(|item| {
+                needle.is_empty()
+                    || corvo_core::search_match_score(
+                        &needle,
+                        &[item.title.as_str(), item.subtitle.as_str()],
+                    )
+                    .is_some()
+            })
+            .collect();
+        if visible.is_empty() {
+            return div()
+                .id("extension-grid")
+                .flex_1()
                 .flex()
-                .flex_col()
                 .items_center()
-                .gap_1()
-                .px_5()
-                .py_3()
-                .rounded_lg()
-                .bg(rgb(0x141517))
-                .border_1()
-                .border_color(rgb(COLOR_DIVIDER))
-                .child(div().text_size(px(22.0)).child(*glyph))
+                .justify_center()
+                .pb(px(56.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(COLOR_TEXT_DIM))
-                        .child(*label),
-                )
-                .on_click(cx.listener(
-                    move |_launcher: &mut Self, _event: &ClickEvent, _window, cx| {
-                        let command = command.clone();
-                        cx.spawn(async move |this, cx| {
-                            let _ =
-                                smol::unblock(move || corvo_media_control::control(&command)).await;
-                            let _ = this.update(cx, |launcher, cx| {
-                                if launcher.page == LauncherPage::Media {
-                                    launcher.refresh_media(cx);
-                                }
-                            });
-                        })
-                        .detach();
-                    },
-                ))
-        })
-        .collect();
-        page.child(
-            div()
-                .id("media-transport")
-                .flex()
-                .items_center()
-                .gap_3()
-                .children(transport),
-        )
+                        .child("No matches"),
+                );
+        }
+        let command_id = match self.page {
+            LauncherPage::Extension(id) => id,
+            _ => return div().id("extension-grid-fallback"),
+        };
+        let columns = columns.unwrap_or(6).clamp(1, 8) as usize;
+        let tile_size = 84.0;
+        let row_width = columns as f32 * (tile_size + 8.0);
+        let mut grid_view = div()
+            .id("extension-grid")
+            .flex_1()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap_2()
+            .max_w(px(row_width))
+            .px(px(24.0))
+            .pb(px(56.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.results_scroll_handle);
+        for item in visible {
+            let selected = self.extension_button_focus.to_string() == item.id;
+            let content = match &item.content {
+                corvo_core::GridContent::Glyph(glyph) => div()
+                    .text_size(px(38.0))
+                    .child(glyph.clone()),
+                corvo_core::GridContent::Color(color) => div()
+                    .size(px(44.0))
+                    .rounded_lg()
+                    .bg(rgb(*color)),
+                corvo_core::GridContent::Image(path) => div()
+                    .size(px(44.0))
+                    .child(img(path.clone()).size(px(44.0))),
+                corvo_core::GridContent::Text(text) => div()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(text.clone()),
+            };
+            let item_id = item.id.clone();
+            grid_view = grid_view.child(
+                div()
+                    .id(SharedString::from(format!("grid-{}", item.id)))
+                    .w(px(tile_size))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .p_2()
+                    .rounded_lg()
+                    .when(selected, |tile| tile.bg(rgb(COLOR_ROW_SELECTED)))
+                    .when(!selected, |tile| tile.hover(|s| s.bg(rgb(0x181b1e))))
+                    .child(
+                        div()
+                            .size(px(48.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(content),
+                    )
+                    .child(
+                        div()
+                            .max_w_full()
+                            .text_size(px(10.5))
+                            .text_color(rgb(COLOR_TEXT))
+                            .whitespace_nowrap()
+                            .child(item.title.clone()),
+                    )
+                    .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                        launcher.run_extension_action(
+                            command_id,
+                            format!("grid:{item_id}"),
+                            cx,
+                        );
+                    })),
+            );
+        }
+        grid_view
     }
+
+    fn form_page_view(&mut self, view: &corvo_core::PageView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let corvo_core::PageView::Form { title, fields, submit, .. } = view else {
+            return div().id("extension-form-fallback");
+        };
+        let command_id = match self.page {
+            LauncherPage::Extension(id) => id,
+            _ => return div().id("extension-form-fallback"),
+        };
+        let mut column = div()
+            .id("extension-form")
+            .flex_1()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .px(px(32.0))
+            .pb(px(56.0));
+        column = column.child(
+            div()
+                .text_size(px(15.0))
+                .font_weight(FontWeight::BOLD)
+                .child(title.clone()),
+        );
+        let mut text_index = 0usize;
+        for (index, field) in fields.iter().enumerate() {
+            let focused = index == self.extension_form.focused;
+            match field {
+                corvo_core::FormField::Text {
+                    id,
+                    title: field_title,
+                    placeholder,
+                    password,
+                    ..
+                } => {
+                    let value = self
+                        .extension_form
+                        .text_values
+                        .get(text_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    let caret = self.extension_form.text_carets.get(text_index).copied().unwrap_or(0);
+                    let displayed = if *password {
+                        "*".repeat(value.chars().count())
+                    } else {
+                        value.clone()
+                    };
+                    let (before, after) = {
+                        let chars: Vec<char> = displayed.chars().collect();
+                        let cut = caret.min(chars.len());
+                        (
+                            chars[..cut].iter().collect::<String>(),
+                            chars[cut..].iter().collect::<String>(),
+                        )
+                    };
+                    let field_title = field_title.clone();
+                    let placeholder_text = *placeholder;
+                    let is_password = *password;
+                    let field_index = index;
+                    column = column.child(
+                        div()
+                            .id(SharedString::from(format!("form-field-{id}")))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                                launcher.extension_form.focused = field_index;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(field_title),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .h(px(30.0))
+                                    .px_2p5()
+                                    .rounded_lg()
+                                    .when(focused, |tile| tile.border_1().border_color(rgb(COLOR_ACCENT)))
+                                    .when(!focused, |tile| tile.bg(rgb(0x181b1e)))
+                                    .child(div().text_size(px(13.0)).child(before))
+                                    .when(focused && self.cursor_visible, |row| {
+                                        row.child(
+                                            div()
+                                                .w(px(1.5))
+                                                .h(px(16.0))
+                                                .bg(rgb(COLOR_TEXT))
+                                                .mx(px(0.5)),
+                                        )
+                                    })
+                                    .child(div().text_size(px(13.0)).child(after))
+                                    .when(value.is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .text_color(rgb(COLOR_TEXT_DIM))
+                                                .child(placeholder_text),
+                                        )
+                                    }),
+                            ),
+                    );
+                    text_index += 1;
+                    let _ = is_password;
+                }
+                corvo_core::FormField::Checkbox { id, title: field_title, .. } => {
+                    let checked = self.extension_form.checks.get(index).copied().unwrap_or(false);
+                    let field_title = field_title.clone();
+                    let field_index = index;
+                    column = column.child(
+                        div()
+                            .id(SharedString::from(format!("form-field-{id}")))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                                if let Some(check) = launcher.extension_form.checks.get_mut(field_index) {
+                                    *check = !*check;
+                                }
+                                launcher.extension_form.focused = field_index;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .rounded_sm()
+                                    .when(checked, |box_view| box_view.bg(rgb(COLOR_ACCENT)))
+                                    .when(!checked, |box_view| box_view.bg(rgb(0x181b1e)).border_1().border_color(rgb(0x2a2f36)))
+                                    .child(if checked { div().text_size(px(11.0)).child("✓") } else { div() }),
+                            )
+                            .child(div().text_size(px(12.5)).child(field_title)),
+                    );
+                }
+                corvo_core::FormField::Select { id, title: field_title, options, .. } => {
+                    let selected = self.extension_form.selections.get(index).copied().unwrap_or(0);
+                    let field_title = field_title.clone();
+                    let field_index = index;
+                    let mut select_view = div()
+                        .id(SharedString::from(format!("form-field-{id}")))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(COLOR_TEXT_DIM))
+                                .child(field_title),
+                        );
+                    for (option_index, (_, option_title)) in options.iter().enumerate() {
+                        let option_title = option_title.clone();
+                        select_view = select_view.child(
+                            div()
+                                .id(SharedString::from(format!("form-option-{id}-{option_index}")))
+                                .px_2p5()
+                                .py_1()
+                                .rounded_lg()
+                                .when(option_index == selected, |tile| tile.bg(rgb(COLOR_ROW_SELECTED)))
+                                .when(option_index != selected, |tile| tile.hover(|s| s.bg(rgb(0x181b1e))))
+                                .text_size(px(12.5))
+                                .child(option_title)
+                                .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                                    if let Some(selection) = launcher.extension_form.selections.get_mut(field_index) {
+                                        *selection = option_index;
+                                    }
+                                    launcher.extension_form.focused = field_index;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    column = column.child(select_view);
+                }
+            }
+        }
+        let encoded = self.encode_form_values(fields);
+        column = column.child(
+            div()
+                .id("form-submit")
+                .self_start()
+                .px_4()
+                .py_1p5()
+                .rounded_lg()
+                .bg(rgb(COLOR_ACCENT))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .child(submit.clone())
+                .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                    launcher.run_extension_action(
+                        command_id,
+                        format!("form:{encoded}"),
+                        cx,
+                    );
+                })),
+        );
+        column
+    }
+
+    /// Routes a key into the focused form field's text caret. Returns
+    /// false when the key is not a form-editing key, so the default
+    /// query path takes it.
+    fn extension_form_edit(&mut self, key: &str, typed: Option<&str>) -> bool {
+        let Some(corvo_core::PageView::Form { fields, .. }) = self.extension_view.as_ref() else {
+            return false;
+        };
+        let focused = self.extension_form.focused;
+        if fields.get(focused).map(corvo_core::FormField::id).is_none() {
+            return false;
+        }
+        let is_text_field = matches!(
+            fields.get(focused),
+            Some(corvo_core::FormField::Text { .. })
+        );
+        if !is_text_field {
+            return false;
+        }
+        let Some(value_slot) = self.extension_form.text_values.get_mut(focused) else {
+            return false;
+        };
+        let Some(caret_slot) = self.extension_form.text_carets.get_mut(focused) else {
+            return false;
+        };
+        let caret = *caret_slot;
+        match (key, typed) {
+            ("backspace", _) => {
+                if caret > 0 {
+                    if let Some((byte_start, ch)) = value_slot.char_indices().nth(caret - 1) {
+                        let byte_end = byte_start + ch.len_utf8();
+                        value_slot.drain(byte_start..byte_end);
+                        *caret_slot = caret - 1;
+                    }
+                }
+                true
+            }
+            ("delete", _) => {
+                let total = value_slot.chars().count();
+                if caret < total {
+                    if let Some((byte_start, ch)) = value_slot.char_indices().nth(caret) {
+                        let byte_end = byte_start + ch.len_utf8();
+                        value_slot.drain(byte_start..byte_end);
+                    }
+                }
+                true
+            }
+            ("left", _) => {
+                *caret_slot = caret.saturating_sub(1);
+                true
+            }
+            ("right", _) => {
+                *caret_slot = (caret + 1).min(value_slot.chars().count());
+                true
+            }
+            (_, Some(text)) if text.chars().count() == 1 && !text.contains('\n') => {
+                let byte_idx = value_slot
+                    .char_indices()
+                    .nth(caret)
+                    .map(|(i, _)| i)
+                    .unwrap_or(value_slot.len());
+                value_slot.insert_str(byte_idx, text);
+                *caret_slot = caret + text.chars().count();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Encodes the current form values as `field=value&...` with
+    /// percent-escaping, the payload of the submit id.
+    fn encode_form_values(&self, fields: &[corvo_core::FormField]) -> String {        let mut text_index = 0usize;
+        let mut parts = Vec::new();
+        for (index, field) in fields.iter().enumerate() {
+            match field {
+                corvo_core::FormField::Text { id, .. } => {
+                    let value = self.extension_form.text_values.get(text_index).cloned().unwrap_or_default();
+                    text_index += 1;
+                    parts.push(format!("{id}={}", encode_form_value(&value)));
+                }
+                corvo_core::FormField::Checkbox { id, .. } => {
+                    let checked = self.extension_form.checks.get(index).copied().unwrap_or(false);
+                    parts.push(format!("{id}={checked}"));
+                }
+                corvo_core::FormField::Select { id, options, .. } => {
+                    let selected = self.extension_form.selections.get(index).copied().unwrap_or(0);
+                    let value = options
+                        .get(selected)
+                        .map(|(value, _)| value.clone())
+                        .unwrap_or_default();
+                    parts.push(format!("{id}={}", encode_form_value(&value)));
+                }
+            }
+        }
+        parts.join("&")
+    }
+
+    /// Runs one page action through the owning command's `execute`,
+    /// then refreshes the page. Every interactive element on a
+    /// declarative page funnels here.
+    fn run_extension_action(&mut self, command_id: &'static str, action: String, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .registry
+            .commands()
+            .iter()
+            .find(|command| command.id() == command_id)
+            .cloned()
+        else {
+            return;
+        };
+        let result_id = format!("{command_id}:page:{action}");
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = command
+                .execute(&result_id, &ExecutionContext { store: Some(store.clone()) })
+                .await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.page == LauncherPage::Extension(command_id) {
+                    if let Ok(corvo_core::Action::ShowToast(message)) = &outcome {
+                        // An empty message means "act silently"; the
+                        // toast-prefix sentinels belong to `perform`,
+                        // which page actions deliberately bypass.
+                        if !message.is_empty() && !message.contains(':') {
+                            show_action_toast(
+                                ToastNotice::success(
+                                    ToastCategory::General,
+                                    command_id.replace('-', " "),
+                                    message.clone(),
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                    launcher.refresh_extension(command_id, false, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+
 
     fn notes_subheader(&self) -> Div {
         div()
@@ -5176,16 +5962,7 @@ impl Launcher {
             }
         }
         self.perform(action, window, cx);
-        // Pomodoro controls mutate state the page shows; refresh it so
-        // pause/resume/stop reflect immediately. Notes likewise after a
-        // create or delete.
-        if self.page == LauncherPage::Pomodoro
-            && self
-                .selected_result()
-                .is_some_and(|result| result.id.starts_with("pomodoro:"))
-        {
-            self.refresh_pomodoro(cx);
-        }
+        // Notes refresh after a create or delete mutates the list.
         if self.page == LauncherPage::Notes
             && self.selected_result().is_some_and(|result| {
                 result.id.starts_with("notes:create:") || result.id.starts_with("notes:delete:")
@@ -5198,10 +5975,6 @@ impl Launcher {
     fn execute_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page == LauncherPage::Uninstaller {
             self.begin_uninstall(cx);
-            return;
-        }
-        if self.page == LauncherPage::Pomodoro {
-            self.execute_pomodoro_selection(window, cx);
             return;
         }
         if self.page == LauncherPage::Emoji {
@@ -5333,6 +6106,33 @@ impl Launcher {
             self.dismiss(window);
             open_settings_tab_with_update_check(SettingsTab::About, cx);
             return;
+        }
+        // Generic extension pages: a command whose manifest declares a
+        // View command opens its declarative page from
+        // `{id}:open[:{args}]`. Special cases above keep priority.
+        if let Some((prefix, args)) = result.id.split_once(":open") {
+            if args.is_empty() || args.starts_with(':') {
+                let candidate = prefix.to_owned();
+                if let Some(command) = self
+                    .registry
+                    .commands()
+                    .iter()
+                    .find(|command| command.id() == candidate)
+                    .cloned()
+                {
+                    let declares_view = command
+                        .manifest()
+                        .commands
+                        .iter()
+                        .any(|spec| spec.mode == corvo_core::CommandMode::View);
+                    if declares_view {
+                        let command_id = command.id();
+                        let argument = args.strip_prefix(':').unwrap_or_default();
+                        self.open_extension_page(command_id, argument, window, cx);
+                        return;
+                    }
+                }
+            }
         }
         let Some(command_id) = result.id.split(':').next() else {
             return;
@@ -6114,6 +6914,17 @@ impl Launcher {
                 "Search {} tabs and bookmarks...",
                 browser.spec().name
             ))
+        } else if let LauncherPage::Extension(_) = self.page {
+            self.extension_view
+                .as_ref()
+                .map(|view| match view {
+                    corvo_core::PageView::Blocks(blocks) => blocks.placeholder,
+                    corvo_core::PageView::Grid { placeholder, .. } => placeholder,
+                    _ => "",
+                })
+                .filter(|hint| !hint.is_empty())
+                .map(SharedString::from)
+                .unwrap_or_else(|| SharedString::from("Filter..."))
         } else if self.page == LauncherPage::Brew {
             SharedString::from(match self.brew_page_mode {
                 BrewPageMode::Installed => "Filter installed packages...",
@@ -6123,20 +6934,16 @@ impl Launcher {
             })
         } else if self.page == LauncherPage::Text {
             "Type text to transform, or leave empty to use the clipboard...".into()
-        } else if self.page == LauncherPage::Pomodoro {
-            "Minutes for a custom focus, or leave empty for 25...".into()
-        } else if self.page == LauncherPage::Weather {
-            "City name, or leave empty for your location...".into()
         } else if self.page == LauncherPage::Notes {
             "Search notes, or type a new one and press Enter...".into()
-        } else if self.page == LauncherPage::Media {
-            "Now playing...".into()
         } else if self.page == LauncherPage::Ports {
             "Filter or enter a port (e.g. 3000)...".into()
         } else if self.page == LauncherPage::Processes {
             "Filter processes by name or PID...".into()
         } else if self.page == LauncherPage::Files {
             "Search files and folders...".into()
+        } else if let Some(hint) = self.declared_argument_placeholder() {
+            hint
         } else {
             "Search for apps and commands...".into()
         };
@@ -6340,309 +7147,6 @@ impl Launcher {
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(COLOR_TEXT_DIM))
             .child("TEXT TRANSFORMS")
-    }
-
-    /// Custom focus length typed into the page input, if any.
-    fn pomodoro_custom_minutes(&self) -> Option<u64> {
-        self.query
-            .split_whitespace()
-            .find_map(|word| word.parse::<u64>().ok())
-            .filter(|minutes| (1..=600).contains(minutes))
-    }
-
-    /// Runs the highlighted preset (idle) or control button (running).
-    fn execute_pomodoro_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let paused = corvo_pomodoro::snapshot().is_some_and(|state| state.paused);
-        if corvo_pomodoro::snapshot().is_some() {
-            match self.pomodoro_selection {
-                0 => {
-                    if paused {
-                        corvo_pomodoro::resume();
-                    } else {
-                        corvo_pomodoro::pause();
-                    }
-                }
-                1 => {
-                    corvo_pomodoro::skip();
-                }
-                _ => {
-                    corvo_pomodoro::stop();
-                }
-            }
-        } else {
-            let minutes = self
-                .pomodoro_custom_minutes()
-                .or_else(|| POMODORO_PRESETS.get(self.pomodoro_selection).copied())
-                .unwrap_or(25);
-            corvo_pomodoro::start(
-                corvo_pomodoro::Phase::Focus,
-                std::time::Duration::from_secs(minutes * 60),
-            );
-        }
-        // refresh_pomodoro both repaints and keeps the 1 Hz pump alive,
-        // so a countdown started from the page ticks immediately.
-        self.refresh_pomodoro(cx);
-    }
-
-    /// The visual pomodoro page: phase badge, live countdown, progress
-    /// bar, and preset chips or control buttons — no result list.
-    fn pomodoro_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
-        use corvo_pomodoro::Phase;
-
-        let snapshot = corvo_pomodoro::snapshot();
-        let custom_minutes = self.pomodoro_custom_minutes();
-
-        let phase_color = |phase: Phase| {
-            if phase == Phase::Focus {
-                rgb(POMODORO_FOCUS_COLOR)
-            } else {
-                rgb(POMODORO_BREAK_COLOR)
-            }
-        };
-
-        let (badge_label, badge_color, time_text, time_color, progress) = match &snapshot {
-            Some(state) => {
-                let color = phase_color(state.phase);
-                let label = if state.paused {
-                    format!("{} · PAUSED", state.phase_label().to_uppercase())
-                } else {
-                    state.phase_label().to_uppercase()
-                };
-                let total = state.duration.as_secs().max(1);
-                let remaining = state.remaining.as_secs().min(total);
-                let progress = 1.0 - remaining as f32 / total as f32;
-                let time_color = if state.paused {
-                    rgb(COLOR_TEXT_DIM)
-                } else {
-                    rgb(COLOR_TEXT)
-                };
-                (
-                    label,
-                    color,
-                    format_pomodoro_time(remaining),
-                    time_color,
-                    progress,
-                )
-            }
-            None => {
-                let minutes = custom_minutes
-                    .or_else(|| POMODORO_PRESETS.get(self.pomodoro_selection).copied())
-                    .unwrap_or(25);
-                (
-                    "READY".to_owned(),
-                    rgb(COLOR_TEXT_DIM),
-                    format!("{minutes:02}:00"),
-                    rgb(COLOR_TEXT_DIM),
-                    0.0,
-                )
-            }
-        };
-
-        let bar_width = 340.0;
-        let mut page = div()
-            .id("pomodoro-page")
-            .flex_1()
-            .min_h(px(0.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_5()
-            .pb(px(48.0))
-            .child(
-                div()
-                    .id("pomodoro-badge")
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(badge_color)
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(badge_color)
-                    .child(badge_label),
-            )
-            .child(
-                div()
-                    .id("pomodoro-countdown")
-                    .font_family("Menlo")
-                    .font_weight(FontWeight::BOLD)
-                    .text_size(px(72.0))
-                    .text_color(time_color)
-                    .child(time_text),
-            )
-            .child(
-                div()
-                    .id("pomodoro-progress")
-                    .w(px(bar_width))
-                    .h(px(6.0))
-                    .rounded_full()
-                    .bg(rgb(0x27272a))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(px(bar_width * progress.clamp(0.0, 1.0)))
-                            .bg(badge_color),
-                    ),
-            );
-
-        if snapshot.is_some() {
-            // Control buttons: Pause/Resume, Skip, Stop.
-            let paused = snapshot.is_some_and(|state| state.paused);
-            let labels = [if paused { "Resume" } else { "Pause" }, "Skip", "Stop"];
-            let buttons: Vec<Stateful<Div>> = labels
-                .iter()
-                .enumerate()
-                .map(|(index, label)| {
-                    let selected = index == self.pomodoro_selection.min(2);
-                    let destructive = index == 2;
-                    let base = if destructive {
-                        rgb(0xf87171)
-                    } else {
-                        rgb(COLOR_TEXT)
-                    };
-                    let (border, text_color) = if selected {
-                        (base, base)
-                    } else {
-                        (rgb(COLOR_DIVIDER), rgb(COLOR_TEXT_DIM))
-                    };
-                    div()
-                        .id(SharedString::from(format!("pomodoro-action-{index}")))
-                        .px_4()
-                        .py_1p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(border)
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(text_color)
-                        .when(selected, |button| button.bg(rgba(0xffffff14)))
-                        .child(*label)
-                        .on_click(cx.listener(
-                            move |launcher: &mut Self, _event: &ClickEvent, window, cx| {
-                                launcher.pomodoro_selection = index;
-                                launcher.execute_pomodoro_selection(window, cx);
-                            },
-                        ))
-                })
-                .collect();
-            page = page.child(
-                div()
-                    .id("pomodoro-actions")
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .children(buttons),
-            );
-        } else {
-            // Preset chips; a typed length overrides the selection.
-            let mut chips: Vec<Stateful<Div>> = POMODORO_PRESETS
-                .iter()
-                .enumerate()
-                .map(|(index, minutes)| {
-                    let selected = custom_minutes.is_none()
-                        && index == self.pomodoro_selection.min(POMODORO_PRESETS.len() - 1);
-                    let (border, text_color) = if selected {
-                        (rgb(POMODORO_FOCUS_COLOR), rgb(POMODORO_FOCUS_COLOR))
-                    } else {
-                        (rgb(COLOR_DIVIDER), rgb(COLOR_TEXT_DIM))
-                    };
-                    div()
-                        .id(SharedString::from(format!("pomodoro-preset-{minutes}")))
-                        .px_3()
-                        .py_1()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(border)
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(text_color)
-                        .when(selected, |chip| chip.bg(rgba(0xffffff14)))
-                        .child(format!("{minutes} min"))
-                        .on_click(cx.listener(
-                            move |launcher: &mut Self, _event: &ClickEvent, _window, cx| {
-                                launcher.pomodoro_selection = index;
-                                launcher.query.clear();
-                                launcher.cursor_idx = 0;
-                                cx.notify();
-                            },
-                        ))
-                })
-                .collect();
-            if let Some(custom) = custom_minutes {
-                chips.insert(
-                    0,
-                    div()
-                        .id("pomodoro-preset-custom")
-                        .px_3()
-                        .py_1()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(rgb(POMODORO_FOCUS_COLOR))
-                        .bg(rgba(0xffffff14))
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(POMODORO_FOCUS_COLOR))
-                        .child(format!("{custom} min")),
-                );
-            }
-            page = page.child(
-                div()
-                    .id("pomodoro-presets")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(chips),
-            );
-            page = page.child(
-                div()
-                    .id("pomodoro-start")
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .id("pomodoro-start-focus")
-                            .px_6()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(POMODORO_FOCUS_COLOR))
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x18181b))
-                            .child("Start Focus")
-                            .on_click(cx.listener(
-                                |launcher: &mut Self, _event: &ClickEvent, window, cx| {
-                                    launcher.execute_pomodoro_selection(window, cx);
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("pomodoro-start-break")
-                            .px_4()
-                            .py_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(POMODORO_BREAK_COLOR))
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(POMODORO_BREAK_COLOR))
-                            .child("Break 5 min")
-                            .on_click(cx.listener(
-                                |launcher: &mut Self, _event: &ClickEvent, _window, cx| {
-                                    corvo_pomodoro::start(
-                                        Phase::Break,
-                                        std::time::Duration::from_secs(5 * 60),
-                                    );
-                                    launcher.refresh_pomodoro(cx);
-                                },
-                            )),
-                    ),
-            );
-        }
-        page
     }
 
     fn emoji_search_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -8520,9 +9024,9 @@ impl Launcher {
             linear_color_stop(rgba((bg & 0xffff_ff00) | 0x38), 1.0),
         );
 
-        // The visual pages (pomodoro, weather) have no result rows and
-        // no actions menu: only the burger stays in their footer.
-        let visual_only = matches!(self.page, LauncherPage::Pomodoro | LauncherPage::Weather);
+        // The visual pages have no result rows and no actions menu:
+        // only the burger stays in their footer.
+        let visual_only = matches!(self.page, LauncherPage::Extension(_));
         let show_primary = !visual_only
             && (self.page != LauncherPage::Uninstaller
                 || matches!(&self.uninstaller, UninstallerState::Ready(ready) if !ready.scan_in_progress));
@@ -9338,11 +9842,9 @@ impl Render for Launcher {
         let is_files = self.page == LauncherPage::Files;
         let is_brew = self.page == LauncherPage::Brew;
         let is_text = self.page == LauncherPage::Text;
-        let is_pomodoro = self.page == LauncherPage::Pomodoro;
-        let is_weather = self.page == LauncherPage::Weather;
         let is_notes = self.page == LauncherPage::Notes;
-        let is_media = self.page == LauncherPage::Media;
         let is_browser = matches!(self.page, LauncherPage::Browser(_));
+        let is_extension = matches!(self.page, LauncherPage::Extension(_));
         let is_ports = self.page == LauncherPage::Ports;
         let is_processes = self.page == LauncherPage::Processes;
         let is_uninstaller = self.page == LauncherPage::Uninstaller;
@@ -9394,22 +9896,10 @@ impl Render for Launcher {
                     .child(self.text_subheader())
                     .child(self.results_list(cx))
             })
-            .when(is_pomodoro, |view| {
-                view.child(self.search_row(window, cx))
-                    .child(self.pomodoro_page_view(cx))
-            })
-            .when(is_weather, |view| {
-                view.child(self.search_row(window, cx))
-                    .child(self.weather_page_view(cx))
-            })
             .when(is_notes, |view| {
                 view.child(self.search_row(window, cx))
                     .child(self.notes_subheader())
                     .child(self.results_list(cx))
-            })
-            .when(is_media, |view| {
-                view.child(self.search_row(window, cx))
-                    .child(self.media_page_view(cx))
             })
             .when(is_browser, |view| {
                 let browser = match self.page {
@@ -9419,6 +9909,14 @@ impl Render for Launcher {
                 view.child(self.search_row(window, cx))
                     .child(self.browser_subheader(browser))
                     .child(self.results_list(cx))
+            })
+            .when(is_extension, |view| {
+                let _command_id = match self.page {
+                    LauncherPage::Extension(id) => id,
+                    _ => return view,
+                };
+                view.child(self.search_row(window, cx))
+                    .child(self.extension_page_view(cx))
             })
             .when(is_ports, |view| {
                 view.child(self.search_row(window, cx))
@@ -9941,6 +10439,20 @@ pub fn run(
                         });
                     }
                     corvo_platform::HotkeyIntent::Command(cmd_id) => {
+                        // A declared NoView quick command runs straight
+                        // from its hotkey: no launcher window, the
+                        // command's own toast confirms.
+                        let quick_id = declared_no_view_result_id(&cmd_id);
+                        if let Some(result_id) = quick_id {
+                            cx.update(|cx| {
+                                if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+                                    let _ = handle.update(cx, |launcher, _window, cx| {
+                                        launcher.execute_declared_quick(&result_id, cx);
+                                    });
+                                }
+                            });
+                            return;
+                        }
                         cx.update(|cx| {
                             execute_command_intent(&cmd_id, cx);
                         });
@@ -10155,6 +10667,27 @@ pub(crate) fn hide_launcher_before_settings(cx: &mut App) {
     }
 }
 
+/// The execute id of a declared `NoView` command matching this
+/// hotkey target (`command:<extension>:<name>` or the declared
+/// title), or `None` when the intent is not a declared command.
+fn declared_no_view_result_id(cmd_id: &str) -> Option<String> {
+    let registry = corvo_core::CommandRegistry::from_inventory();
+    for command in registry.commands() {
+        let manifest = command.manifest();
+        for spec in &manifest.commands {
+            let matches_target = cmd_id
+                .strip_prefix("command:")
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(extension, name)| extension == manifest.name && name == spec.name)
+                .unwrap_or_else(|| spec.title == cmd_id);
+            if matches_target && spec.mode == corvo_core::CommandMode::NoView {
+                return Some(format!("{}:{}", manifest.name, spec.name));
+            }
+        }
+    }
+    None
+}
+
 fn execute_command_intent(cmd_id: &str, cx: &mut App) {
     #[cfg(target_os = "windows")]
     if matches!(
@@ -10301,10 +10834,16 @@ fn open_launcher_with_page(page: LauncherPage, cx: &mut App) {
                     LauncherPage::Emoji => launcher.open_emoji_page(window, cx),
                     LauncherPage::Brew => launcher.open_brew_page(BrewPageMode::Search, window, cx),
                     LauncherPage::Text => launcher.open_text_page("", window, cx),
-                    LauncherPage::Pomodoro => launcher.open_pomodoro_page(window, cx),
-                    LauncherPage::Weather => launcher.open_weather_page("", window, cx),
+                    LauncherPage::Extension("pomodoro") => {
+                        launcher.open_extension_page("pomodoro", "", window, cx)
+                    }
+                    LauncherPage::Extension("weather") => {
+                        launcher.open_extension_page("weather", "", window, cx)
+                    }
                     LauncherPage::Notes => launcher.open_notes_page(window, cx),
-                    LauncherPage::Media => launcher.open_media_page(window, cx),
+                    LauncherPage::Extension("media-control") => {
+                        launcher.open_extension_page("media-control", "", window, cx)
+                    }
                     LauncherPage::Browser(browser) => {
                         launcher.open_browser_page(browser, window, cx)
                     }
