@@ -333,7 +333,11 @@ fn build_page(query: &str) -> PageView {
                     None,
                     current.phase_label(),
                     format_remaining(current.remaining),
-                    String::new(),
+                    if current.paused {
+                        String::from("Enter to resume")
+                    } else {
+                        String::from("Enter to pause")
+                    },
                     hero_tone(current.phase),
                 )
                 .progress(elapsed, hero_tone(current.phase))
@@ -430,6 +434,28 @@ fn build_page(query: &str) -> PageView {
 /// Runs one `pomodoro:page:{action}` from the declarative page.
 /// Returns the toast message, or `Err(NotFound)` for unknown actions.
 fn run_page_action(action: &str) -> Result<String, CommandError> {
+    // ←/→ pick the duration among the presets while idle; a typed
+    // custom length is replaced by the picked preset. While a timer
+    // runs the arrows mean nothing, so they fail silently.
+    if action == "left" || action == "right" {
+        if snapshot().is_some() {
+            return Err(CommandError::NotFound);
+        }
+        let current = selected_minutes().load(Ordering::Relaxed);
+        let index = PRESETS
+            .iter()
+            .position(|preset| *preset == current)
+            .unwrap_or(1);
+        let next = if action == "right" {
+            (index + 1) % PRESETS.len()
+        } else {
+            (index + PRESETS.len() - 1) % PRESETS.len()
+        };
+        let minutes = PRESETS[next];
+        typed_minutes().store(0, Ordering::Relaxed);
+        selected_minutes().store(minutes, Ordering::Relaxed);
+        return Ok(format!("{minutes} min"));
+    }
     if action == "enter" {
         return match snapshot() {
             Some(current) if current.paused => {
@@ -930,6 +956,31 @@ mod tests {
         // Click Resume while idle: error, not a start.
         assert!(page_click("resume").is_err());
         assert_eq!(snapshot(), None, "resume must not start a timer");
+        stop();
+    }
+
+    #[test]
+    fn arrows_pick_the_duration_and_enter_starts_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        stop();
+        // The default selection is 25; left steps to the previous
+        // preset, right comes back.
+        assert_eq!(page_click("left").unwrap(), "15 min");
+        assert_eq!(idle_minutes(), 15);
+        assert_eq!(page_click("right").unwrap(), "25 min");
+        assert_eq!(page_click("right").unwrap(), "45 min");
+        assert_eq!(idle_minutes(), 45);
+
+        // Enter starts the selected duration.
+        assert_eq!(page_click("enter").unwrap(), "Focus started — 45 min");
+        let snap = snapshot().unwrap();
+        assert_eq!(snap.phase, Phase::Focus);
+        assert_eq!(snap.duration, Duration::from_secs(45 * 60));
+
+        // While running, arrows are a silent no-op and Enter pauses.
+        assert!(page_click("left").is_err());
+        assert_eq!(page_click("enter").unwrap(), "Timer paused");
+        assert!(snapshot().unwrap().paused);
         stop();
     }
 

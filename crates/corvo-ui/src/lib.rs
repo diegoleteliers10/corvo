@@ -2411,32 +2411,29 @@ impl Launcher {
             }
         }
 
-        // Declarative extension pages: ←/→ cycle the highlighted
-        // button; ↑/↓ move the form-field focus; typing edits the
-        // focused form field below via the default text path.
+        // Declarative extension pages: ←/→ and Enter are page
+        // semantics — the command decides what they mean and renders
+        // its own selection; ↑/↓ move the form-field focus; typing
+        // edits the focused form field via the default text path.
         if let LauncherPage::Extension(command_id) = self.page {
             if mods.is_unmodified() {
                 let view = self.extension_view.clone();
-                let button_count = view.as_ref().map_or(0, |view| match view {
-                    corvo_core::PageView::Blocks(blocks) => blocks
-                        .blocks
-                        .iter()
-                        .filter_map(|block| match block {
-                            corvo_core::Block::Buttons(buttons) => Some(buttons.len()),
-                            _ => None,
-                        })
-                        .sum(),
-                    _ => 0,
-                });
-                if button_count > 0 && self.query.is_empty() && (key == "left" || key == "right") {
-                    self.extension_button_focus = if key == "right" {
-                        (self.extension_button_focus + 1) % button_count
-                    } else {
-                        (self.extension_button_focus + button_count - 1) % button_count
-                    };
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
+                let is_blocks = matches!(view, Some(corvo_core::PageView::Blocks(_)));
+                // ←/→ mean what the page says (pomodoro changes the
+                // selected duration, media moves between tracks). An
+                // action the page does not implement refreshes it and
+                // shows nothing — a deliberate no-op.
+                let direction = match key {
+                    "left" => Some("left"),
+                    "right" => Some("right"),
+                    _ => None,
+                };
+                if let Some(direction) = direction {
+                    if is_blocks && self.query.is_empty() {
+                        self.run_extension_action(command_id, direction.to_owned(), cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 if key == "up" || key == "down" {
                     match self.extension_view.as_ref() {
@@ -2470,13 +2467,10 @@ impl Launcher {
                             return;
                         }
                         Some(corvo_core::PageView::Blocks(_)) if self.query.is_empty() => {
-                            // Enter presses the highlighted button; the
-                            // plain "enter" action only fires when the
-                            // page declares no buttons to highlight.
-                            let action = self
-                                .focused_block_action()
-                                .unwrap_or_else(|| "enter".to_owned());
-                            self.run_extension_action(command_id, action, cx);
+                            // Enter is the page's primary action —
+                            // start the timer, toggle playback, save
+                            // the countdown — decided by the command.
+                            self.run_extension_action(command_id, "enter".to_owned(), cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -3634,29 +3628,6 @@ impl Launcher {
         let argument = spec.arguments.first()?;
         let hint = argument.placeholder;
         (!hint.is_empty()).then(|| SharedString::from(hint))
-    }
-
-    /// The action id of the highlighted button on the current Blocks
-    /// page, flattening every Buttons block in order — ←/→ cycles this
-    /// same list, so Enter presses what is highlighted.
-    fn focused_block_action(&self) -> Option<String> {
-        let view = self.extension_view.as_ref()?;
-        let corvo_core::PageView::Blocks(blocks) = view else {
-            return None;
-        };
-        let actions: Vec<&str> = blocks
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                corvo_core::Block::Buttons(buttons) => Some(buttons),
-                _ => None,
-            })
-            .flatten()
-            .map(|button| button.action_id.as_str())
-            .collect();
-        actions
-            .get(self.extension_button_focus)
-            .map(|action| (*action).to_owned())
     }
 
     fn selected_result(&self) -> Option<&SearchResult> {
@@ -4872,7 +4843,7 @@ impl Launcher {
                         .flex()
                         .gap_2()
                         .justify_center();
-                    for (index, button) in buttons.iter().enumerate() {
+                    for button in buttons.iter() {
                         let color = button.style.color_or(if button.tone == corvo_core::Tone::Neutral {
                             COLOR_TEXT
                         } else {
@@ -4880,7 +4851,6 @@ impl Launcher {
                         });
                         let size = button.style.size.unwrap_or(13) as f32;
                         let bold = button.style.bold.unwrap_or(false);
-                        let focused = index == self.extension_button_focus;
                         let action_id = button.action_id.clone();
                         let command_id = match self.page {
                             LauncherPage::Extension(id) => id,
@@ -4900,10 +4870,9 @@ impl Launcher {
                             .text_color(rgb(color))
                             .child(button.label.clone());
                         tile = match button.style.background {
-                            // An explicit background owns the tile; the
-                            // focus highlight stays for themed buttons.
+                            // Selection lives in the command's styling,
+                            // not in a UI focus ring.
                             Some(background) => tile.bg(rgb(background)),
-                            None if focused => tile.bg(rgb(COLOR_ROW_SELECTED)),
                             None => tile.bg(rgb(0x181b1e)),
                         };
                         row = row.child(tile.on_click(cx.listener(

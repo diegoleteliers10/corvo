@@ -10,6 +10,7 @@ are in RELEASE_NOTES.md.
 - Extensions can declare a manifest — title, description, icon, and a command surface with typed arguments (text, password, dropdown) — that root search and Settings render without hand-written plumbing.
 - New declarative page model: an extension returns a PageView (composed Blocks with a live refresh cadence, a markdown Detail with metadata, a Grid of tiles, or a Form) and the launcher renders it. Page buttons, grid clicks, and form submits run through the extension's execute.
 - Root search shows a declared command's argument placeholder, and declared no-view commands execute straight from a hotkey without opening the launcher.
+- Declarative pages own their keyboard: the command decides what left, right, and Enter mean and renders the selected item itself, so there is one selection and the keys match it (pomodoro picks durations and starts with Enter; media moves between tracks).
 - Pomodoro, Weather, and Media Control moved onto the declarative model; the launcher no longer special-cases their pages.
 - New Countdown extension: a live ticking page with a typed date argument and saved countdowns, built entirely on the declarative model.
 

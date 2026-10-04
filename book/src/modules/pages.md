@@ -77,6 +77,23 @@ PageBuilder::new("...")
 `None` fields keep the theme — an extension that never styles looks
 native; one that styles everywhere looks like itself.
 
+## Keyboard: the page owns arrow and Enter semantics
+
+On a Blocks page the launcher does not keep its own focus ring — the
+command renders the selection and decides what the keys mean:
+
+| Key | Sent to `execute` | Pomodoro | Media |
+|---|---|---|---|
+| ← | `{id}:page:left` | previous preset | previous track |
+| → | `{id}:page:right` | next preset | next track |
+| Enter | `{id}:page:enter` | start / pause / resume (the primary action) | play / pause |
+
+The selected item is ordinary styling — a filled chip via `Style`,
+not a UI highlight — so there is exactly one "selected" look and it
+means what the user thinks. Keys a page does not implement fail
+silently (the page just refreshes). Forms keep their own ↑/↓
+field focus; Grids filter from the search bar.
+
 ## Buttons and page actions
 
 Every click becomes `execute("{id}:page:{action_id}")` in your

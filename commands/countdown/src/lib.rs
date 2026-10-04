@@ -7,6 +7,7 @@
 //! Usage: `countdown 2026-12-25 My trip` from root search opens the
 //! page; Save pins it to the strip.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use corvo_core::{
@@ -23,6 +24,13 @@ const ID: &str = "countdown";
 struct Saved {
     label: String,
     target: u64,
+}
+
+/// The countdown currently on screen, remembered from the last page
+/// render so Enter saves what the user sees.
+fn last_parsed() -> &'static Mutex<Option<(u64, String)>> {
+    static LAST: OnceLock<Mutex<Option<(u64, String)>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
 }
 
 fn saved_list() -> Vec<Saved> {
@@ -239,6 +247,9 @@ impl Command for CountdownCommand {
             .ticking(1);
         match parsed {
             Some((target, label)) => {
+                if let Ok(mut last) = last_parsed().lock() {
+                    *last = Some((target, label.clone()));
+                }
                 let (delta, hours, minutes, seconds) = time_until(target);
                 let value = if delta.abs() < 86_400 {
                     format!("{hours:02}:{minutes:02}:{seconds:02}")
@@ -435,9 +446,16 @@ fn run_page_action(action: &str) -> Result<Action, CommandError> {
         return Ok(Action::ShowToast("Removed".into()));
     }
     if action == "enter" {
-        // Enter with a parsed date saves it; Enter on the idle page
-        // is a no-op.
-        return Ok(Action::ShowToast(String::new()));
+        // Enter saves the countdown on screen; on the idle page it is
+        // a no-op.
+        let parsed = last_parsed().lock().ok().and_then(|last| last.clone());
+        return match parsed {
+            Some((target, label)) => {
+                save_countdown(&label, target).map_err(CommandError::Platform)?;
+                Ok(Action::ShowToast(format!("Saved {label}")))
+            }
+            None => Ok(Action::ShowToast(String::new())),
+        };
     }
     Err(CommandError::NotFound)
 }

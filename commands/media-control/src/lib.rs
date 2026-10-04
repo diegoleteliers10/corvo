@@ -294,7 +294,14 @@ impl Command for MediaControlCommand {
             return Ok(Action::ShowToast("Media Control".into()));
         }
         if let Some(action) = key.strip_prefix("page:") {
-            let action = action.to_owned();
+            // Page keyboard semantics: ←/→ move between tracks, Enter
+            // toggles playback — the same verbs the buttons carry.
+            let action = match action {
+                "left" => "previous".to_owned(),
+                "right" => "next".to_owned(),
+                "enter" => "toggle".to_owned(),
+                other => other.to_owned(),
+            };
             let sent = smol::unblock(move || control(&action)).await;
             return sent
                 .then(|| Action::ShowToast("Media control sent".into()))
