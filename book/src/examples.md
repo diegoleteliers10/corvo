@@ -7,6 +7,7 @@ shape.
 | Pattern | Read | What to learn |
 |---|---|---|
 | The standard extension | `templates/extension` | every contract part at once: routing, page, sections, actions, prefs, cache, tests |
+| Declarative rich page | `commands/countdown` | manifest with typed arguments, a ticking Blocks page, storage, and zero UI code |
 | Network + cache + debounce | `commands/weather` | TTL cache keyed by argument, debounced UI fetch, emoji-coded conditions |
 | Dedicated page with state | `commands/pomodoro` + the pomodoro page in `corvo-ui` | a state machine behind a mutex, notifications from a watcher thread, a bespoke page |
 | Platform abstraction | `commands/media-control` | a thin crate over `corvo-platform` (AppleScript / SMTC / MPRIS) with one result model |

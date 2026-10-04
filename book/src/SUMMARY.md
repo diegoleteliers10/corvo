@@ -16,6 +16,8 @@
 # Module reference
 
 - [List](modules/list.md)
+- [Pages](modules/pages.md)
+- [Manifest](modules/manifest.md)
 - [Actions](modules/actions.md)
 - [Cache](modules/cache.md)
 - [Preferences](modules/prefs.md)

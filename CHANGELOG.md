@@ -5,6 +5,14 @@ are in RELEASE_NOTES.md.
 
 # Unreleased
 
+## Extension platform
+
+- Extensions can declare a manifest — title, description, icon, and a command surface with typed arguments (text, password, dropdown) — that root search and Settings render without hand-written plumbing.
+- New declarative page model: an extension returns a PageView (composed Blocks with a live refresh cadence, a markdown Detail with metadata, a Grid of tiles, or a Form) and the launcher renders it. Page buttons, grid clicks, and form submits run through the extension's execute.
+- Root search shows a declared command's argument placeholder, and declared no-view commands execute straight from a hotkey without opening the launcher.
+- Pomodoro, Weather, and Media Control moved onto the declarative model; the launcher no longer special-cases their pages.
+- New Countdown extension: a live ticking page with a typed date argument and saved countdowns, built entirely on the declarative model.
+
 ## Extensions
 
 - Give every browser its own extension and launcher page: Google Chrome, Brave, Microsoft Edge, Firefox, Arc, Dia, Safari, and Aside. Each shows its real application icon, its open tabs, and its bookmarks, and appears only while that browser is installed.

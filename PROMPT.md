@@ -53,6 +53,15 @@ native launcher written in Rust. Work inside the repository
    `execute` strips the `{id}:` prefix with `routing::key` and
    returns `CommandError::NotFound` for anything else. No
    `unwrap`/`expect`/panic outside tests.
+7b. Rich pages are declarative: implement `manifest()` (title,
+   description, icon, declared commands with typed arguments) and
+   `page(query)` returning a `PageView` — composed Blocks with a
+   `Refresh::Every` cadence for live state, `corvo_ext::pages`
+   helpers for Detail/Grid/Form. Page buttons and form submits route
+   back through `execute("{id}:page:{action}")`. Never touch
+   `corvo-ui` to render anything; read `book/src/views.md` and
+   `book/src/modules/pages.md` first. `commands/countdown` is the
+   reference implementation.
 8. Slow work in `execute` runs inside `smol::unblock`; subprocesses
    run through `corvo_platform::run_process_with_timeout` with an
    explicit budget.

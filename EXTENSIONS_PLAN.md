@@ -204,6 +204,10 @@ tabs on Windows and Linux (Firefox removed its CDP endpoint).
 
 ## Shared changes
 
+- Add the declarative extension platform: manifests with declared
+  commands and typed arguments, PageView pages (Blocks, Detail,
+  Grid, Form) with refresh cadences, quick commands on hotkeys, and
+  a generic page interpreter in corvo-ui.
 - Add dedicated launcher pages for the new commands.
 - Add native note editor windows with Markdown previews, syntax colors,
   tables, selection, and a scrollbar.

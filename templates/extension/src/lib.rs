@@ -23,7 +23,11 @@
 //!
 //! The full guide lives in the extension book (`book/` in the repo,
 //! published on GitHub Pages); the module reference for `corvo_ext`
-//! items is rustdoc (`cargo doc -p corvo-ext --open`).
+//! items is rustdoc (`cargo doc -p corvo-ext --open`). For a rich
+//! declarative page (Blocks/Detail/Grid/Form) and a manifest with
+//! declared commands, read `book/src/views.md` and
+//! `book/src/modules/pages.md`; `commands/countdown` is the
+//! reference implementation.
 
 use corvo_core::{
     phosphor_svgs, Action, Command, CommandError, CommandAction, ExecutionContext, Icon,
