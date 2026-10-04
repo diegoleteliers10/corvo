@@ -1147,6 +1147,7 @@ pub struct Launcher {
     /// The declarative view the extension page currently renders,
     /// plus the token state the interactive views need.
     extension_view: Option<corvo_core::PageView>,
+    extension_scroll_handle: ScrollHandle,
     extension_pump_running: bool,
     /// Highlighted button on a Blocks page; ←/→ cycle it.
     extension_button_focus: usize,
@@ -1670,6 +1671,7 @@ impl Launcher {
             port_cursor_idx: 0,
             port_input_active: false,
             extension_view: None,
+            extension_scroll_handle: ScrollHandle::new(),
             extension_pump_running: false,
             extension_button_focus: 0,
             extension_form: ExtensionFormState::default(),
@@ -4710,8 +4712,10 @@ impl Launcher {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_3()
+            .gap_2()
             .px(px(24.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.extension_scroll_handle)
             .pb(px(56.0));
         for block in &blocks.blocks {
             match block {
@@ -4739,27 +4743,27 @@ impl Launcher {
                         .gap_1();
                     if let Some(glyph) = hero.glyph {
                         hero_view = hero_view.child(
-                            div().text_size(px(72.0)).child(glyph.to_string()),
+                            div().text_size(px(40.0)).child(glyph.to_string()),
                         );
                     }
                     column = column.child(
                         hero_view
                             .child(
                                 div()
-                                    .text_size(px(72.0))
+                                    .text_size(px(56.0))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(color))
                                     .child(hero.value.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(15.0))
+                                    .text_size(px(14.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(hero.title.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(px(11.5))
                                     .text_color(rgb(COLOR_TEXT_DIM))
                                     .child(hero.subtitle.clone()),
                             ),
@@ -4810,12 +4814,12 @@ impl Launcher {
                             .items_center()
                             .gap_0p5()
                             .px_3()
-                            .py_2()
+                            .py_1p5()
                             .rounded_lg()
                             .bg(rgb(0x181b1e));
                         if let Some(glyph) = card.glyph {
                             card_view = card_view.child(
-                                div().text_size(px(26.0)).child(glyph.to_string()),
+                                div().text_size(px(20.0)).child(glyph.to_string()),
                             );
                         }
                         strip = strip.child(
@@ -5121,6 +5125,8 @@ impl Launcher {
             .flex_col()
             .gap_3()
             .px(px(32.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.extension_scroll_handle)
             .pb(px(56.0));
         column = column.child(
             div()
