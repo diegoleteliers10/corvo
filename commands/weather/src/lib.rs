@@ -39,6 +39,24 @@ pub struct ForecastDay {
     pub min_c: i32,
 }
 
+/// The page's temperature unit, toggled by the filter chips. Starts
+/// metric; the choice lives for the session.
+fn units() -> &'static std::sync::atomic::AtomicU8 {
+    static UNITS: std::sync::OnceLock<std::sync::atomic::AtomicU8> = std::sync::OnceLock::new();
+    UNITS.get_or_init(|| std::sync::atomic::AtomicU8::new(0))
+}
+
+const UNITS_C: u8 = 0;
+const UNITS_F: u8 = 1;
+
+/// Renders a Celsius value in the page's current unit.
+fn temp(value: i32) -> String {
+    match units().load(std::sync::atomic::Ordering::Relaxed) {
+        UNITS_F => format!("{}°", value * 9 / 5 + 32),
+        _ => format!("{}°", value),
+    }
+}
+
 fn cache() -> &'static Mutex<Option<(String, Instant, Weather)>> {
     static CACHE: OnceLock<Mutex<Option<(String, Instant, Weather)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
@@ -212,6 +230,7 @@ fn open_result(input: &str, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -231,6 +250,7 @@ fn conditions_result(weather: &Weather, score: i32) -> SearchResult {
         score,
         accessory: Some("Now".into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -310,7 +330,7 @@ impl Command for WeatherCommand {
             .map(|day| corvo_core::StripCard {
                 title: day.label.clone(),
                 glyph: Some(day.glyph),
-                value: format!("{}° / {}°", day.max_c, day.min_c),
+                value: format!("{} / {}", temp(day.max_c), temp(day.min_c)),
                 style: corvo_core::Style::default(),
                 subtitle: {
                     let cut: String = day.description.chars().take(14).collect();
@@ -318,20 +338,29 @@ impl Command for WeatherCommand {
                 },
             })
             .collect();
+        let is_fahrenheit =
+            units().load(std::sync::atomic::Ordering::Relaxed) == UNITS_F;
         Some(
             corvo_ext::pages::PageBuilder::new("City name, or leave empty for your location...")
                 .badge(weather.city.clone(), Tone::Neutral)
                 .hero(
                     Some(weather.glyph),
                     "Now",
-                    format!("{}°", weather.temperature_c),
+                    temp(weather.temperature_c),
                     format!(
-                        "{} · feels {}° · {}% humidity · {} km/h",
-                        weather.description, weather.feels_like_c, weather.humidity, weather.wind_kph
+                        "{} · feels {} · {}% humidity · {} km/h",
+                        weather.description,
+                        temp(weather.feels_like_c),
+                        weather.humidity,
+                        weather.wind_kph
                     ),
                     Tone::Accent,
                 )
                 .strip(strip)
+                .filters(vec![
+                    corvo_core::PageFilter::new("c", if is_fahrenheit { "°C" } else { "°C ●" }),
+                    corvo_core::PageFilter::new("f", if is_fahrenheit { "°F ●" } else { "°F" }),
+                ])
                 .build(),
         )
     }
@@ -375,6 +404,13 @@ impl Command for WeatherCommand {
         };
         if key == "open" || key.starts_with("open:") {
             return Ok(Action::ShowToast("Weather".into()));
+        }
+        if let Some(value) = key.strip_prefix("page:filter:") {
+            units().store(
+                if value == "f" { UNITS_F } else { UNITS_C },
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            return Ok(Action::ShowToast(String::new()));
         }
         if key == "current" {
             let summary = cached(None)

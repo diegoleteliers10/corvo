@@ -94,6 +94,54 @@ means what the user thinks. Keys a page does not implement fail
 silently (the page just refreshes). Forms keep their own ↑/↓
 field focus; Grids filter from the search bar.
 
+## Filters — the second dimension
+
+`.filters()` declares a chip row above the content, the pattern list
+extensions use for a second axis (units, category, sort order). The
+command owns the selection and re-renders when a chip runs
+`{id}:page:filter:{value}`:
+
+```rust
+.filters(vec![
+    PageFilter::new("c", "°C ●"),
+    PageFilter::new("f", "°F"),
+])
+```
+
+```ignore
+if let Some(value) = key.strip_prefix("page:filter:") {
+    self.units.store(/* ... */);
+    return Ok(Action::ShowToast(String::new())); // silent re-render
+}
+```
+
+## Row accessories — facts with tooltips
+
+Rows carry one primary `accessory` plus structured facts, each with
+its own hover tooltip — the grammar Kill Process uses for CPU and
+memory and Hacker News for points and comments:
+
+```rust
+ListItem::new("chrome")
+    .accessory("12.4%")
+    .accessories([
+        SearchAccessory::new("1.2 GB").with_tooltip("Memory: 1.24 GiB"),
+        SearchAccessory::new("412").with_tooltip("% CPU: 12.40"),
+    ])
+```
+
+## Recently used
+
+`corvo_ext::recents` backs the "Recently used" section the
+most-installed extensions render first:
+
+```rust
+// In execute, after acting on an item:
+corvo_ext::recents::push(ID, "recent-items", &item_id, 10)?;
+// In page()/search(), before everything else:
+let recent = corvo_ext::recents::list(ID, "recent-items");
+```
+
 ## Buttons and page actions
 
 Every click becomes `execute("{id}:page:{action_id}")` in your

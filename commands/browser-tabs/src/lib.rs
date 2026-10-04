@@ -328,6 +328,7 @@ fn opener_result(id: BrowserId, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -340,6 +341,7 @@ fn tab_result(id: BrowserId, tab: &Tab, score: i32) -> SearchResult {
         score,
         accessory: Some("Tab".into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -352,6 +354,7 @@ fn bookmark_result(id: BrowserId, bookmark: &Bookmark, score: i32) -> SearchResu
         score,
         accessory: Some("Bookmark".into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -388,6 +391,7 @@ fn hint_result(id: BrowserId) -> Option<SearchResult> {
         score: 1,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     })
 }
 

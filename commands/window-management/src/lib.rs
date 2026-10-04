@@ -209,6 +209,7 @@ impl Command for WindowManagementCommand {
                         score,
                         accessory: layout.hotkey.clone(),
                         section: None,
+                        accessories: Vec::new(),
                     });
                 }
             }
@@ -237,6 +238,7 @@ impl Command for WindowManagementCommand {
                     score,
                     accessory: Some(hotkey.unwrap_or("Window Action").into()),
                     section: None,
+                    accessories: Vec::new(),
                 });
             }
         }

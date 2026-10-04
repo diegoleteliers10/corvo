@@ -59,6 +59,25 @@ impl Style {
     }
 }
 
+/// One page-level filter: a chip row above the content, the second
+/// filter dimension list extensions lean on. The command owns the
+/// selection and re-renders when a chip runs
+/// `{command-id}:page:filter:{value}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageFilter {
+    pub value: String,
+    pub label: String,
+}
+
+impl PageFilter {
+    pub fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+        }
+    }
+}
+
 /// One composed page: a vertical stack of blocks. Covers the
 /// big-number pages (countdown, timer), now-playing surfaces, and
 /// forecast strips without bespoke UI code.
@@ -69,6 +88,9 @@ pub struct Blocks {
     /// Search-bar hint while the page is open, e.g. "Minutes for a
     /// custom focus, or leave empty for 25...".
     pub placeholder: &'static str,
+    /// Filter chips rendered above the content. The selected one is
+    /// whatever the command styles as picked.
+    pub filters: Vec<PageFilter>,
 }
 
 /// A large status label, the small pill above hero surfaces.

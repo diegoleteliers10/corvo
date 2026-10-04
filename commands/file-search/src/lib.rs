@@ -96,6 +96,7 @@ fn search_files_command_result(query: &str) -> Option<SearchResult> {
             "Files".into()
         }),
         section: None,
+        accessories: Vec::new(),
     })
 }
 
@@ -275,6 +276,7 @@ fn file_search_result(path: &Path, score: i32, is_dir: bool) -> SearchResult {
         score,
         accessory: Some(if is_dir { "Folder" } else { "File" }.into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 

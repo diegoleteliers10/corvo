@@ -20,6 +20,7 @@ pub mod list;
 pub mod manifest;
 pub mod pages;
 pub mod prefs;
+pub mod recents;
 pub mod routing;
 pub mod storage;
 

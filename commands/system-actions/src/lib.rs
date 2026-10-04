@@ -92,6 +92,7 @@ impl Command for SystemActionsCommand {
                         score,
                         accessory: Some("System Action".into()),
                         section: None,
+                        accessories: Vec::new(),
                     });
                 }
             }
@@ -131,6 +132,7 @@ impl Command for SystemActionsCommand {
                         score,
                         accessory: Some("System Setting".into()),
                         section: None,
+                        accessories: Vec::new(),
                     });
                 }
             }

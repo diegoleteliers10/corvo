@@ -116,6 +116,52 @@ the menu bar). Corvo's roadmap includes menu-bar surfaces; until
 then, the interval pattern maps to ticking extension pages
 (`Refresh::Every`).
 
+## Operation families and delivery modes
+
+Two shapes repeat across the most-installed utilities, both built
+from NoView commands:
+
+- **One command per operation**: Encoding Tools ships `md5`, `sha1`,
+  `sha256`, `base64-encode`... and Change Case ships 22 conversions —
+  each a separate root-search verb acting on the clipboard, the
+  selection, or an argument. Users search the operation, not a menu
+  of operations. Corvo's text-utilities consolidates; when a family
+  grows past a handful of verbs, split the high-frequency ones out as
+  declared NoView commands.
+- **Same operation, three delivery modes**: Google Translate ships
+  `instant-translate-copy`, `instant-translate-paste`, and
+  `instant-translate-view` — translate the clipboard and deliver the
+  result however the user wants it. Downloads Manager ships
+  open/copy/paste/show/delete-*latest-download*. Model delivery as
+  commands, not as options inside one command.
+- **A command that toggles a preference**: Downloads Manager's
+  `toggle-deletion-behavior` flips a setting from the keyboard
+  without opening Settings. Small, surprising, loved.
+
+## Health and onboarding as a first-class page
+
+Notion ships `manage-connection`: a Detail page that reports the
+connection state in plain language ("Your connection is working."),
+with actions to Reconnect, Test Connection, and Open Preferences.
+Any extension with a token or an external dependency deserves the
+same page: state, explanation, and the fixing actions on one screen.
+
+## Computation in the search bar
+
+Currency Exchange turns the search text into the input — type
+`100 usd` and every row is a converted amount, updated per keystroke,
+with the currency name as an accessory. The search bar is an input
+field, not just a filter: commands that transform (converters,
+calculators, encoders) should render their output as rows driven by
+the query.
+
+## Grids: images with sections and columns
+
+Unsplash renders results as a Grid with `Grid.Section` (title +
+count), column count from a preference, and images as tile content.
+In Corvo, Grids filter from the search bar and take a column count
+per page; image tiles take a cached PNG path.
+
 ## Anti-patterns to avoid
 
 - One mega command with an internal menu of sub-features.

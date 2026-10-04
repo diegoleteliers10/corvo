@@ -354,6 +354,7 @@ impl Command for CountdownCommand {
                         score: 1100,
                         accessory: None,
                         section: None,
+                        accessories: Vec::new(),
                     },
                 );
             }
@@ -368,6 +369,7 @@ impl Command for CountdownCommand {
                 score: 1000,
                 accessory: None,
                 section: None,
+                accessories: Vec::new(),
             }];
         }
         corvo_core::search_match_score(trimmed, &["Countdown", "countdown days until date"])
@@ -469,6 +471,7 @@ fn open_result(score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 

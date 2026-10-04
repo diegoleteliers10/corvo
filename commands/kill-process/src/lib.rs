@@ -96,6 +96,7 @@ fn open_ports_result() -> SearchResult {
         score: 1000,
         accessory: Some("Port Manager".into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -112,6 +113,7 @@ fn open_processes_result(filter: &str) -> SearchResult {
         score: 1001,
         accessory: Some("Port Manager".into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -128,6 +130,7 @@ fn ports_unavailable_result(error: &str) -> SearchResult {
         score: 900,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -183,6 +186,7 @@ fn port_results(
                 score,
                 accessory: Some("TCP".into()),
                 section: None,
+                accessories: Vec::new(),
             })
         })
         .take(max_results)
@@ -249,6 +253,7 @@ fn build_results(
                 },
             accessory: Some(format!("{:.1}% CPU", process.cpu_percent)),
             section: None,
+            accessories: Vec::new(),
         })
         .collect()
 }

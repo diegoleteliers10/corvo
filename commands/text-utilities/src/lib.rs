@@ -94,6 +94,7 @@ fn open_result(input: &str, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -307,6 +308,7 @@ fn cache_and_render(mut utilities: Vec<Utility>, max_results: usize) -> Vec<Sear
             score: utility.score,
             accessory: Some(utility.category.to_owned()),
             section: None,
+            accessories: Vec::new(),
         })
         .collect()
 }

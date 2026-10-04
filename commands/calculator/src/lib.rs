@@ -56,6 +56,7 @@ impl Command for CalculatorCommand {
             score: 100_000,
             accessory,
             section: None,
+            accessories: Vec::new(),
         }]
     }
 

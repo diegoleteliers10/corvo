@@ -17,8 +17,8 @@ pub mod search;
 pub mod shortcut;
 pub use page::{
     ArgumentKind, ArgumentSpec, Badge, Block, Blocks, CommandMode, CommandSpec, ExtensionManifest,
-    FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageView, Progress, Refresh,
-    StripCard, Style, Tone,
+    FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageFilter, PageView, Progress,
+    Refresh, StripCard, Style, Tone,
 };
 pub use search::search_match_score;
 pub use shortcut::Primary;
@@ -56,10 +56,36 @@ pub struct SearchResult {
     pub score: i32,
     /// Right-aligned hint, for example a hotkey or a unit.
     pub accessory: Option<String>,
+    /// Further right-aligned facts, each with an optional tooltip.
+    /// Rendered after `accessory`; keep each one short — a number, a
+    /// state, a unit.
+    pub accessories: Vec<SearchAccessory>,
     /// Group label for list sections. Consecutive rows sharing a
     /// section render under one header; rows without one land in the
     /// default group.
     pub section: Option<String>,
+}
+
+/// One right-aligned fact on a result row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchAccessory {
+    pub text: String,
+    /// Shown on hover; explain the number, not repeat it.
+    pub tooltip: Option<String>,
+}
+
+impl SearchAccessory {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tooltip: None,
+        }
+    }
+
+    pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
 }
 
 /// A system operation performed through the platform's own API.

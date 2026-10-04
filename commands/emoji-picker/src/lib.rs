@@ -1130,6 +1130,7 @@ impl Command for EmojiPickerCommand {
                 score: 1000,
                 accessory: Some("cmd+alt+space".into()),
                 section: None,
+                accessories: Vec::new(),
             }];
         }
 
@@ -1146,6 +1147,7 @@ impl Command for EmojiPickerCommand {
                 score: score + 120,
                 accessory: Some("cmd+alt+space".into()),
                 section: None,
+                accessories: Vec::new(),
             });
         }
         results
@@ -1253,6 +1255,7 @@ pub fn all_emojis() -> Vec<SearchResult> {
                         score: 500,
                         accessory: Some(category.into()),
                         section: None,
+                        accessories: Vec::new(),
                     }
                 })
                 .collect()
@@ -1305,6 +1308,7 @@ pub fn search_emojis(query: &str, max_results: usize) -> Vec<SearchResult> {
                 score,
                 accessory: Some(category.into()),
                 section: None,
+                accessories: Vec::new(),
             }
         })
         .collect()

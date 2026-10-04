@@ -760,6 +760,7 @@ impl Command for ClipboardManagerCommand {
                             score: 50,
                             accessory: Some(accessory),
                             section: None,
+                            accessories: Vec::new(),
                         }
                     })
                     .collect();
@@ -812,6 +813,7 @@ impl Command for ClipboardManagerCommand {
                         score,
                         accessory: Some(accessory),
                         section: None,
+                        accessories: Vec::new(),
                     }
                 })
                 .collect();
@@ -826,6 +828,7 @@ impl Command for ClipboardManagerCommand {
                 score: 990,
                 accessory: Some("cmd+alt+c".into()),
                 section: None,
+                accessories: Vec::new(),
             }];
         }
 
@@ -842,6 +845,7 @@ impl Command for ClipboardManagerCommand {
                 score,
                 accessory: Some("cmd+alt+c".into()),
                 section: None,
+                accessories: Vec::new(),
             });
         }
         results

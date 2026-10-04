@@ -13,6 +13,7 @@ pub struct PageBuilder {
     blocks: Vec<Block>,
     refresh: Refresh,
     placeholder: &'static str,
+    filters: Vec<corvo_core::PageFilter>,
 }
 
 impl PageBuilder {
@@ -21,6 +22,7 @@ impl PageBuilder {
             blocks: Vec::new(),
             refresh: Refresh::Manual,
             placeholder,
+            filters: Vec::new(),
         }
     }
 
@@ -76,6 +78,14 @@ impl PageBuilder {
         self
     }
 
+    /// Declares the page's filter chips. Clicking one runs
+    /// `{id}:page:filter:{value}`; the command re-renders with the new
+    /// selection styled via `.style()`.
+    pub fn filters(mut self, filters: Vec<corvo_core::PageFilter>) -> Self {
+        self.filters = filters;
+        self
+    }
+
     /// Restyles the block that was pushed last: `Some` fields
     /// override the launcher defaults, `None` keeps them. Chain it
     /// after `.badge()`, `.hero()`, `.progress()`, `.markdown()`,
@@ -103,6 +113,7 @@ impl PageBuilder {
             blocks: self.blocks,
             refresh: self.refresh,
             placeholder: self.placeholder,
+            filters: self.filters,
         })
     }
 }

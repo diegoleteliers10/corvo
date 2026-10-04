@@ -532,6 +532,7 @@ fn control_row(key: &str, label: &str, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -551,6 +552,7 @@ fn status_row(score: i32) -> SearchResult {
                 score,
                 accessory: Some(current.phase_label().to_owned()),
                 section: None,
+                accessories: Vec::new(),
             }
         }
         None => SearchResult {
@@ -561,6 +563,7 @@ fn status_row(score: i32) -> SearchResult {
             score,
             accessory: None,
             section: None,
+            accessories: Vec::new(),
         },
     }
 }
@@ -585,6 +588,7 @@ fn control_results(custom_minutes: Option<u64>) -> Vec<SearchResult> {
             score: 960,
             accessory: None,
             section: None,
+            accessories: Vec::new(),
         });
         let break_minutes = DEFAULT_BREAK.as_secs() / 60;
         results.push(SearchResult {
@@ -595,6 +599,7 @@ fn control_results(custom_minutes: Option<u64>) -> Vec<SearchResult> {
             score: 950,
             accessory: None,
             section: None,
+            accessories: Vec::new(),
         });
     }
     results
@@ -609,6 +614,7 @@ fn open_result(score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 

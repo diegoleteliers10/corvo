@@ -77,6 +77,7 @@ fn control_result(action: &str, label: &str, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -93,6 +94,7 @@ fn now_playing_result(playing: &NowPlaying, score: i32) -> SearchResult {
         score,
         accessory: Some(if playing.playing { "Playing" } else { "Paused" }.into()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -105,6 +107,7 @@ fn open_result(score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 

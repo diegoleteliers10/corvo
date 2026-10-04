@@ -180,6 +180,7 @@ impl Command for AppLauncherCommand {
                     score: 1100,
                     accessory: Some("Application".into()),
                     section: None,
+                    accessories: Vec::new(),
                 })
                 .collect()
         } else {
@@ -209,6 +210,7 @@ impl Command for AppLauncherCommand {
                         score,
                         accessory: Some("Application".into()),
                         section: None,
+                        accessories: Vec::new(),
                     }
                 })
                 .collect()

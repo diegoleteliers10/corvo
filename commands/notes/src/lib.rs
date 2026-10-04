@@ -330,6 +330,7 @@ fn note_result(note: &Note, score: i32) -> SearchResult {
         score,
         accessory: Some(note.created_at.clone()),
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -351,6 +352,7 @@ fn create_result(input: &str, score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 
@@ -363,6 +365,7 @@ fn open_result(score: i32) -> SearchResult {
         score,
         accessory: None,
         section: None,
+        accessories: Vec::new(),
     }
 }
 

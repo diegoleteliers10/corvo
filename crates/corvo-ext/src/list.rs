@@ -13,6 +13,7 @@ pub struct ListItem {
     pub subtitle: Option<String>,
     pub icon: Icon,
     pub accessory: Option<String>,
+    pub accessories: Vec<corvo_core::SearchAccessory>,
     pub section: Option<String>,
 }
 
@@ -23,6 +24,7 @@ impl ListItem {
             subtitle: None,
             icon: Icon::App,
             accessory: None,
+            accessories: Vec::new(),
             section: None,
         }
     }
@@ -43,6 +45,15 @@ impl ListItem {
         self
     }
 
+    /// Further right-aligned facts, each with an optional tooltip.
+    pub fn accessories(
+        mut self,
+        accessories: impl IntoIterator<Item = corvo_core::SearchAccessory>,
+    ) -> Self {
+        self.accessories.extend(accessories);
+        self
+    }
+
     /// Rows sharing a consecutive section render under one header.
     /// Keep each section contiguous when sorting.
     pub fn section(mut self, section: impl Into<String>) -> Self {
@@ -60,6 +71,7 @@ impl ListItem {
             icon: self.icon,
             score,
             accessory: self.accessory,
+            accessories: self.accessories,
             section: self.section,
         }
     }
@@ -75,6 +87,7 @@ pub fn open_entry(id: &str, title: &str, subtitle: &str, icon: Icon, score: i32)
         icon,
         score,
         accessory: None,
+        accessories: Vec::new(),
         section: None,
     }
 }
@@ -90,6 +103,7 @@ pub fn empty_state(id: &str, hint: &str) -> SearchResult {
         icon: Icon::System,
         score: 1,
         accessory: None,
+        accessories: Vec::new(),
         section: None,
     }
 }

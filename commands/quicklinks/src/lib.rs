@@ -126,6 +126,7 @@ impl Command for QuicklinksCommand {
                         score: 900,
                         accessory: link.hotkey.clone(),
                         section: None,
+                        accessories: Vec::new(),
                     });
                 }
                 let score = if q.is_empty() {
@@ -148,6 +149,7 @@ impl Command for QuicklinksCommand {
                     score,
                     accessory: link.hotkey.clone(),
                     section: None,
+                    accessories: Vec::new(),
                 })
             })
             .collect();

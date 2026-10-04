@@ -64,6 +64,7 @@ impl Command for SnippetsCommand {
                 score,
                 accessory: s.keyword.clone(),
                 section: None,
+                accessories: Vec::new(),
             })
             .collect();
         results.sort_by_key(|result| std::cmp::Reverse(result.score));

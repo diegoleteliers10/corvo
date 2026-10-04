@@ -95,6 +95,7 @@ impl Command for BrewCommand {
                 score: 900,
                 accessory: None,
                 section: None,
+                accessories: Vec::new(),
             }];
         }
         results_for_items(items, mode, &search_query, ctx.max_results)
@@ -295,6 +296,7 @@ fn results_for_items(
                     _ => None,
                 },
                 section,
+                accessories: Vec::new(),
             })
         })
         .collect();
@@ -410,6 +412,7 @@ fn menu_results() -> Vec<SearchResult> {
         score: 900 - index as i32,
         accessory: Some("Brew".into()),
         section: None,
+        accessories: Vec::new(),
     })
     .collect()
 }

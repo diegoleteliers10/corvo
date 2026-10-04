@@ -4687,6 +4687,41 @@ impl Launcher {
             .px(px(24.0))
             .mt_auto()
             .mb_auto();
+        let command_id_for_filters = match self.page {
+            LauncherPage::Extension(id) => id,
+            _ => "",
+        };
+        if !blocks.filters.is_empty() {
+            let mut chip_row = div()
+                .id("extension-filters")
+                .flex()
+                .gap_1p5()
+                .justify_center();
+            for filter in &blocks.filters {
+                let value = filter.value.clone();
+                chip_row = chip_row.child(
+                    div()
+                        .id(SharedString::from(format!("filter-{}", filter.value)))
+                        .px_2p5()
+                        .py_0p5()
+                        .rounded_full()
+                        .text_size(px(11.0))
+                        .text_color(rgb(COLOR_ACCENT))
+                        .child(filter.label.clone())
+                        .hover(|chip| chip.bg(rgb(0x181b1e)))
+                        .on_click(cx.listener(
+                            move |launcher, _: &ClickEvent, _window, cx| {
+                                launcher.run_extension_action(
+                                    command_id_for_filters,
+                                    format!("filter:{value}"),
+                                    cx,
+                                );
+                            },
+                        )),
+                );
+            }
+            inner = inner.child(chip_row);
+        }
         for block in &blocks.blocks {
             match block {
                 corvo_core::Block::Badge(badge) => {
@@ -9481,6 +9516,48 @@ impl Launcher {
                         .child(text),
                 )
             })
+            .children(result.accessories.iter().map(|fact| {
+                // Structured facts, each with its own hover tooltip:
+                // a number, a state, a unit — one fact per accessory.
+                let text = shortcut_text(&fact.text);
+                let mut chip = div()
+                    .id(SharedString::from(format!("acc-{}-{text}", fact.text.len())))
+                    .flex_none()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_size(px(12.0))
+                    .text_color(if selected {
+                        rgb(0x8cb8a3)
+                    } else {
+                        rgb(COLOR_TEXT_DIM)
+                    })
+                    .child(text);
+                if let Some(tooltip) = &fact.tooltip {
+                    let tooltip = tooltip.clone();
+                    chip = chip.tooltip(move |_, tooltip_cx| {
+                        tooltip_cx.new(|_| AccessoryTooltip(tooltip.clone())).into()
+                    });
+                }
+                chip
+            }))
+    }
+}
+
+/// Hover explanation for a structured row accessory.
+struct AccessoryTooltip(String);
+impl Render for AccessoryTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded_md()
+            .bg(rgb(COLOR_MENU))
+            .border_1()
+            .border_color(rgb(COLOR_DIVIDER))
+            .text_size(px(11.0))
+            .text_color(rgb(COLOR_TEXT))
+            .child(self.0.clone())
     }
 }
 
