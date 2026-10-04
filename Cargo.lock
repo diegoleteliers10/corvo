@@ -1253,6 +1253,7 @@ dependencies = [
  "corvo-core",
  "directories",
  "serde",
+ "serde_json",
  "toml 0.8.23",
 ]
 

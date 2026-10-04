@@ -17,8 +17,11 @@ pub mod actions;
 pub mod cache;
 pub mod feedback;
 pub mod list;
+pub mod manifest;
+pub mod pages;
 pub mod prefs;
 pub mod routing;
+pub mod storage;
 
 pub use corvo_core::{
     search_match_score, Action, Command, CommandAction, CommandError, ExecutionContext, Icon,

@@ -9,4 +9,5 @@ publish = false
 corvo-core = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true }
+serde_json = "1"
 toml = { workspace = true }

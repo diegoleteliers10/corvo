@@ -12,8 +12,14 @@ use std::sync::Arc;
 /// Upper bound handed to commands so no command can flood the result list.
 pub const DEFAULT_MAX_RESULTS: usize = 20;
 
+pub mod page;
 pub mod search;
 pub mod shortcut;
+pub use page::{
+    ArgumentKind, ArgumentSpec, Badge, Block, Blocks, CommandMode, CommandSpec, ExtensionManifest,
+    FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageView, Progress, Refresh,
+    StripCard, Tone,
+};
 pub use search::search_match_score;
 pub use shortcut::Primary;
 
@@ -319,6 +325,29 @@ pub trait Command: Send + Sync {
     /// when the menu opens.
     fn actions(&self, _result_id: &str) -> Vec<CommandAction> {
         Vec::new()
+    }
+
+    /// What the extension declares about itself: title, description,
+    /// icon, and its command surface. Root search and Settings render
+    /// from this; it never runs I/O.
+    fn manifest(&self) -> ExtensionManifest {
+        ExtensionManifest {
+            name: self.id(),
+            title: "Untitled extension",
+            description: "",
+            icon: Icon::App,
+            categories: &[],
+            commands: Vec::new(),
+        }
+    }
+
+    /// The page this command renders for `{id}-page:{filter}`
+    /// queries, or `None` to keep the generic results list. Blocking
+    /// but bounded: read state and caches only; the UI calls it
+    /// through an unblock executor and re-asks at the page's
+    /// [`Refresh`] cadence.
+    fn page(&self, _query: &str) -> Option<PageView> {
+        None
     }
 
     /// Higher wins when two commands answer the same query. The
