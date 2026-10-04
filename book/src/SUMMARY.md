@@ -27,6 +27,7 @@
 
 # Contributing
 
+- [Patterns from real extensions](patterns.md)
 - [Contribution standard](contributing.md)
 - [Examples in the repo](examples.md)
 - [Prompt for coding agents](agent-prompt.md)
