@@ -186,7 +186,10 @@ fn port_results(
                 score,
                 accessory: Some("TCP".into()),
                 section: None,
-                accessories: Vec::new(),
+                accessories: vec![
+                    corvo_core::SearchAccessory::new(format!("PID {}", entry.process.pid))
+                        .with_tooltip("Enter to terminate the owning process"),
+                ],
             })
         })
         .take(max_results)
@@ -253,7 +256,12 @@ fn build_results(
                 },
             accessory: Some(format!("{:.1}% CPU", process.cpu_percent)),
             section: None,
-            accessories: Vec::new(),
+            accessories: vec![
+                corvo_core::SearchAccessory::new(memory_label(process.memory_bytes))
+                    .with_tooltip(format!("Memory: {:.1} MB", process.memory_bytes as f64 / (1024.0 * 1024.0))),
+                corvo_core::SearchAccessory::new(format!("PID {}", process.identity.pid))
+                    .with_tooltip(format!("Started by {} — Enter to terminate", process.identity.pid)),
+            ],
         })
         .collect()
 }

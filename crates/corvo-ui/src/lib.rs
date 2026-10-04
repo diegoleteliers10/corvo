@@ -963,6 +963,15 @@ enum RootFlatItem {
     Row(usize),
 }
 
+/// One pushed Detail view: a self-contained payload from
+/// `Action::ShowDetail`.
+#[derive(Clone, Debug)]
+struct PushedDetail {
+    title: String,
+    markdown: String,
+    metadata: Vec<corvo_core::Metadata>,
+}
+
 /// In-progress form input on an extension Form page: one text value
 /// and caret per text field, one boolean per checkbox, one selected
 /// option per select, plus the focused field index.
@@ -1004,6 +1013,30 @@ impl ExtensionFormState {
             })
             .collect();
     }
+}
+
+/// A grid section header: the label plus the item count.
+fn grid_section_header(title: SharedString, count: usize) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_baseline()
+        .gap_2()
+        .px(px(6.0))
+        .pb_1()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child(SharedString::from(format!("{count}"))),
+        )
 }
 
 /// The list header of one section: the section label, or the default
@@ -1144,6 +1177,9 @@ pub struct Launcher {
     port_argument: String,
     port_cursor_idx: usize,
     port_input_active: bool,
+    /// Pushed Detail views (the "Show Details" navigation stack).
+    /// Actions push; Escape and backspace-on-empty pop.
+    detail_stack: Vec<PushedDetail>,
     /// The declarative view the extension page currently renders,
     /// plus the token state the interactive views need.
     extension_view: Option<corvo_core::PageView>,
@@ -1670,6 +1706,7 @@ impl Launcher {
             port_argument: String::new(),
             port_cursor_idx: 0,
             port_input_active: false,
+            detail_stack: Vec::new(),
             extension_view: None,
             extension_scroll_handle: ScrollHandle::new(),
             extension_pump_running: false,
@@ -2006,6 +2043,11 @@ impl Launcher {
     }
 
     fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.detail_stack.is_empty() {
+            self.detail_stack.pop();
+            cx.notify();
+            return;
+        }
         if self.port_input_active {
             self.port_input_active = false;
             self.cursor_idx = self.query.chars().count();
@@ -2889,6 +2931,12 @@ impl Launcher {
 
         // Backspace: Delete character backward
         if mods.is_unmodified() && key == "backspace" {
+            if !self.detail_stack.is_empty() && self.query.is_empty() {
+                self.detail_stack.pop();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
             if matches!(self.page, LauncherPage::Extension(_))
                 && self.extension_form_edit(key, None)
             {
@@ -4636,6 +4684,94 @@ impl Launcher {
         cx.notify();
     }
 
+    /// The structured metadata side panel shared by Detail pages and
+    /// pushed details.
+    fn metadata_panel(
+        &mut self,
+        metadata: &[corvo_core::Metadata],
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let mut panel = div()
+            .id("extension-detail-metadata")
+            .w(px(220.0))
+            .flex()
+            .flex_col()
+            .gap_2();
+        for entry in metadata {
+            match entry {
+                corvo_core::Metadata::Label { title, text, tone } => {
+                    panel = panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(rgb(Self::tone_color(*tone)))
+                                    .child(text.clone()),
+                            ),
+                    );
+                }
+                corvo_core::Metadata::Link { title, text, url } => {
+                    let url = url.clone();
+                    panel = panel.child(
+                        div()
+                            .id(SharedString::from(format!("meta-link-{url}")))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(rgb(COLOR_ACCENT))
+                                    .child(text.clone()),
+                            )
+                            .on_click(cx.listener(move |_: &mut Self, _: &ClickEvent, _, _| {
+                                let _ = corvo_platform::open_url(&url);
+                            })),
+                    );
+                }
+                corvo_core::Metadata::Tags { title, tags } => {
+                    let mut tag_row = div().flex().flex_col().gap_1();
+                    tag_row = tag_row.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(title.clone()),
+                    );
+                    let mut tags_row = div().flex().flex_wrap().gap_1();
+                    for tag in tags {
+                        tags_row = tags_row.child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(rgb(0x181b1e))
+                                .text_size(px(10.5))
+                                .child(tag.clone()),
+                        );
+                    }
+                    panel = panel.child(tag_row.child(tags_row));
+                }
+                corvo_core::Metadata::Separator => {
+                    panel = panel.child(div().w_full().h(px(1.0)).bg(rgb(0x2a2f36)));
+                }
+            }
+        }
+        panel
+    }
+
     /// The declarative page: renders whatever `Command::page`
     /// returned.
     fn extension_page_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -4959,82 +5095,7 @@ impl Launcher {
                 .child(render_inline_markdown(markdown)),
         );
         if !metadata.is_empty() {
-            let mut panel = div().id("extension-detail-metadata").w(px(220.0)).flex().flex_col().gap_2();
-            for entry in metadata {
-                match entry {
-                    corvo_core::Metadata::Label { title, text, tone } => {
-                        panel = panel.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(rgb(COLOR_TEXT_DIM))
-                                        .child(title.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(Self::tone_color(*tone)))
-                                        .child(text.clone()),
-                                ),
-                        );
-                    }
-                    corvo_core::Metadata::Link { title, text, url } => {
-                        let url = url.clone();
-                        panel = panel.child(
-                            div()
-                                .id(SharedString::from(format!("meta-link-{url}")))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(rgb(COLOR_TEXT_DIM))
-                                        .child(title.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(COLOR_ACCENT))
-                                        .child(text.clone()),
-                                )
-                                .on_click(cx.listener(move |_: &mut Self, _: &ClickEvent, _, _| {
-                                    let _ = corvo_platform::open_url(&url);
-                                })),
-                        );
-                    }
-                    corvo_core::Metadata::Tags { title, tags } => {
-                        let mut tag_row = div().flex().flex_col().gap_1();
-                        tag_row = tag_row.child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(rgb(COLOR_TEXT_DIM))
-                                .child(title.clone()),
-                        );
-                        let mut tags_row = div().flex().flex_wrap().gap_1();
-                        for tag in tags {
-                            tags_row = tags_row.child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(rgb(0x181b1e))
-                                    .text_size(px(10.5))
-                                    .child(tag.clone()),
-                            );
-                        }
-                        panel = panel.child(tag_row.child(tags_row));
-                    }
-                    corvo_core::Metadata::Separator => {
-                        panel = panel.child(
-                            div().w_full().h(px(1.0)).bg(rgb(0x2a2f36)),
-                        );
-                    }
-                }
-            }
-            row = row.child(panel);
+            row = row.child(self.metadata_panel(metadata, cx));
         }
         row
     }
@@ -5080,74 +5141,101 @@ impl Launcher {
         let columns = columns.unwrap_or(6).clamp(1, 8) as usize;
         let tile_size = 84.0;
         let row_width = columns as f32 * (tile_size + 8.0);
+        let tiles_of = |group: Vec<&corvo_core::GridItem>| -> Div {
+            let mut tiles = div()
+                .flex()
+                .flex_wrap()
+                .justify_center()
+                .gap_2()
+                .max_w(px(row_width));
+            for item in group {
+                let content = match &item.content {
+                    corvo_core::GridContent::Glyph(glyph) => {
+                        div().text_size(px(38.0)).child(glyph.clone())
+                    }
+                    corvo_core::GridContent::Color(color) => {
+                        div().size(px(44.0)).rounded_lg().bg(rgb(*color))
+                    }
+                    corvo_core::GridContent::Image(path) => div()
+                        .size(px(44.0))
+                        .child(img(path.clone()).size(px(44.0))),
+                    corvo_core::GridContent::Text(text) => div()
+                        .text_size(px(18.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child(text.clone()),
+                };
+                let item_id = item.id.clone();
+                tiles = tiles.child(
+                    div()
+                        .id(SharedString::from(format!("grid-{}", item.id)))
+                        .w(px(tile_size))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .p_2()
+                        .rounded_lg()
+                        .hover(|tile| tile.bg(rgb(0x181b1e)))
+                        .child(
+                            div()
+                                .size(px(48.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(content),
+                        )
+                        .child(
+                            div()
+                                .max_w_full()
+                                .text_size(px(10.5))
+                                .text_color(rgb(COLOR_TEXT))
+                                .whitespace_nowrap()
+                                .child(item.title.clone()),
+                        )
+                        .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                            launcher.run_extension_action(
+                                command_id,
+                                format!("grid:{item_id}"),
+                                cx,
+                            );
+                        })),
+                );
+            }
+            tiles
+        };
+
+        // Consecutive items sharing a section render under one header
+        // with the item count — the Unsplash grid pattern.
         let mut grid_view = div()
             .id("extension-grid")
             .flex_1()
             .w_full()
             .flex()
-            .flex_wrap()
-            .justify_center()
-            .gap_2()
-            .max_w(px(row_width))
+            .flex_col()
+            .items_center()
             .px(px(24.0))
             .pb(px(56.0))
             .overflow_y_scroll()
             .track_scroll(&self.results_scroll_handle);
+        let mut current: Option<String> = None;
+        let mut group: Vec<&corvo_core::GridItem> = Vec::new();
         for item in visible {
-            let selected = self.extension_button_focus.to_string() == item.id;
-            let content = match &item.content {
-                corvo_core::GridContent::Glyph(glyph) => div()
-                    .text_size(px(38.0))
-                    .child(glyph.clone()),
-                corvo_core::GridContent::Color(color) => div()
-                    .size(px(44.0))
-                    .rounded_lg()
-                    .bg(rgb(*color)),
-                corvo_core::GridContent::Image(path) => div()
-                    .size(px(44.0))
-                    .child(img(path.clone()).size(px(44.0))),
-                corvo_core::GridContent::Text(text) => div()
-                    .text_size(px(18.0))
-                    .font_weight(FontWeight::BOLD)
-                    .child(text.clone()),
-            };
-            let item_id = item.id.clone();
-            grid_view = grid_view.child(
-                div()
-                    .id(SharedString::from(format!("grid-{}", item.id)))
-                    .w(px(tile_size))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .p_2()
-                    .rounded_lg()
-                    .when(selected, |tile| tile.bg(rgb(COLOR_ROW_SELECTED)))
-                    .when(!selected, |tile| tile.hover(|s| s.bg(rgb(0x181b1e))))
-                    .child(
-                        div()
-                            .size(px(48.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(content),
-                    )
-                    .child(
-                        div()
-                            .max_w_full()
-                            .text_size(px(10.5))
-                            .text_color(rgb(COLOR_TEXT))
-                            .whitespace_nowrap()
-                            .child(item.title.clone()),
-                    )
-                    .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
-                        launcher.run_extension_action(
-                            command_id,
-                            format!("grid:{item_id}"),
-                            cx,
-                        );
-                    })),
-            );
+            if current.is_some() && item.section != current {
+                let header = section_header(current.as_deref());
+                let count = group.len();
+                grid_view = grid_view
+                    .child(grid_section_header(header, count))
+                    .child(tiles_of(std::mem::take(&mut group)));
+            }
+            current = item.section.clone();
+            group.push(item);
+        }
+        if !group.is_empty() {
+            let header = section_header(current.as_deref());
+            let count = group.len();
+            grid_view = grid_view
+                .child(grid_section_header(header, count))
+                .child(tiles_of(group));
         }
         grid_view
     }
@@ -6677,6 +6765,21 @@ impl Launcher {
                 })
                 .detach();
             }
+            Ok(corvo_core::Action::ShowDetail {
+                title,
+                markdown,
+                metadata,
+            }) => {
+                // The Show Details pattern: push onto the stack; the
+                // rendered page becomes the detail until Escape.
+                self.detail_stack.push(PushedDetail {
+                    title,
+                    markdown,
+                    metadata,
+                });
+                self.results_scroll_handle.scroll_to_item(0);
+                cx.notify();
+            }
             Ok(Action::ShowToast(msg)) => {
                 if let Some(text) = msg.strip_prefix("note-editor:") {
                     let note = corvo_notes::list_notes()
@@ -7393,6 +7496,62 @@ impl Launcher {
             return div().id("no-emoji-results").flex_1();
         }
 
+        // The Recently used strip sits above the grid, mirroring the
+        // most-installed extensions' first section.
+        let recents: Vec<&'static str> = corvo_emoji_picker::recent_emojis();
+        let mut recents_strip: Option<Stateful<Div>> = None;
+        if !recents.is_empty() && self.query.is_empty() {
+            let mut strip = div()
+                .id("emoji-recents")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(8.0))
+                .pb_1p5()
+                .flex_wrap();
+            strip = strip.child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(COLOR_TEXT_DIM))
+                    .child("RECENT"),
+            );
+            for glyph in recents {
+                let result_id = format!("emoji-picker:{glyph}");
+                let display = apply_emoji_skin_tone(glyph, self.emoji_skin_tone);
+                strip = strip.child(
+                    div()
+                        .id(SharedString::from(format!("emoji-recent-{glyph}")))
+                        .cursor_pointer()
+                        .size(px(38.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .text_size(px(20.0))
+                        .hover(|cell| cell.bg(rgb(0x232529)))
+                        .child(display.clone())
+                        .on_click(cx.listener(move |launcher, _: &ClickEvent, window, cx| {
+                            // Mirror the command's execute: track the
+                            // base glyph, paste the skin-toned one.
+                            let _ = corvo_ext::recents::push(
+                                "emoji-picker",
+                                "emojis",
+                                &result_id["emoji-picker:".len()..],
+                                10,
+                            );
+                            launcher.perform(
+                                Ok(Action::PasteText(display.clone())),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+            recents_strip = Some(strip);
+        }
+
         let column_count = self.emoji_column_count;
         let num_rows = self.results.len().div_ceil(column_count);
         let mut rows: Vec<Stateful<Div>> = Vec::with_capacity(num_rows);
@@ -7465,7 +7624,7 @@ impl Launcher {
             );
         }
 
-        div()
+        let grid = div()
             .id("emoji-grid")
             .flex_1()
             .w_full()
@@ -7473,7 +7632,18 @@ impl Launcher {
             .pb(px(56.0))
             .overflow_y_scroll()
             .track_scroll(&self.emoji_scroll_handle)
-            .children(rows)
+            .children(rows);
+        if let Some(strip) = recents_strip {
+            div()
+                .id("emoji-page")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(grid)
+        } else {
+            grid
+        }
     }
 
     fn clipboard_search_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -9956,18 +10126,19 @@ impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_palette_size(window, cx);
         let is_collapsed = self.is_compact_collapsed();
-        let is_root = self.page == LauncherPage::Root;
-        let is_emoji = self.page == LauncherPage::Emoji;
-        let is_clipboard = self.page == LauncherPage::Clipboard;
-        let is_files = self.page == LauncherPage::Files;
-        let is_brew = self.page == LauncherPage::Brew;
-        let is_text = self.page == LauncherPage::Text;
-        let is_notes = self.page == LauncherPage::Notes;
-        let is_browser = matches!(self.page, LauncherPage::Browser(_));
-        let is_extension = matches!(self.page, LauncherPage::Extension(_));
-        let is_ports = self.page == LauncherPage::Ports;
-        let is_processes = self.page == LauncherPage::Processes;
-        let is_uninstaller = self.page == LauncherPage::Uninstaller;
+        let detail_open = !self.detail_stack.is_empty();
+        let is_root = self.page == LauncherPage::Root && !detail_open;
+        let is_emoji = self.page == LauncherPage::Emoji && !detail_open;
+        let is_clipboard = self.page == LauncherPage::Clipboard && !detail_open;
+        let is_files = self.page == LauncherPage::Files && !detail_open;
+        let is_brew = self.page == LauncherPage::Brew && !detail_open;
+        let is_text = self.page == LauncherPage::Text && !detail_open;
+        let is_notes = self.page == LauncherPage::Notes && !detail_open;
+        let is_browser = matches!(self.page, LauncherPage::Browser(_)) && !detail_open;
+        let is_extension = matches!(self.page, LauncherPage::Extension(_)) && !detail_open;
+        let is_ports = self.page == LauncherPage::Ports && !detail_open;
+        let is_processes = self.page == LauncherPage::Processes && !detail_open;
+        let is_uninstaller = self.page == LauncherPage::Uninstaller && !detail_open;
         div()
             .track_focus(&self.focus_handle)
             .key_context("Launcher")
@@ -10051,6 +10222,62 @@ impl Render for Launcher {
             .when(is_uninstaller, |view| {
                 view.child(self.uninstaller_search_row(window, cx))
                     .child(self.uninstaller_list(cx))
+            })
+            .when(detail_open, |view| {
+                let Some(top) = self.detail_stack.last().cloned() else {
+                    return view;
+                };
+                let depth = self.detail_stack.len();
+                view.child(self.search_row(window, cx))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .pb_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(top.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child(SharedString::from(format!(
+                                        "esc to go back{}",
+                                        if depth > 1 { " (2 levels)" } else { "" }
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("pushed-detail")
+                            .flex_1()
+                            .w_full()
+                            .flex()
+                            .gap_4()
+                            .px(px(24.0))
+                            .pb(px(56.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.extension_scroll_handle)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.5))
+                                    .text_color(rgb(COLOR_TEXT))
+                                    .child(render_inline_markdown(&top.markdown)),
+                            )
+                            .children(if top.metadata.is_empty() {
+                                None
+                            } else {
+                                Some(self.metadata_panel(&top.metadata, cx))
+                            }),
+                    )
             })
             .when(!is_collapsed, |view| view.child(self.footer(cx)))
             .when(self.actions_open, |view| {

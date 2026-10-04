@@ -56,6 +56,23 @@ struct ExamplePrefs {
     favorite_section: String,
 }
 
+/// The quick-capture pattern: a NoView command with a required text
+/// argument acts without opening any page — one keystroke, type,
+/// Enter, done. The manifest declares it; execute routes it.
+fn run_capture(argument: &str) -> Result<Action, CommandError> {
+    let text = argument.trim();
+    if text.is_empty() {
+        return Err(CommandError::Platform("nothing to capture".into()));
+    }
+    let id = corvo_ext::storage::set(
+        ID,
+        &format!("capture-{}", corvo_ext::recents::list(ID, "captures").len()),
+        corvo_ext::storage::Value::String(text.to_owned()),
+    );
+    id.map(|_| Action::ShowToast(format!("Captured \u{201c}{text}\u{201d}")))
+        .map_err(CommandError::Platform)
+}
+
 /// One catalog row the demo "serves". In a real extension this is a
 /// file, a database, an HTTP API, or OS data.
 struct Item {
@@ -154,6 +171,19 @@ impl Command for ExampleCommand {
             return Vec::new();
         }
         let first = routing::first_word(trimmed);
+        if first == "capture" {
+            // Quick-capture: the argument rides in the id; Enter runs
+            // it without opening anything.
+            let argument = trimmed["capture".len()..].trim().to_owned();
+            return vec![ListItem::new(if argument.is_empty() {
+                "Capture Note".to_owned()
+            } else {
+                format!("Capture \u{201c}{argument}\u{201d}")
+            })
+            .icon(Icon::Svg(phosphor_svgs::style::regular::PLUS))
+            .accessory("enter")
+            .build(format!("{ID}:capture:{argument}"), 1000)];
+        }
         if KEYWORDS.contains(&first.as_str()) {
             let mut results = vec![open_entry(1000)];
             if let Some(item) = CATALOG.first() {
@@ -172,6 +202,9 @@ impl Command for ExampleCommand {
         let key = routing::key(result_id, ID)?;
         if key == "open" {
             return Ok(corvo_ext::feedback::toast("Example"));
+        }
+        if let Some(argument) = key.strip_prefix("capture:") {
+            return run_capture(argument);
         }
         if let Some(url) = key.strip_prefix("item:") {
             return Ok(Action::OpenUrl(url.to_owned()));

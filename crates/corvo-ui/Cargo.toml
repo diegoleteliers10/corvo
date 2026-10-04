@@ -10,8 +10,10 @@ corvo-brew = { path = "../../commands/brew" }
 corvo-clipboard-manager = { path = "../../commands/clipboard-manager" }
 corvo-config = { workspace = true }
 corvo-core = { workspace = true }
+corvo-ext = { workspace = true }
 corvo-platform = { workspace = true }
 corvo-notes = { path = "../../commands/notes" }
+corvo-emoji-picker = { path = "../../commands/emoji-picker" }
 corvo-browser-tabs = { path = "../../commands/browser-tabs" }
 corvo-system-actions = { path = "../../commands/system-actions" }
 corvo-web-search-fallback = { path = "../../commands/web-search-fallback" }

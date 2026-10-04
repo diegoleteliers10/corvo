@@ -162,6 +162,17 @@ count), column count from a preference, and images as tile content.
 In Corvo, Grids filter from the search bar and take a column count
 per page; image tiles take a cached PNG path.
 
+## Adopted in the kit
+
+The patterns above map to first-class kit support: filter chips and
+structured accessories (`corvo_ext::pages`), the Recently used
+helper (`corvo_ext::recents` — the emoji picker uses it for its
+strip), per-row pushed details (`Action::ShowDetail`), grid sections
+(`GridItem.section`), declared NoView capture commands (the template
+ships one), and clipboard quick verbs (text-utilities declares
+To UPPERCASE, to snake_case, Base64 Encode, SHA-256... as NoView
+commands).
+
 ## Anti-patterns to avoid
 
 - One mega command with an internal menu of sub-features.

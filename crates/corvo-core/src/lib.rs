@@ -168,6 +168,14 @@ pub enum Action {
         force: bool,
     },
     ShowToast(String),
+    /// Pushes a Detail view onto the launcher's navigation stack —
+    /// the "Show Details" pattern. Escape pops back to the page the
+    /// row came from.
+    ShowDetail {
+        title: String,
+        markdown: String,
+        metadata: Vec<Metadata>,
+    },
     CloseWindow,
     TileWindow(String),
     AdjustBrightness(f32),

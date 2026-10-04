@@ -142,6 +142,33 @@ corvo_ext::recents::push(ID, "recent-items", &item_id, 10)?;
 let recent = corvo_ext::recents::list(ID, "recent-items");
 ```
 
+## Pushed details — the Show Details pattern
+
+A row's `execute` can push a Detail view onto the launcher's
+navigation stack; Escape (or backspace on an empty query) pops back
+to the page:
+
+```rust
+return Ok(Action::ShowDetail {
+    title: format!("{} — {}", item.name, item.date),
+    markdown: item.report,
+    metadata: vec![
+        Metadata::Label { title: "Status".into(), text: "Done".into(), tone: Tone::Positive },
+        Metadata::Link { title: "Source".into(), text: item.url.clone(), url: item.url.clone() },
+        Metadata::Separator,
+    ],
+});
+```
+
+The content rides in the action (build it from the command's cache —
+never fetch inside `execute`).
+
+## Grid sections
+
+Grid items carry an optional `section`; consecutive items sharing one
+render under a header with the item count — the Unsplash pattern.
+Build them with `pages::grid_sectioned`.
+
 ## Buttons and page actions
 
 Every click becomes `execute("{id}:page:{action_id}")` in your

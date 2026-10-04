@@ -225,6 +225,9 @@ pub struct GridItem {
     pub content: GridContent,
     pub title: String,
     pub subtitle: String,
+    /// Group label; consecutive items sharing one render under a
+    /// section header with the item count, the Unsplash pattern.
+    pub section: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

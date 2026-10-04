@@ -128,6 +128,51 @@ fn case_utilities(input: &str) -> Vec<Utility> {
         .collect()
 }
 
+/// The clipboard quick verbs: the operation-per-command pattern the
+/// biggest text extensions use — the user searches the verb, it acts
+/// on the clipboard (or the typed argument) and copies the result.
+/// One clipboard quick verb: search keyword, manifest name, title,
+/// manifest keywords, and the transform (fallible ones handle their
+/// own decode path).
+type QuickVerb = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    Option<fn(&str) -> String>,
+);
+
+const QUICK_VERBS: &[QuickVerb] = &[
+    ("upper", "upper", "To UPPERCASE", &["upper"], Some(text::to_upper)),
+    ("lower", "lower", "to lowercase", &["lower"], Some(text::to_lower)),
+    ("camel", "camel", "to camelCase", &["camel"], Some(text::to_camel)),
+    ("snake", "snake", "to snake_case", &["snake"], Some(text::to_snake)),
+    ("kebab", "kebab", "to kebab-case", &["kebab"], Some(text::to_kebab)),
+    (
+        "b64encode",
+        "base64-encode",
+        "Base64 Encode",
+        &["b64encode", "base64"],
+        Some(text::base64_encode),
+    ),
+    (
+        "b64decode",
+        "base64-decode",
+        "Base64 Decode",
+        &["b64decode"],
+        None, // fallible; handled in quick_transform
+    ),
+    ("sha256", "sha256", "SHA-256 Hash", &["sha256"], Some(text::sha256_hex)),
+];
+
+fn quick_transform(key: &str, input: &str) -> Option<String> {
+    let (_, _, _, _, transform) = QUICK_VERBS.iter().find(|(keyword, ..)| *keyword == key)?;
+    match transform {
+        Some(transform) => Some(transform(input)),
+        None => text::base64_decode(input),
+    }
+}
+
 fn transform_utilities(input: &str) -> Vec<Utility> {
     let mut utilities = case_utilities(input);
 
@@ -332,6 +377,33 @@ async fn page_results(input: &str, ctx: &SearchContext) -> Vec<SearchResult> {
 
 #[async_trait::async_trait]
 impl Command for TextUtilitiesCommand {
+    fn manifest(&self) -> corvo_core::ExtensionManifest {
+        corvo_core::ExtensionManifest {
+            name: "text-utilities",
+            title: "Text Utilities",
+            description: "Case conversion, encoding, hashing, and line tools",
+            icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TEXT_T),
+            categories: &["Developer Tools", "Productivity"],
+            commands: QUICK_VERBS
+                .iter()
+                .map(|(_keyword, name, title, keywords, _)| corvo_core::CommandSpec {
+                    name,
+                    title,
+                    description: "Transform the clipboard (or the typed argument) and copy the result",
+                    mode: corvo_core::CommandMode::NoView,
+                    icon: Some(Icon::Svg(corvo_core::phosphor_svgs::style::regular::TEXT_T)),
+                    arguments: vec![corvo_core::ArgumentSpec {
+                        name: "text",
+                        placeholder: "Text to transform, or leave empty to use the clipboard...",
+                        kind: corvo_core::ArgumentKind::Text,
+                        required: false,
+                    }],
+                    keywords,
+                })
+                .collect(),
+        }
+    }
+
     fn id(&self) -> &'static str {
         "text-utilities"
     }
@@ -353,6 +425,33 @@ impl Command for TextUtilitiesCommand {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return vec![open_result("", 1000)];
+        }
+
+        // Quick verbs: `upper hello` or just `upper` (clipboard) —
+        // the operation-per-command pattern from the big text
+        // extensions, delivered as one executable row.
+        {
+            let first = trimmed.split_whitespace().next().unwrap_or_default();
+            if let Some((_, _, title, _, _)) =
+                QUICK_VERBS.iter().find(|(keyword, ..)| first.eq_ignore_ascii_case(keyword))
+            {
+                let argument = trimmed[first.len()..].trim();
+                let hint = if argument.is_empty() {
+                    "from clipboard"
+                } else {
+                    "from typed text"
+                };
+                return vec![SearchResult {
+                    id: format!("text-utilities:quick:{}:{}", first.to_lowercase(), argument),
+                    title: format!("{title} ({hint})"),
+                    subtitle: Some("Text Utilities".into()),
+                    icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::TEXT_T),
+                    score: 1000,
+                    accessory: Some("enter".into()),
+                    section: None,
+                    accessories: Vec::new(),
+                }];
+            }
         }
 
         // Quick command: `uuid` generates immediately from root search.
@@ -396,6 +495,19 @@ impl Command for TextUtilitiesCommand {
         // placeholder for any other caller.
         if key == "open" || key.starts_with("open:") {
             return Ok(Action::ShowToast("Text Utilities".into()));
+        }
+        // Quick verbs: `quick:{keyword}:{argument}` — the argument is
+        // the typed text, or empty for the clipboard.
+        if let Some(rest) = key.strip_prefix("quick:") {
+            let (keyword, argument) = rest.split_once(':').unwrap_or((rest, ""));
+            let input = if argument.is_empty() {
+                corvo_platform::read_clipboard_text().unwrap_or_default()
+            } else {
+                argument.to_owned()
+            };
+            let output = quick_transform(keyword, &input)
+                .ok_or(CommandError::Platform("could not transform that input".into()))?;
+            return Ok(Action::Copy(output));
         }
         let cache = output_cache()
             .read()

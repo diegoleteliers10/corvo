@@ -153,6 +153,7 @@ pub fn grid_glyph(id: impl Into<String>, glyph: impl Into<String>, title: impl I
         content: GridContent::Glyph(glyph.into()),
         title: title.into(),
         subtitle: String::new(),
+        section: None,
     }
 }
 
@@ -168,6 +169,23 @@ pub fn grid_color(
         content: GridContent::Color(rgb),
         title: title.into(),
         subtitle: subtitle.into(),
+        section: None,
+    }
+}
+
+/// A sectioned grid variant where items carry group labels, the
+/// Unsplash pattern: consecutive items sharing a section render under
+/// one header with the item count.
+pub fn grid_sectioned(
+    items: Vec<GridItem>,
+    columns: Option<u8>,
+    placeholder: &'static str,
+) -> PageView {
+    PageView::Grid {
+        items,
+        columns,
+        placeholder,
+        refresh: Refresh::Manual,
     }
 }
 
@@ -183,6 +201,7 @@ pub fn grid_image(
         content: GridContent::Image(png),
         title: title.into(),
         subtitle: subtitle.into(),
+        section: None,
     }
 }
 

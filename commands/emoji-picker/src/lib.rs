@@ -1161,6 +1161,9 @@ impl Command for EmojiPickerCommand {
             return Err(CommandError::NotFound);
         };
         if EMOJI.iter().any(|(known, _)| *known == glyph) {
+            // The grid's first strip mirrors this list, so the push
+            // must happen before the paste lands.
+            let _ = corvo_ext::recents::push("emoji-picker", "emojis", glyph, 10);
             Ok(Action::PasteText(glyph.to_owned()))
         } else {
             Err(CommandError::NotFound)
@@ -1239,6 +1242,21 @@ pub fn warmup() {
 }
 
 /// All emojis in the static corpus.
+/// The recently pasted glyphs, newest first, filtered to the corpus.
+pub fn recent_emojis() -> Vec<&'static str> {
+    corvo_ext::recents::list("emoji-picker", "emojis")
+        .into_iter()
+        .filter(|glyph| EMOJI.iter().any(|(known, _)| *known == glyph.as_str()))
+        .map(|glyph| {
+            EMOJI
+                .iter()
+                .find(|(known, _)| *known == glyph.as_str())
+                .map(|(known, _)| *known)
+                .unwrap_or("")
+        })
+        .collect()
+}
+
 pub fn all_emojis() -> Vec<SearchResult> {
     ALL_EMOJIS
         .get_or_init(|| {
