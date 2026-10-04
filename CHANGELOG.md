@@ -3,7 +3,7 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
-# Unreleased
+# Corvo 0.5.0
 
 ## Extension platform
 
