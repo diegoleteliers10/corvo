@@ -771,6 +771,10 @@ mod tests {
         ))
     }
 
+    fn page_click(action: &str) -> Result<String, CommandError> {
+        run_page_action(action)
+    }
+
     fn execute(id: &str) -> Result<Action, CommandError> {
         smol::block_on(<PomodoroCommand as Command>::execute(
             &PomodoroCommand,
@@ -892,6 +896,33 @@ mod tests {
             execute("pomodoro:unknown").unwrap_err(),
             CommandError::NotFound
         );
+    }
+
+    #[test]
+    fn pause_resume_skip_stop_are_distinct_actions() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        stop();
+        start(Phase::Focus, Duration::from_secs(25 * 60));
+
+        // Click Pause while running.
+        assert_eq!(page_click("pause").unwrap(), "Timer paused");
+        assert!(snapshot().unwrap().paused);
+
+        // Click Skip while paused: the break starts RUNNING, not paused.
+        assert_eq!(page_click("skip").unwrap(), "Interval skipped");
+        let snap = snapshot().unwrap();
+        assert_eq!(snap.phase, Phase::Break);
+        assert!(!snap.paused, "skip must not leave the timer paused");
+
+        // Click Pause, then Stop: idle, chips page.
+        assert_eq!(page_click("pause").unwrap(), "Timer paused");
+        assert_eq!(page_click("stop").unwrap(), "Timer stopped");
+        assert_eq!(snapshot(), None);
+
+        // Click Resume while idle: error, not a start.
+        assert!(page_click("resume").is_err());
+        assert_eq!(snapshot(), None, "resume must not start a timer");
+        stop();
     }
 
     #[test]

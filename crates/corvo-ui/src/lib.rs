@@ -2468,7 +2468,13 @@ impl Launcher {
                             return;
                         }
                         Some(corvo_core::PageView::Blocks(_)) if self.query.is_empty() => {
-                            self.run_extension_action(command_id, "enter".to_owned(), cx);
+                            // Enter presses the highlighted button; the
+                            // plain "enter" action only fires when the
+                            // page declares no buttons to highlight.
+                            let action = self
+                                .focused_block_action()
+                                .unwrap_or_else(|| "enter".to_owned());
+                            self.run_extension_action(command_id, action, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -3626,6 +3632,29 @@ impl Launcher {
         let argument = spec.arguments.first()?;
         let hint = argument.placeholder;
         (!hint.is_empty()).then(|| SharedString::from(hint))
+    }
+
+    /// The action id of the highlighted button on the current Blocks
+    /// page, flattening every Buttons block in order — ←/→ cycles this
+    /// same list, so Enter presses what is highlighted.
+    fn focused_block_action(&self) -> Option<String> {
+        let view = self.extension_view.as_ref()?;
+        let corvo_core::PageView::Blocks(blocks) = view else {
+            return None;
+        };
+        let actions: Vec<&str> = blocks
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                corvo_core::Block::Buttons(buttons) => Some(buttons),
+                _ => None,
+            })
+            .flatten()
+            .map(|button| button.action_id.as_str())
+            .collect();
+        actions
+            .get(self.extension_button_focus)
+            .map(|action| (*action).to_owned())
     }
 
     fn selected_result(&self) -> Option<&SearchResult> {
