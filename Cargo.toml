@@ -44,6 +44,7 @@ members = [
     "commands/app-launcher",
     "commands/file-search",
     "commands/clipboard-manager",
+    "commands/countdown",
     "commands/calculator",
     "commands/snippets",
     "commands/window-management",
@@ -88,6 +89,7 @@ corvo-app-launcher = { path = "commands/app-launcher" }
 corvo-brew = { path = "commands/brew" }
 corvo-calculator = { path = "commands/calculator" }
 corvo-clipboard-manager = { path = "commands/clipboard-manager" }
+corvo-countdown = { path = "commands/countdown" }
 corvo-config = { path = "crates/corvo-config" }
 corvo-core = { path = "crates/corvo-core" }
 corvo-emoji-picker = { path = "commands/emoji-picker" }

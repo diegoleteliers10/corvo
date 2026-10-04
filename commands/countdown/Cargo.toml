@@ -1,0 +1,13 @@
+[package]
+name = "corvo-countdown"
+version = "0.4.0"
+edition = "2021"
+description = "Countdown to a date: declarative Blocks page with a live hero, saved countdowns, and a typed date argument."
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-ext = { workspace = true }
+serde = { workspace = true }
+smol = { workspace = true }

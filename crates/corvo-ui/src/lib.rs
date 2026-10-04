@@ -11389,3 +11389,4 @@ mod tests {
         assert_eq!(shortcut_text("Folder"), "Folder");
     }
 }
+
