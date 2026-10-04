@@ -6346,10 +6346,19 @@ impl Launcher {
         let raw_glyph = result
             .id
             .strip_prefix("emoji-picker:")
-            .unwrap_or(&result.title);
-        let glyph = apply_emoji_skin_tone(raw_glyph, self.emoji_skin_tone);
+            .unwrap_or(&result.title)
+            .to_owned();
+        let glyph = apply_emoji_skin_tone(&raw_glyph, self.emoji_skin_tone);
+        self.track_recent_emoji(&raw_glyph, cx);
         let action = Ok(Action::PasteText(glyph));
         self.perform(action, window, cx);
+    }
+
+    /// Moves a base glyph to the front of the emoji recents bucket and
+    /// repaints so the RECENT strip mirrors it immediately.
+    fn track_recent_emoji(&mut self, raw_glyph: &str, cx: &mut Context<Self>) {
+        let _ = corvo_ext::recents::push("emoji-picker", "emojis", raw_glyph, 10);
+        cx.notify();
     }
 
     fn copy_selected_emoji(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -6359,8 +6368,10 @@ impl Launcher {
         let raw_glyph = result
             .id
             .strip_prefix("emoji-picker:")
-            .unwrap_or(&result.title);
-        let glyph = apply_emoji_skin_tone(raw_glyph, self.emoji_skin_tone);
+            .unwrap_or(&result.title)
+            .to_owned();
+        let glyph = apply_emoji_skin_tone(&raw_glyph, self.emoji_skin_tone);
+        self.track_recent_emoji(&raw_glyph, cx);
         let action = Ok(Action::Copy(glyph));
         self.perform(action, window, cx);
     }
@@ -7637,6 +7648,7 @@ impl Launcher {
             div()
                 .id("emoji-page")
                 .flex_1()
+                .min_h(px(0.0))
                 .flex()
                 .flex_col()
                 .child(strip)
