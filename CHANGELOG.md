@@ -3,6 +3,16 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
+# Corvo 0.5.1
+
+## Clipboard
+
+- Pasting an entry into the active app (Enter) no longer records it twice. The paste writes the content to the system pasteboard before the synthetic Cmd+V, and the watcher now recognizes that content as an existing entry: the entry moves to the top of the history with a fresh timestamp instead of a duplicate being added.
+- Copy to Clipboard and Copy Image behave the same way. Re-copying an entry updates its position and time at the top of the history rather than inserting a second copy, and the copy menu option keeps its role of putting the content on the system pasteboard for later.
+- Promoted entries keep their original source application. While pasting, the frontmost app is the paste target, not where the content came from, so attribution no longer drifts.
+- Starting Corvo no longer re-stamps the top entry's timestamp, because launching the app is not a copy event.
+- Entries evicted when the history reaches its limit now have their saved image files removed on the text path as well.
+
 # Corvo 0.5.0
 
 ## Extension platform

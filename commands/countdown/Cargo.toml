@@ -1,6 +1,6 @@
 [package]
 name = "corvo-countdown"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Countdown to a date: declarative Blocks page with a live hero, saved countdowns, and a typed date argument."
 publish = false
