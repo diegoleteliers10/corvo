@@ -251,46 +251,10 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
                 None => "Unknown".into(),
             };
 
-            if let Some(png_bytes) = current_clipboard_image() {
-                let hash = simple_hash(&png_bytes);
-                let already_latest = history
-                    .entries
-                    .first()
-                    .is_some_and(|first| first.image_hash == Some(hash));
-                if !already_latest {
-                    if let Some(entry) = create_image_entry(png_bytes, source) {
-                        history.entries.insert(0, entry);
-                        if history.entries.len() > preferences().max_entries {
-                            if let Some(removed) = history.entries.pop() {
-                                if let Some(path) = removed.image_path() {
-                                    let _ = fs::remove_file(path);
-                                }
-                            }
-                        }
-                        let _ = save_entries_atomic(&history.entries);
-                    }
-                }
-            } else if let Some(text) = corvo_platform::read_clipboard_text() {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() && should_record_text(&text) {
-                    let text = if text.len() > MAX_ENTRY_CHARS {
-                        text.chars().take(MAX_ENTRY_CHARS).collect()
-                    } else {
-                        text
-                    };
-                    let already_latest = history
-                        .entries
-                        .first()
-                        .is_some_and(|first| first.text == text && !first.is_image());
-                    if !already_latest {
-                        let entry = create_entry(text, source);
-                        history.entries.insert(0, entry);
-                        if history.entries.len() > preferences().max_entries {
-                            history.entries.truncate(preferences().max_entries);
-                        }
-                        let _ = save_entries_atomic(&history.entries);
-                    }
-                }
+            // stamp_top: false — a relaunch is not a copy event, so
+            // content already sitting at the top keeps its timestamp.
+            if ingest_current_clipboard(&mut history, &source, false) {
+                let _ = save_entries_atomic(&history.entries);
             }
         }
         Arc::new(RwLock::new(history))
@@ -431,55 +395,110 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
         })
         .unwrap_or_else(|| "Unknown".into());
 
-    // 1. Check for image content first
-    if let Some(png_bytes) = current_clipboard_image() {
-        let hash = simple_hash(&png_bytes);
-        let already_latest = history
-            .entries
-            .first()
-            .is_some_and(|first| first.image_hash == Some(hash));
-        if !already_latest {
-            if let Some(entry) = create_image_entry(png_bytes, source) {
-                history.entries.insert(0, entry);
-                if history.entries.len() > preferences().max_entries {
-                    if let Some(removed) = history.entries.pop() {
-                        if let Some(path) = removed.image_path() {
-                            let _ = fs::remove_file(path);
-                        }
-                    }
-                }
-                let _ = save_entries_atomic(&history.entries);
-            }
-        }
-        return;
-    }
-
-    // 2. Fall back to text content
-    if let Some(text) = corvo_platform::read_clipboard_text() {
-        if text.trim().is_empty() || !should_record_text(&text) {
-            return;
-        }
-        let text = if text.len() > MAX_ENTRY_CHARS {
-            text.chars().take(MAX_ENTRY_CHARS).collect()
-        } else {
-            text
-        };
-        if let Some(first) = history.entries.first() {
-            if first.text == text && !first.is_image() {
-                return;
-            }
-        }
-        let entry = create_entry(text, source);
-        history.entries.insert(0, entry);
-        if history.entries.len() > preferences().max_entries {
-            if let Some(removed) = history.entries.pop() {
-                if let Some(path) = removed.image_path() {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
+    // stamp_top: true — a pasteboard change is a real copy event (an
+    // external copy, or Corvo's own paste/copy writing its content back),
+    // so re-copying the top entry refreshes its timestamp.
+    if ingest_current_clipboard(&mut history, &source, true) {
         let _ = save_entries_atomic(&history.entries);
     }
+}
+
+/// Reads the current pasteboard content and merges it into history.
+///
+/// Content that already has an entry is promoted to the top with a fresh
+/// timestamp instead of being recorded twice — this is what keeps
+/// Corvo's own paste (Enter) and copy actions from duplicating entries.
+/// `stamp_top` decides whether a match already at the top is re-stamped:
+/// polling follows real copy events (true), while process start is not a
+/// copy event (false).
+fn ingest_current_clipboard(history: &mut ClipboardHistory, source: &str, stamp_top: bool) -> bool {
+    if let Some(png_bytes) = current_clipboard_image() {
+        return merge_image(history, png_bytes, source, stamp_top);
+    }
+    match corvo_platform::read_clipboard_text() {
+        Some(text) => merge_text(history, text, source, stamp_top),
+        None => false,
+    }
+}
+
+fn merge_image(
+    history: &mut ClipboardHistory,
+    png_bytes: Vec<u8>,
+    source: &str,
+    stamp_top: bool,
+) -> bool {
+    let hash = simple_hash(&png_bytes);
+    if let Some(pos) = history
+        .entries
+        .iter()
+        .position(|entry| entry.image_hash == Some(hash))
+    {
+        if pos == 0 && !stamp_top {
+            return false;
+        }
+        promote_entry(&mut history.entries, pos);
+        return true;
+    }
+    match create_image_entry(png_bytes, source.to_string()) {
+        Some(entry) => {
+            insert_new_entry(history, entry);
+            true
+        }
+        None => false,
+    }
+}
+
+fn merge_text(history: &mut ClipboardHistory, text: String, source: &str, stamp_top: bool) -> bool {
+    if text.trim().is_empty() || !should_record_text(&text) {
+        return false;
+    }
+    let text = if text.len() > MAX_ENTRY_CHARS {
+        text.chars().take(MAX_ENTRY_CHARS).collect()
+    } else {
+        text
+    };
+    if let Some(pos) = history
+        .entries
+        .iter()
+        .position(|entry| !entry.is_image() && entry.text == text)
+    {
+        if pos == 0 && !stamp_top {
+            return false;
+        }
+        promote_entry(&mut history.entries, pos);
+        return true;
+    }
+    insert_new_entry(history, create_entry(text, source.to_string()));
+    true
+}
+
+/// Inserts a freshly captured entry at the top, evicting the oldest entry
+/// (and its image file) once the history exceeds the cap.
+fn insert_new_entry(history: &mut ClipboardHistory, entry: ClipboardEntry) {
+    history.entries.insert(0, entry);
+    if history.entries.len() > preferences().max_entries {
+        if let Some(removed) = history.entries.pop() {
+            if let Some(path) = removed.image_path() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// Moves `entries[pos]` to the front and stamps it as just-captured.
+/// The entry keeps its original source app: while pasting, the poll-time
+/// frontmost app is the paste target, not where the content came from.
+fn promote_entry(entries: &mut Vec<ClipboardEntry>, pos: usize) {
+    let mut entry = entries.remove(pos);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    entry.timestamp_secs = now;
+    let (copied_at_str, section) = format_time_and_section(now, now);
+    entry.copied_at_str = copied_at_str;
+    entry.section = section;
+    entries.insert(0, entry);
 }
 
 fn refresh_entry_time(entry: &mut ClipboardEntry) {
@@ -1050,15 +1069,105 @@ mod tests {
         assert_eq!(entries[0].text, "Fresh Entry");
     }
 
-    #[test]
-    fn test_image_entry_creation_and_actions() {
-        let png_bytes = vec![
+    /// Minimal valid 1×1 PNG; no pasteboard is touched.
+    fn minimal_png() -> Vec<u8> {
+        vec![
             0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
             b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
             0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, b'I', b'D', b'A', b'T', 0x78,
             0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
             0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
-        ];
+        ]
+    }
+
+    fn test_history(entries: Vec<ClipboardEntry>) -> ClipboardHistory {
+        ClipboardHistory {
+            last_change_count: 0,
+            entries,
+        }
+    }
+
+    #[test]
+    fn merge_text_promotes_existing_entry_without_duplicating() {
+        let mut history = test_history(vec![
+            create_entry("top".into(), "A".into()),
+            create_entry("middle".into(), "B".into()),
+            create_entry("oldest".into(), "C".into()),
+        ]);
+        let middle_id = history.entries[1].id.clone();
+        history.entries[1].timestamp_secs = 100;
+        history.entries[1].section = "Older".into();
+
+        assert!(merge_text(&mut history, "middle".into(), "Chrome", true));
+
+        assert_eq!(history.entries.len(), 3, "no duplicate may be inserted");
+        assert_eq!(history.entries[0].id, middle_id);
+        assert_eq!(history.entries[0].source_app, "B");
+        assert!(history.entries[0].timestamp_secs > 100);
+        assert_eq!(history.entries[0].section, "Today");
+    }
+
+    #[test]
+    fn merge_text_restamps_top_entry_when_polling_but_not_at_startup() {
+        let mut history = test_history(vec![create_entry("top".into(), "A".into())]);
+        history.entries[0].timestamp_secs = 100;
+
+        assert!(!merge_text(&mut history, "top".into(), "X", false));
+        assert_eq!(history.entries[0].timestamp_secs, 100);
+        assert_eq!(history.entries.len(), 1);
+
+        assert!(merge_text(&mut history, "top".into(), "X", true));
+        assert!(history.entries[0].timestamp_secs > 100);
+        assert_eq!(history.entries.len(), 1);
+    }
+
+    #[test]
+    fn merge_text_records_new_content_at_top() {
+        let mut history = test_history(vec![create_entry("top".into(), "A".into())]);
+
+        assert!(merge_text(&mut history, "fresh copy".into(), "Safari", true));
+
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.entries[0].text, "fresh copy");
+        assert_eq!(history.entries[0].source_app, "Safari");
+    }
+
+    #[test]
+    fn merge_text_never_promotes_image_entries() {
+        let png_bytes = minimal_png();
+        let entry = create_image_entry(png_bytes, "Finder".into()).expect("image entry");
+        let image_path = entry.image_path().unwrap();
+        let image_text = entry.text.clone();
+        let mut history = test_history(vec![entry]);
+
+        assert!(merge_text(&mut history, image_text, "X", true));
+
+        assert_eq!(history.entries.len(), 2);
+        assert!(!history.entries[0].is_image());
+
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn merge_image_promotes_existing_entry_without_duplicating() {
+        let png_bytes = minimal_png();
+        let entry = create_image_entry(png_bytes.clone(), "Finder".into()).expect("image entry");
+        let image_path = entry.image_path().unwrap();
+        let image_id = entry.id.clone();
+        let mut history = test_history(vec![create_entry("note".into(), "A".into()), entry]);
+
+        assert!(merge_image(&mut history, png_bytes, "X", true));
+
+        assert_eq!(history.entries.len(), 2, "no duplicate may be inserted");
+        assert_eq!(history.entries[0].id, image_id);
+        assert_eq!(history.entries[0].source_app, "Finder");
+
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn test_image_entry_creation_and_actions() {
+        let png_bytes = minimal_png();
         let entry =
             create_image_entry(png_bytes, "Finder".into()).expect("Failed to create image entry");
         assert!(entry.is_image());
