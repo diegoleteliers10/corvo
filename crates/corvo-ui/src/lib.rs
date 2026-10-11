@@ -11717,6 +11717,49 @@ mod tests {
         test();
     }
 
+    /// The five feature-pane rows are emitted too, so their aliases work
+    /// the same way. The emitted id routes through the builtin-commands
+    /// prefix to the pane's own config.
+    #[test]
+    fn an_alias_on_a_feature_row_surfaces_the_row() {
+        with_initial_results(
+            corvo_core::FEATURE_COMMANDS
+                .iter()
+                .map(|def| SearchResult {
+                    id: def.result_id.to_string(),
+                    title: def.title.to_string(),
+                    subtitle: Some("Commands".into()),
+                    icon: Icon::Svg(def.icon),
+                    score: 900,
+                    accessory: None,
+                    section: None,
+                    accessories: Vec::new(),
+                })
+                .collect(),
+            || {
+                let mut settings = corvo_config::Settings::default();
+                settings.snippets.command_items.insert(
+                    corvo_config::builtin_keys::SEARCH_SNIPPETS.into(),
+                    corvo_config::AppConfig {
+                        alias: Some("sni".into()),
+                        ..Default::default()
+                    },
+                );
+
+                let mut results = Vec::new();
+                rescue_alias_matches(&mut results, &settings, "sni");
+                assert_eq!(results.len(), 1, "the alias must surface Search Snippets");
+                assert_eq!(
+                    results[0].id,
+                    format!(
+                        "builtin-commands:{}",
+                        corvo_config::builtin_keys::SEARCH_SNIPPETS
+                    )
+                );
+            },
+        );
+    }
+
     /// The reported failure: an alias set on a Commands-pane row that no
     /// command emitted could never surface, because the rescue pass scans
     /// emitted rows and this row was in none of them.

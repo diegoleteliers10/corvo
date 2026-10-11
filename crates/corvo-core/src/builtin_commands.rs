@@ -181,6 +181,86 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommandDef] = &[
     ),
 ];
 
+/// A command row that belongs to a feature's own Settings pane rather than
+/// to the Commands pane: Clear Clipboard History lives in the Clipboard
+/// pane, Search Snippets and Create Snippet in the Snippets pane, and the
+/// two Navigation rows in the Navigation pane.
+pub struct FeatureCommandDef {
+    /// The Settings pane that renders the row, and whose toggle gates it.
+    pub section: &'static str,
+    /// The settings key that pane writes. Also what the launcher
+    /// dispatches on after stripping the command prefix.
+    pub id: &'static str,
+    /// The emitted search result id: `builtin-commands:` plus `id`.
+    pub result_id: &'static str,
+    pub title: &'static str,
+    pub keywords: &'static str,
+    pub icon: &'static str,
+    /// Only emit on macOS. The menu bar search has no Windows or Linux
+    /// counterpart, and the Navigation pane hides that section there.
+    pub macos_only: bool,
+}
+
+macro_rules! feature {
+    ($section:expr, $id:expr, $title:expr, $keywords:expr, $icon:expr) => {
+        FeatureCommandDef {
+            section: $section,
+            id: $id,
+            result_id: concat!("builtin-commands:", $id),
+            title: $title,
+            keywords: $keywords,
+            icon: $icon,
+            macos_only: false,
+        }
+    };
+}
+
+/// The five feature-pane command rows.
+///
+/// Before this table they had a Settings row, an alias and a hotkey but no
+/// search result, so typing the alias found nothing and the row was
+/// unreachable from the launcher.
+pub const FEATURE_COMMANDS: &[FeatureCommandDef] = &[
+    feature!(
+        "clipboard",
+        "clipboard-manager:clear-history",
+        "Clear Clipboard History",
+        "clear clipboard wipe empty history trash",
+        phosphor_svgs::style::regular::TRASH
+    ),
+    feature!(
+        "snippets",
+        "snippets:search",
+        "Search Snippets",
+        "search snippets find template text expansion",
+        phosphor_svgs::style::regular::MAGNIFYING_GLASS
+    ),
+    feature!(
+        "snippets",
+        "snippets:create",
+        "Create Snippet",
+        "create snippet new template add",
+        phosphor_svgs::style::regular::FILE_PLUS
+    ),
+    feature!(
+        "navigation",
+        "navigation:switch-windows",
+        "Switch Windows",
+        "switch windows cycle apps alt tab",
+        phosphor_svgs::style::regular::APP_WINDOW
+    ),
+    FeatureCommandDef {
+        macos_only: true,
+        ..feature!(
+            "navigation",
+            "navigation:search-menu-bar",
+            "Search Menu Bar Items",
+            "menu bar items search apple menus",
+            phosphor_svgs::style::regular::MAGNIFYING_GLASS
+        )
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -384,7 +384,13 @@ impl Settings {
         result_id: &'a str,
         title: &'a str,
     ) -> Option<&'a str> {
-        [key, result_id, title]
+        // A builtin-commands row stores its config under the settings key
+        // after the command prefix, which is neither the split key nor the
+        // full result id.
+        let owned_key = result_id
+            .strip_prefix("builtin-commands:")
+            .unwrap_or(result_id);
+        [key, owned_key, result_id, title]
             .into_iter()
             .find(|candidate| items.contains_key(*candidate))
     }
@@ -476,6 +482,15 @@ impl Settings {
 }
 
 fn result_section_and_key(result_id: &str) -> Option<(&str, &str)> {
+    // A row the builtin-commands command emits carries the settings key of
+    // the pane that owns it: `builtin-commands:snippets:search` is stored
+    // under `snippets:search` in the snippets map. A bare command id such
+    // as `about-corvo` keeps the whole id, because its settings key lives
+    // in the commands map under that same id.
+    let result_id = result_id
+        .strip_prefix("builtin-commands:")
+        .filter(|rest| rest.contains(':'))
+        .unwrap_or(result_id);
     let (section, suffix) = result_id.split_once(':')?;
     let key = if section == "app-launcher" {
         suffix.strip_prefix("recent:").unwrap_or(suffix)
@@ -516,17 +531,15 @@ pub mod builtin_keys {
     pub const SWITCH_WINDOWS: &str = "navigation:switch-windows";
     pub const SEARCH_MENU_BAR: &str = "navigation:search-menu-bar";
 
-    /// Built-in rows that no command emits as a search result. Their alias
-    /// cannot match anything and their visibility toggle cannot filter
-    /// anything, because the launcher never shows them. They exist only in
-    /// the Settings panes. Keyed by a stable id for consistency with the
-    /// rows above; do not expect a runtime effect.
-    pub const SETTINGS_ONLY: &[&str] = &[
-        CLEAR_CLIPBOARD_HISTORY,
-        SEARCH_SNIPPETS,
-        CREATE_SNIPPET,
-        SWITCH_WINDOWS,
-        SEARCH_MENU_BAR,
+    /// The panes these five rows render in. The builtin-commands command
+    /// emits each of them as `builtin-commands:` plus this key, gated on
+    /// its pane's toggle.
+    pub const FEATURE_PANES: &[(&str, &str)] = &[
+        ("clipboard", CLEAR_CLIPBOARD_HISTORY),
+        ("snippets", SEARCH_SNIPPETS),
+        ("snippets", CREATE_SNIPPET),
+        ("navigation", SWITCH_WINDOWS),
+        ("navigation", SEARCH_MENU_BAR),
     ];
 }
 
@@ -1765,35 +1778,44 @@ mod tests {
         assert!(!migrate_title_keys(&mut settings));
     }
 
-    /// These rows have a stable key but no command emits them as a search
-    /// result, so their alias cannot match anything at runtime and their
-    /// visibility toggle cannot filter anything. `Settings::load` will not
-    /// find an emitted row carrying one of these ids.
+    /// These rows are emitted as `builtin-commands:` plus their pane key.
+    /// The config the pane writes must resolve from that emitted id, or
+    /// the alias and the visibility toggle would not apply to the row the
+    /// launcher shows.
     #[test]
-    fn settings_only_rows_have_no_emitted_result() {
-        // Each is settings-only by virtue of the command never building a
-        // result with this id. Keep this list and SETTINGS_ONLY in sync.
-        let emitted_roots = [
-            "clipboard-manager:open",
-            "emoji-picker:open",
-            "file-search:open",
-        ];
-        for key in builtin_keys::SETTINGS_ONLY {
-            assert!(
-                !emitted_roots.contains(key),
-                "{key} is in SETTINGS_ONLY but also a real root result"
+    fn a_feature_row_resolves_from_its_emitted_id() {
+        for (section, key) in builtin_keys::FEATURE_PANES {
+            let emitted = format!("builtin-commands:{key}");
+            let mut settings = Settings::default();
+            settings
+                .result_items_and_key_mut(&emitted)
+                .unwrap_or_else(|| panic!("emitted id {emitted} must route to a settings section"))
+                .0
+                .insert((*key).to_string(), config("zz"));
+
+            assert_eq!(
+                settings
+                    .result_item(&emitted, "Any Rewording")
+                    .and_then(|c| c.alias.clone()),
+                Some("zz".to_string()),
+                "{emitted} does not resolve the alias its pane wrote under {key:?}"
             );
-            assert!(
-                key.contains(':'),
-                "{key} must carry a section prefix so the split still routes it"
+
+            // A hide toggle from the launcher lands on the same entry.
+            assert!(settings.set_result_item_flags(&emitted, "Any Rewording", Some(true), None));
+            assert_eq!(
+                settings
+                    .result_item(&emitted, "Any Rewording")
+                    .map(|c| c.hidden),
+                Some(true)
             );
+            let _ = section;
         }
     }
 
-    /// A settings-only row still has to round-trip: the pane writes it and
-    /// reads it back, even though no command ever emits it.
+    /// A pane still reads its own row back through its own key.
     #[test]
-    fn a_settings_only_row_round_trips_for_its_own_pane() {
+    fn a_feature_row_round_trips_for_its_own_pane() {
         let mut settings = Settings::default();
         let key = builtin_keys::SWITCH_WINDOWS;
         settings
