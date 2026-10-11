@@ -12,9 +12,11 @@ use std::sync::Arc;
 /// Upper bound handed to commands so no command can flood the result list.
 pub const DEFAULT_MAX_RESULTS: usize = 20;
 
+pub mod builtin_commands;
 pub mod page;
 pub mod search;
 pub mod shortcut;
+pub use builtin_commands::{BuiltinCommandDef, BUILTIN_COMMANDS};
 pub use page::{
     ArgumentKind, ArgumentSpec, Badge, Block, Blocks, CommandMode, CommandSpec, ExtensionManifest,
     FormField, GridContent, GridItem, Hero, Metadata, PageButton, PageFilter, PageView, Progress,

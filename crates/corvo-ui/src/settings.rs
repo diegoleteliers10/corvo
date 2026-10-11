@@ -93,115 +93,15 @@ impl SettingsTab {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct BuiltinCommandDef {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub icon: &'static str,
+pub use corvo_core::BuiltinCommandDef;
+
+/// The Commands pane rows. One source, shared with the command that emits
+/// the matching search results, so a row can never exist in Settings while
+/// the launcher has no result for it.
+pub fn get_builtin_commands() -> &'static [BuiltinCommandDef] {
+    corvo_core::BUILTIN_COMMANDS
 }
 
-pub fn get_builtin_commands() -> &'static [BuiltinCommandDef] {
-    &[
-        BuiltinCommandDef {
-            id: "about-corvo",
-            title: "About Corvo",
-            icon: phosphor_svgs::style::regular::INFO,
-        },
-        // Extension page entries: ids match the result ids the commands
-        // emit at root, so their aliases and hotkeys resolve through the
-        // same command_items lookup the launcher uses.
-        BuiltinCommandDef {
-            id: "brew:open-page",
-            title: "Homebrew",
-            icon: phosphor_svgs::style::regular::DOWNLOAD_SIMPLE,
-        },
-        BuiltinCommandDef {
-            id: "countdown:open",
-            title: "Countdown",
-            icon: phosphor_svgs::style::regular::CLOCK,
-        },
-        BuiltinCommandDef {
-            id: "media:open",
-            title: "Media Control",
-            icon: phosphor_svgs::style::regular::MUSIC_NOTES,
-        },
-        BuiltinCommandDef {
-            id: "notes:open",
-            title: "Notes",
-            icon: phosphor_svgs::style::regular::NOTEBOOK,
-        },
-        BuiltinCommandDef {
-            id: "pomodoro:status",
-            title: "Pomodoro",
-            icon: phosphor_svgs::style::regular::TIMER,
-        },
-        BuiltinCommandDef {
-            id: "text-utilities:open-page",
-            title: "Text Utilities",
-            icon: phosphor_svgs::style::regular::TEXT_AA,
-        },
-        BuiltinCommandDef {
-            id: "weather:current",
-            title: "Weather",
-            icon: phosphor_svgs::style::regular::CLOUD_SUN,
-        },
-        BuiltinCommandDef {
-            id: "calculator-history",
-            title: "Calculator History",
-            icon: phosphor_svgs::style::regular::PLUS_MINUS,
-        },
-        BuiltinCommandDef {
-            id: "check-for-updates",
-            title: "Check for Updates",
-            icon: phosphor_svgs::style::regular::ARROW_CIRCLE_DOWN,
-        },
-        BuiltinCommandDef {
-            id: "define-word",
-            title: "Define Word",
-            icon: phosphor_svgs::style::regular::BOOK_OPEN,
-        },
-        BuiltinCommandDef {
-            id: "export-backup",
-            title: "Export Backup",
-            icon: phosphor_svgs::style::regular::EXPORT,
-        },
-        BuiltinCommandDef {
-            id: "import-backup",
-            title: "Import Backup",
-            icon: phosphor_svgs::style::regular::DOWNLOAD_SIMPLE,
-        },
-        BuiltinCommandDef {
-            id: "import-from-raycast",
-            title: "Import from Raycast",
-            icon: phosphor_svgs::style::regular::FILE_ARROW_DOWN,
-        },
-        BuiltinCommandDef {
-            id: "open-camera",
-            title: "Open Camera",
-            icon: phosphor_svgs::style::regular::CAMERA,
-        },
-        BuiltinCommandDef {
-            id: "quit-corvo",
-            title: "Quit Corvo",
-            icon: phosphor_svgs::style::regular::POWER,
-        },
-        BuiltinCommandDef {
-            id: "reload-applications",
-            title: "Reload Applications",
-            icon: phosphor_svgs::style::regular::ARROWS_CLOCKWISE,
-        },
-        BuiltinCommandDef {
-            id: "open-settings",
-            title: "Open Settings",
-            icon: phosphor_svgs::style::regular::GEAR,
-        },
-        BuiltinCommandDef {
-            id: "toggle-system-appearance",
-            title: "Toggle System Appearance",
-            icon: phosphor_svgs::style::regular::SUN,
-        },
-    ]
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveDropdown {

@@ -1,0 +1,9 @@
+[package]
+name = "corvo-builtin-commands"
+version = "0.5.1"
+edition = "2021"
+
+[dependencies]
+corvo-core = { path = "../../crates/corvo-core" }
+corvo-config = { path = "../../crates/corvo-config" }
+async-trait = "0.1"

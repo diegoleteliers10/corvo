@@ -1136,6 +1136,7 @@ dependencies = [
  "corvo-app-launcher",
  "corvo-brew",
  "corvo-browser-tabs",
+ "corvo-builtin-commands",
  "corvo-calculator",
  "corvo-clipboard-manager",
  "corvo-config",
@@ -1193,6 +1194,15 @@ dependencies = [
  "corvo-platform",
  "serde_json",
  "smol",
+]
+
+[[package]]
+name = "corvo-builtin-commands"
+version = "0.5.1"
+dependencies = [
+ "async-trait",
+ "corvo-config",
+ "corvo-core",
 ]
 
 [[package]]
@@ -1410,6 +1420,7 @@ dependencies = [
  "corvo-app-launcher",
  "corvo-brew",
  "corvo-browser-tabs",
+ "corvo-builtin-commands",
  "corvo-clipboard-manager",
  "corvo-config",
  "corvo-core",

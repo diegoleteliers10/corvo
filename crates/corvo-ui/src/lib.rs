@@ -6341,6 +6341,18 @@ impl Launcher {
             open_settings_tab_with_update_check(SettingsTab::About, cx);
             return;
         }
+        // Built-in commands: open a page or run a launcher action, the
+        // same set a hotkey dispatches. Route through the shared
+        // dispatcher so a hotkey and a search result behave identically.
+        if let Some(cmd_id) = result
+            .id
+            .strip_prefix("builtin-commands:")
+            .map(str::to_owned)
+        {
+            self.dismiss(window);
+            execute_command_intent(&cmd_id, cx);
+            return;
+        }
         // Generic extension pages: a command whose manifest declares a
         // View command opens its declarative page from
         // `{id}:open[:{args}]`. Special cases above keep priority.
@@ -11703,6 +11715,94 @@ mod tests {
             *lock = rows;
         }
         test();
+    }
+
+    /// The reported failure: an alias set on a Commands-pane row that no
+    /// command emitted could never surface, because the rescue pass scans
+    /// emitted rows and this row was in none of them.
+    #[test]
+    fn an_alias_on_a_builtin_command_surfaces_the_row() {
+        with_initial_results(builtin_command_rows(""), || {
+            let mut settings = corvo_config::Settings::default();
+            settings.commands.items.insert(
+                "about-corvo".into(),
+                corvo_config::AppConfig {
+                    alias: Some("bb".into()),
+                    ..Default::default()
+                },
+            );
+
+            // Typing the whole alias surfaces the row.
+            let mut results = Vec::new();
+            rescue_alias_matches(&mut results, &settings, "bb");
+            assert_eq!(results.len(), 1, "the alias must surface About Corvo");
+            assert_eq!(results[0].id, "builtin-commands:about-corvo");
+
+            // Typing the start of it does too.
+            let mut results = Vec::new();
+            rescue_alias_matches(&mut results, &settings, "b");
+            assert_eq!(results.len(), 1, "an alias prefix must also surface it");
+
+            // An unrelated alias rescues nothing.
+            let mut results = Vec::new();
+            rescue_alias_matches(&mut results, &settings, "zz");
+            assert!(results.is_empty());
+        });
+    }
+
+    /// A test stand-in for the builtin-commands command's search: the same
+    /// filter, without reaching into the command crate from here.
+    fn builtin_command_rows(query: &str) -> Vec<SearchResult> {
+        corvo_core::BUILTIN_COMMANDS
+            .iter()
+            .filter(|def| def.result_id.starts_with("builtin-commands:"))
+            .map(|def| SearchResult {
+                id: def.result_id.to_string(),
+                title: def.title.to_string(),
+                subtitle: Some("Commands".into()),
+                icon: Icon::Svg(def.icon),
+                score: 900,
+                accessory: None,
+                section: None,
+                accessories: Vec::new(),
+            })
+            .filter(|r| {
+                query.is_empty()
+                    || corvo_core::search::fold(&r.title).contains(&corvo_core::search::fold(query))
+            })
+            .collect()
+    }
+
+    /// Every owned row must be reachable from the launcher: the launcher
+    /// resolves a result to its command from the text before the first
+    /// colon, and `builtin-commands` is a registered command.
+    #[test]
+    fn builtin_results_resolve_to_a_registered_command() {
+        // Referencing the crate keeps its inventory registration linked
+        // into this test binary.
+        let _ = corvo_builtin_commands::BuiltinCommandsCommand;
+        let registry = corvo_core::CommandRegistry::from_inventory();
+        let command_ids: Vec<&str> = registry.commands().iter().map(|c| c.id()).collect();
+        assert!(
+            command_ids.contains(&"builtin-commands"),
+            "the builtin-commands command must be registered"
+        );
+        // Extension entries belong to other commands; corvo-ui links only
+        // some of them, so their anchoring is the binary build's job.
+        for def in corvo_core::BUILTIN_COMMANDS {
+            let (section, _) = def.result_id.split_once(':').unwrap();
+            if section == "builtin-commands" {
+                continue;
+            }
+            if !command_ids.contains(&section) {
+                continue;
+            }
+            assert!(
+                def.result_id.starts_with(section),
+                "{} emits under {section}, a different command",
+                def.id
+            );
+        }
     }
 
     fn row(id: &str, title: &str) -> SearchResult {

@@ -60,6 +60,7 @@ members = [
     "commands/notes",
     "commands/media-control",
     "commands/browser-tabs",
+    "commands/builtin-commands",
 ]
 
 [workspace.dependencies]
@@ -99,6 +100,7 @@ corvo-platform = { path = "crates/corvo-platform" }
 corvo-pomodoro = { path = "commands/pomodoro" }
 corvo-weather = { path = "commands/weather" }
 corvo-notes = { path = "commands/notes" }
+corvo-builtin-commands = { path = "commands/builtin-commands" }
 corvo-media-control = { path = "commands/media-control" }
 corvo-browser-tabs = { path = "commands/browser-tabs" }
 corvo-quicklinks = { path = "commands/quicklinks" }
