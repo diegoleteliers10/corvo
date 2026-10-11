@@ -4,14 +4,14 @@ A native application launcher for macOS, Linux, and Windows. Written in Rust wit
 
 ## Features
 
-- **Application Launcher**: Start applications with fast search and frecency ranking.
+- **Application Launcher**: Start applications with fast search, frecency ranking, custom aliases, and focus-toggle hotkeys.
 - **Window Management**: Tile windows into halves, thirds, and quarters. Configure window gaps and window layout templates.
 - **System Actions & Settings**: Control system settings, dark mode, audio, and displays.
-- **Clipboard History**: Store and search text, code, colors, and images.
-- **Calculator**: Evaluate math expressions and view calculation history.
-- **Snippets**: Insert stored text templates with custom keywords.
+- **Clipboard History**: Store and search text, code, colors, and images. Paste the first nine entries with Primary+1 to Primary+9.
+- **Calculator**: Evaluate math expressions and convert units and currencies. View calculation history.
+- **Snippets**: Insert stored text templates with custom keywords. Expand `{clipboard}`, `{date}`, `{time}`, and `{datetime}` placeholders at paste time.
 - **Emoji Picker**: Search and copy emojis with skin-tone selection.
-- **Quicklinks**: Open custom URLs and web searches.
+- **Quicklinks**: Open custom URLs and web searches. Expand dynamic placeholders and pass arguments.
 - **File Search**: Search files with configurable scopes and ignore rules.
 - **Auto-Updater**: Automatic update checks with cryptographic signature verification.
 

@@ -204,6 +204,25 @@ tabs on Windows and Linux (Firefox removed its CDP endpoint).
 
 ## Shared changes
 
+- Add a shared placeholder expander in corvo-ext (`corvo-ext::placeholders`):
+  snippets and quicklinks expand `{clipboard}`, `{date}`, `{time}`, and
+  `{datetime}` at execution. Snippets read the clipboard before the paste
+  path overwrites it. Quicklinks percent-encode the clipboard value and keep
+  the placeholder literal in previews. Unknown placeholders stay literal.
+- Add currency conversion to the calculator: queries like `10 usd to eur`
+  convert through a USD pivot with rates from open.er-api.com, cached six
+  hours and fetched off the search path. A bare amount shows a default
+  target (`900 clp` shows USD).
+- Add clipboard quick-paste: Primary+1 to Primary+9 paste the visible
+  entries on the Clipboard page. The first nine rows show a keycap badge.
+- Make exact aliases work as triggers: root search pulls rows whose
+  configured alias matches the query from the cached empty-query list,
+  so an alias surfaces even when its text cannot match the row.
+- Make application hotkeys toggle focus: hide the app when it is
+  frontmost, activate it when it runs, launch it when it does not run.
+  New platform functions `running_app_pid`, `hide_app`, and `toggle_app`
+  cover macOS, Windows, and Linux (Linux minimize needs X11 with wmctrl
+  and xdotool).
 - Add the declarative extension platform: manifests with declared
   commands and typed arguments, PageView pages (Blocks, Detail,
   Grid, Form) with refresh cadences, quick commands on hotkeys, and

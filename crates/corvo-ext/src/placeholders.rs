@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn unknown_placeholders_stay_literal() {
-        assert_eq!(expand("{foo} {date}", None).starts_with("{foo} "), true);
+        assert!(expand("{foo} {date}", None).starts_with("{foo} "));
     }
 
     #[test]
