@@ -666,6 +666,75 @@ pub fn activate_app(pid: i32) {
     let _ = app.activateWithOptions(options);
 }
 
+/// The pid of the running regular app matching a path or name, if any.
+/// Absolute paths compare against the app bundle URL; bare names
+/// compare against the localized name and the bundle file stem, the
+/// same resolution `open_app` uses.
+pub fn running_app_pid(name_or_path: &str) -> Option<i32> {
+    let target_path = std::path::Path::new(name_or_path);
+    let clean_name = name_or_path.strip_suffix(".app").unwrap_or(name_or_path);
+    let workspace = NSWorkspace::sharedWorkspace();
+    let running = workspace.runningApplications();
+    for i in 0..running.count() {
+        let app = running.objectAtIndex(i);
+        if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            continue;
+        }
+        let pid = app.processIdentifier();
+        if pid == std::process::id() as libc::pid_t {
+            continue;
+        }
+        if target_path.is_absolute() {
+            let matches_path = app
+                .bundleURL()
+                .and_then(|url| url.path())
+                .is_some_and(|path| path.to_string() == name_or_path);
+            if matches_path {
+                return Some(pid);
+            }
+        }
+        let name_matches = app
+            .localizedName()
+            .is_some_and(|name| name.to_string().eq_ignore_ascii_case(clean_name));
+        let stem_matches = app.bundleURL().and_then(|url| url.path()).is_some_and(|path| {
+            std::path::Path::new(&path.to_string())
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.eq_ignore_ascii_case(clean_name))
+        });
+        if name_matches || stem_matches {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// Hides a running app by pid.
+pub fn hide_app(pid: i32) -> PlatformResult<()> {
+    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return Err(PlatformError::Os(format!("no running app with pid {pid}")));
+    };
+    if app.hide() {
+        Ok(())
+    } else {
+        Err(PlatformError::Os(format!("could not hide app with pid {pid}")))
+    }
+}
+
+/// Toggles an application bound to a hotkey: hides it when it is the
+/// frontmost app, activates it when it runs in the background, and
+/// launches it when it is not running.
+pub fn toggle_app(name_or_path: &str) -> PlatformResult<()> {
+    if let Some(pid) = running_app_pid(name_or_path) {
+        if frontmost_app_pid() == Some(pid) {
+            return hide_app(pid);
+        }
+        activate_app(pid);
+        return Ok(());
+    }
+    open_app(name_or_path)
+}
+
 /// The process runs as an agent: no Dock icon, no Cmd+Tab entry. GPUI
 /// sets the regular policy while launching, so this runs after the
 /// platform is up. Raycast does the same through `LSUIElement`.

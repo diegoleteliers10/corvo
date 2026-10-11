@@ -247,6 +247,56 @@ pub fn activate_app(_pid: i32) {
     let _ = linux::activate_app(_pid);
 }
 
+/// The pid of the running app matching a name or path, if any.
+pub fn running_app_pid(name_or_path: &str) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    return macos::running_app_pid(name_or_path);
+    #[cfg(target_os = "windows")]
+    return windows::running_app_pid(name_or_path);
+    #[cfg(target_os = "linux")]
+    return linux::running_app_pid(name_or_path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = name_or_path;
+        None
+    }
+}
+
+/// Hides a running app by pid.
+pub fn hide_app(pid: i32) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::hide_app(pid);
+    #[cfg(target_os = "windows")]
+    return windows::hide_app(pid);
+    #[cfg(target_os = "linux")]
+    return linux::hide_app(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = pid;
+        Err(PlatformError::Unsupported(
+            "hiding an app is not available on this platform".into(),
+        ))
+    }
+}
+
+/// Toggles an application: hides it when frontmost, activates it
+/// when running, launches it when not. Application hotkeys use this.
+pub fn toggle_app(name_or_path: &str) -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::toggle_app(name_or_path);
+    #[cfg(target_os = "windows")]
+    return windows::toggle_app(name_or_path);
+    #[cfg(target_os = "linux")]
+    return linux::toggle_app(name_or_path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = name_or_path;
+        Err(PlatformError::Unsupported(
+            "toggling an app is not available on this platform".into(),
+        ))
+    }
+}
+
 /// Reads image bytes (PNG) from the system clipboard.
 pub fn read_clipboard_image() -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]

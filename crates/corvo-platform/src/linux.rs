@@ -911,6 +911,67 @@ pub fn activate_app(pid: i32) -> PlatformResult<()> {
         .map_err(|error| PlatformError::Os(format!("could not activate the previous app: {error}")))
 }
 
+/// The pid of the running process whose name matches a path or name,
+/// if any. The name compares against the process snapshot,
+/// case-insensitive.
+pub fn running_app_pid(name_or_path: &str) -> Option<i32> {
+    let target = std::path::Path::new(name_or_path);
+    let clean_name = target
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name_or_path);
+    let snapshot = crate::processes::process_snapshot().ok()?;
+    snapshot
+        .iter()
+        .find(|process| process.name.eq_ignore_ascii_case(clean_name))
+        .map(|process| process.identity.pid as i32)
+}
+
+/// Minimizes the main window of a running process by pid. Requires an
+/// X11 session with wmctrl and xdotool.
+pub fn hide_app(pid: i32) -> PlatformResult<()> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_none() {
+        return Err(PlatformError::Unsupported(
+            "hiding an app requires an X11 session".into(),
+        ));
+    }
+    let output = Command::new("wmctrl")
+        .args(["-lp"])
+        .output()
+        .map_err(|error| command_error("run wmctrl", error))?;
+    if !output.status.success() {
+        return Err(PlatformError::Os(format!(
+            "wmctrl could not list windows: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let window_id = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let window_id = fields.next()?;
+            let _desktop = fields.next()?;
+            let window_pid = fields.next()?.parse::<i32>().ok()?;
+            (window_pid == pid).then(|| window_id.to_owned())
+        })
+        .ok_or_else(|| PlatformError::Os("the app has no window to hide".into()))?;
+    run_command("xdotool", [OsStr::new("windowminimize"), OsStr::new(&window_id)])
+        .map_err(|error| PlatformError::Os(format!("could not hide the app: {error}")))
+}
+
+/// Toggles an application bound to a hotkey: minimizes it when it is
+/// the frontmost app, activates it when it runs in the background,
+/// and launches it when it is not running.
+pub fn toggle_app(name_or_path: &str) -> PlatformResult<()> {
+    if let Some(pid) = running_app_pid(name_or_path) {
+        if frontmost_app_info().map(|(pid, _)| pid) == Some(pid) {
+            return hide_app(pid);
+        }
+        return activate_app(pid);
+    }
+    crate::open_app(name_or_path)
+}
+
 pub fn send_paste_keystroke() -> PlatformResult<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         match run_command(

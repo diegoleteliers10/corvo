@@ -1475,6 +1475,90 @@ pub fn activate_app(pid: i32) -> PlatformResult<()> {
     Ok(())
 }
 
+/// The pid of the running process whose name matches a path or name,
+/// if any. Matching follows `open_path` resolution: the file stem of
+/// an absolute path, or the name itself, case-insensitive.
+pub fn running_app_pid(name_or_path: &str) -> Option<i32> {
+    let target = std::path::Path::new(name_or_path);
+    let clean_name = target
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name_or_path);
+    let snapshot = crate::processes::process_snapshot().ok()?;
+    snapshot
+        .iter()
+        .find(|process| process.name.eq_ignore_ascii_case(clean_name))
+        .map(|process| process.identity.pid as i32)
+}
+
+/// Minimizes the main window of a running process by pid.
+pub fn hide_app(pid: i32) -> PlatformResult<()> {
+    #[allow(non_snake_case)]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(isize, isize) -> i32,
+            data: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(window: isize, process_id: *mut u32) -> u32;
+        fn GetWindow(window: isize, command: u32) -> isize;
+        fn IsWindowVisible(window: isize) -> i32;
+        fn ShowWindowAsync(window: isize, command: i32) -> i32;
+    }
+
+    struct WindowSearch {
+        pid: u32,
+        window: isize,
+    }
+
+    unsafe extern "system" fn find_main_window(window: isize, data: isize) -> i32 {
+        let search = &mut *(data as *mut WindowSearch);
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, &mut pid);
+        if pid == search.pid && IsWindowVisible(window) != 0 && GetWindow(window, 4) == 0 {
+            search.window = window;
+            return 0;
+        }
+        1
+    }
+
+    let mut search = WindowSearch {
+        pid: pid as u32,
+        window: 0,
+    };
+    unsafe {
+        EnumWindows(
+            find_main_window,
+            (&mut search as *mut WindowSearch) as isize,
+        )
+    };
+    if search.window == 0 {
+        return Err(PlatformError::Os(format!(
+            "no main window found for process {pid}"
+        )));
+    }
+    // SW_MINIMIZE = 6
+    if unsafe { ShowWindowAsync(search.window, 6) } == 0 {
+        return Err(PlatformError::Os(format!(
+            "could not minimize the window of process {pid}"
+        )));
+    }
+    Ok(())
+}
+
+/// Toggles an application bound to a hotkey: minimizes it when it is
+/// the foreground process, activates it when it runs in the
+/// background, and launches it when it is not running.
+pub fn toggle_app(name_or_path: &str) -> PlatformResult<()> {
+    if let Some(pid) = running_app_pid(name_or_path) {
+        if frontmost_app_info().map(|(pid, _)| pid) == Some(pid) {
+            return hide_app(pid);
+        }
+        return activate_app(pid);
+    }
+    crate::open_app(name_or_path)
+}
+
 pub fn send_paste_keystroke() -> PlatformResult<()> {
     run_powershell("(New-Object -ComObject WScript.Shell).SendKeys('^v')")
 }

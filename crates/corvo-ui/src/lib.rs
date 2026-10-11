@@ -10856,12 +10856,12 @@ pub fn run(
                     corvo_platform::HotkeyIntent::LaunchApp(path) => {
                         let path_str = path.to_string_lossy().to_string();
                         smol::spawn(async move {
-                            if let Err(err) = corvo_platform::open_app(&path_str) {
+                            if let Err(err) = corvo_platform::toggle_app(&path_str) {
                                 corvo_platform::diagnostics::record_error(
                                     "launcher",
-                                    "app_open_failed",
+                                    "app_toggle_failed",
                                 );
-                                eprintln!("corvo: open app error: {err}");
+                                eprintln!("corvo: toggle app error: {err}");
                             }
                         })
                         .detach();
