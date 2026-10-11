@@ -1502,9 +1502,8 @@ impl SettingsView {
             let field = self.snippet_active_field;
             match keystroke.key.as_str() {
                 "escape" => {
-                    self.adding_snippet = false;
-                    self.editing_snippet_index = None;
-                    cx.notify();
+                    self.close_snippet_modal(cx);
+                    return;
                 }
                 "tab" => {
                     self.snippet_active_field = (field + 1) % 3;
@@ -1564,9 +1563,8 @@ impl SettingsView {
         if self.adding_quicklink || self.editing_quicklink_index.is_some() {
             match keystroke.key.as_str() {
                 "escape" => {
-                    self.adding_quicklink = false;
-                    self.editing_quicklink_index = None;
-                    cx.notify();
+                    self.close_quicklink_modal(cx);
+                    return;
                 }
                 "tab" => {
                     self.quicklink_active_field = if self.quicklink_active_field == 0 {
@@ -3947,6 +3945,49 @@ impl SettingsView {
             )
     }
 
+    /// Dismiss the quicklink modal from a click. Shared by the close
+    /// button, Cancel, Escape, and a click on the backdrop, so every path
+    /// resets exactly the same state.
+    fn on_close_quicklink_modal(
+        this: &mut Self,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        this.close_quicklink_modal(cx);
+    }
+
+    /// Dismiss the quicklink modal without saving.
+    fn close_quicklink_modal(&mut self, cx: &mut Context<Self>) {
+        self.adding_quicklink = false;
+        self.editing_quicklink_index = None;
+        self.quicklink_name_input.clear();
+        self.quicklink_url_input.clear();
+        cx.notify();
+    }
+
+    /// Dismiss the snippet modal from a click. Shared by the close
+    /// button, Cancel, Escape, and a click on the backdrop.
+    fn on_close_snippet_modal(
+        this: &mut Self,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        this.close_snippet_modal(cx);
+    }
+
+    /// Dismiss the snippet modal without saving.
+    fn close_snippet_modal(&mut self, cx: &mut Context<Self>) {
+        self.adding_snippet = false;
+        self.editing_snippet_index = None;
+        self.snippet_name_input.clear();
+        self.snippet_keyword_input.clear();
+        self.snippet_body_input.clear();
+        self.snippet_active_field = 0;
+        cx.notify();
+    }
+
     fn save_quicklink(&mut self, cx: &mut Context<Self>) {
         let name = self.quicklink_name_input.trim().to_string();
         let url = self.quicklink_url_input.trim().to_string();
@@ -3955,9 +3996,32 @@ impl SettingsView {
         }
 
         if let Some(idx) = self.editing_quicklink_index {
+            // settings.quicklinks.command_items is keyed by quicklink name,
+            // so a rename has to carry that entry over or the row falls
+            // back to defaults.
+            let previous_name = self
+                .quicklinks_file
+                .quicklinks
+                .get(idx)
+                .map(|entry| entry.name.clone());
             if let Some(entry) = self.quicklinks_file.quicklinks.get_mut(idx) {
-                entry.name = name;
+                entry.name = name.clone();
                 entry.url = url;
+            }
+            if let Some(previous_name) = previous_name.filter(|old| *old != name) {
+                if let Some(config) = self
+                    .settings
+                    .quicklinks
+                    .command_items
+                    .remove(&previous_name)
+                {
+                    self.settings
+                        .quicklinks
+                        .command_items
+                        .entry(name)
+                        .or_insert(config);
+                    self.save_settings_file();
+                }
             }
         } else if self.adding_quicklink {
             self.quicklinks_file
@@ -4477,7 +4541,9 @@ impl SettingsView {
                                                             .border_1()
                                                             .border_color(rgb(COLOR_CONTROL_BORDER))
                                                             .cursor_pointer()
-                                                            .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                                            .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                                             .on_click(cx.listener({
                                                                 let name_clone = name_clone.clone();
                                                                 let alias = alias.clone();
@@ -4505,7 +4571,9 @@ impl SettingsView {
                                                             .border_1()
                                                             .border_color(rgb(COLOR_CONTROL_BORDER))
                                                             .cursor_pointer()
-                                                            .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                                            .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                                             .on_click(cx.listener({
                                                                 let name_clone = name_clone.clone();
                                                                 move |this, _: &ClickEvent, _window, cx| {
@@ -4631,7 +4699,9 @@ impl SettingsView {
                                     .border_1()
                                     .border_color(rgb(COLOR_CONTROL_BORDER))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                    .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                     .text_size(px(12.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(COLOR_TEXT))
@@ -4693,9 +4763,15 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .justify_center()
+                    // A click outside the card dismisses. The card stops
+                    // propagation, so clicks inside it never reach here.
+                    .on_click(cx.listener(Self::on_close_quicklink_modal))
                     .child(
                         div()
                             .id("quicklink-modal-card")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }))
                             .w(px(420.0))
                             .rounded_xl()
                             .bg(rgb(COLOR_CARD_BG))
@@ -4727,11 +4803,7 @@ impl SettingsView {
                                             .items_center()
                                             .justify_center()
                                             .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                this.adding_quicklink = false;
-                                                this.editing_quicklink_index = None;
-                                                cx.notify();
-                                            }))
+                                            .on_click(cx.listener(Self::on_close_quicklink_modal))
                                             .child(crate::icons::render_phosphor_svg(
                                                 phosphor_svgs::style::regular::X,
                                                 rgb(COLOR_TEXT_DIM),
@@ -4835,11 +4907,7 @@ impl SettingsView {
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(COLOR_TEXT))
                                             .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                this.adding_quicklink = false;
-                                                this.editing_quicklink_index = None;
-                                                cx.notify();
-                                            }))
+                                            .on_click(cx.listener(Self::on_close_quicklink_modal))
                                             .child("Cancel"),
                                     )
                                     .child(
@@ -4958,7 +5026,7 @@ impl SettingsView {
                             .child(self.render_item_row(
                                 SettingsTab::Clipboard,
                                 0,
-                                "Clipboard History",
+                                corvo_config::builtin_keys::CLIPBOARD_HISTORY,
                                 "Clipboard History",
                                 crate::icons::render_phosphor_svg(
                                     phosphor_svgs::style::regular::CLIPBOARD_TEXT,
@@ -4970,7 +5038,7 @@ impl SettingsView {
                             .child(self.render_item_row(
                                 SettingsTab::Clipboard,
                                 1,
-                                "Clear Clipboard History",
+                                corvo_config::builtin_keys::CLEAR_CLIPBOARD_HISTORY,
                                 "Clear Clipboard History",
                                 crate::icons::render_phosphor_svg(
                                     phosphor_svgs::style::regular::TRASH,
@@ -5226,7 +5294,7 @@ impl SettingsView {
                                 self.render_item_row(
                                     SettingsTab::Snippets,
                                     0,
-                                    "Search Snippets",
+                                    corvo_config::builtin_keys::SEARCH_SNIPPETS,
                                     "Search Snippets",
                                     crate::icons::render_phosphor_svg(
                                         phosphor_svgs::style::regular::CODE,
@@ -5241,7 +5309,7 @@ impl SettingsView {
                                 self.render_item_row(
                                     SettingsTab::Snippets,
                                     1,
-                                    "Create Snippet",
+                                    corvo_config::builtin_keys::CREATE_SNIPPET,
                                     "Create Snippet",
                                     crate::icons::render_phosphor_svg(
                                         phosphor_svgs::style::regular::FILE_PLUS,
@@ -5582,7 +5650,9 @@ impl SettingsView {
                                     .border_1()
                                     .border_color(rgb(COLOR_CONTROL_BORDER))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                    .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                     .on_click(cx.listener({
                                         let name = name.clone();
                                         let alias = alias.clone();
@@ -5611,7 +5681,9 @@ impl SettingsView {
                                     .border_1()
                                     .border_color(rgb(COLOR_CONTROL_BORDER))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                    .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                     .on_click(cx.listener({
                                         let name = name.clone();
                                         move |this, _: &ClickEvent, _window, cx| {
@@ -5782,9 +5854,15 @@ impl SettingsView {
             .flex()
             .items_center()
             .justify_center()
+            // A click outside the card dismisses. The card stops
+            // propagation, so clicks inside it never reach here.
+            .on_click(cx.listener(Self::on_close_snippet_modal))
             .child(
                 div()
                     .id("snippet-modal-card")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .w(px(440.0))
                     .rounded_xl()
                     .bg(rgb(COLOR_CARD_BG))
@@ -5820,11 +5898,7 @@ impl SettingsView {
                                     .items_center()
                                     .justify_center()
                                     .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.adding_snippet = false;
-                                        this.editing_snippet_index = None;
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(Self::on_close_snippet_modal))
                                     .child(crate::icons::render_phosphor_svg(
                                         phosphor_svgs::style::regular::X,
                                         rgb(COLOR_TEXT_DIM),
@@ -5986,13 +6060,7 @@ impl SettingsView {
                                             })
                                             .text_size(px(12.0))
                                             .text_color(rgb(COLOR_TEXT))
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.adding_snippet = false;
-                                                    this.editing_snippet_index = None;
-                                                    cx.notify();
-                                                },
-                                            ))
+                                            .on_click(cx.listener(Self::on_close_snippet_modal))
                                             .child("Cancel"),
                                     )
                                     .child(
@@ -6061,7 +6129,7 @@ impl SettingsView {
                                 self.render_item_row(
                                     SettingsTab::FileSearch,
                                     0,
-                                    "Search Files",
+                                    corvo_config::builtin_keys::FILE_SEARCH,
                                     "Search Files",
                                     crate::icons::render_phosphor_svg(
                                         phosphor_svgs::style::regular::FILE_TEXT,
@@ -7065,7 +7133,7 @@ impl SettingsView {
                             .child(self.render_item_row(
                                 SettingsTab::Navigation,
                                 0,
-                                "Switch Windows",
+                                corvo_config::builtin_keys::SWITCH_WINDOWS,
                                 "Switch Windows",
                                 crate::icons::render_phosphor_svg(
                                     phosphor_svgs::style::regular::APP_WINDOW,
@@ -7101,7 +7169,7 @@ impl SettingsView {
                             .child(self.render_item_row(
                                 SettingsTab::Navigation,
                                 1,
-                                "Search Menu Bar Items",
+                                corvo_config::builtin_keys::SEARCH_MENU_BAR,
                                 "Search Menu Bar Items",
                                 crate::icons::render_phosphor_svg(
                                     phosphor_svgs::style::regular::MAGNIFYING_GLASS,
@@ -7166,7 +7234,9 @@ impl SettingsView {
                                                     .bg(rgb(COLOR_CONTROL_BG))
                                                     .border_1()
                                                     .border_color(rgb(COLOR_CONTROL_BORDER))
-                                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                                    .hover(|s| {
+                                        s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e))
+                                    })
                                                     .text_size(px(12.0))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(rgb(COLOR_TEXT))
@@ -7472,7 +7542,7 @@ impl SettingsView {
                             .child(self.render_item_row(
                                 SettingsTab::Emojis,
                                 0,
-                                "Search Emoji & Symbols",
+                                corvo_config::builtin_keys::EMOJI_PICKER,
                                 "Search Emoji & Symbols",
                                 crate::icons::render_phosphor_svg(
                                     phosphor_svgs::style::regular::SMILEY,

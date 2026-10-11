@@ -92,7 +92,9 @@ pub fn update_settings(settings: &UpdateSettings) -> CoreUpdateSettings {
 pub mod ranking;
 pub use ranking::{FrecencyStore, LearnedTerm};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+// PartialEq lets the key migration tell a seeded default apart from an
+// entry the user edited.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub alias: Option<String>,
@@ -312,8 +314,15 @@ impl Settings {
             }
         }
 
-        let (settings, stamp) =
+        let (mut settings, stamp) =
             load_or_create_stamped(&dirs, "settings.toml", &Settings::default());
+        // Move entries written under a display title onto their stable key.
+        // save() refreshes the load cache with the file it just wrote, so
+        // the migrated value is what the next load reads back.
+        if migrate_title_keys(&mut settings) {
+            let _ = settings.save();
+            return settings;
+        }
         if let Some(stamp) = stamp {
             if let Ok(mut cache) = Self::cache().write() {
                 *cache = Some((stamp, settings.clone()));
@@ -488,6 +497,131 @@ fn result_identity(result_id: &str) -> &str {
         .unwrap_or(result_id)
 }
 
+/// Stable keys for the built-in rows the Settings panes expose.
+///
+/// These panes used to key their entries by the visible title. A title is
+/// UI copy: change the wording and every alias, hotkey, and visibility flag
+/// saved under the old wording silently stopped applying. A key that is not
+/// displayed cannot drift that way.
+///
+/// The value is the result id the command emits, so `result_item` resolves
+/// the entry on its first candidate instead of falling through to the title.
+pub mod builtin_keys {
+    pub const CLIPBOARD_HISTORY: &str = "clipboard-manager:open";
+    pub const CLEAR_CLIPBOARD_HISTORY: &str = "clipboard-manager:clear-history";
+    pub const FILE_SEARCH: &str = "file-search:open";
+    pub const EMOJI_PICKER: &str = "emoji-picker:open";
+    pub const SEARCH_SNIPPETS: &str = "snippets:search";
+    pub const CREATE_SNIPPET: &str = "snippets:create";
+    pub const SWITCH_WINDOWS: &str = "navigation:switch-windows";
+    pub const SEARCH_MENU_BAR: &str = "navigation:search-menu-bar";
+
+    /// Built-in rows that no command emits as a search result. Their alias
+    /// cannot match anything and their visibility toggle cannot filter
+    /// anything, because the launcher never shows them. They exist only in
+    /// the Settings panes. Keyed by a stable id for consistency with the
+    /// rows above; do not expect a runtime effect.
+    pub const SETTINGS_ONLY: &[&str] = &[
+        CLEAR_CLIPBOARD_HISTORY,
+        SEARCH_SNIPPETS,
+        CREATE_SNIPPET,
+        SWITCH_WINDOWS,
+        SEARCH_MENU_BAR,
+    ];
+}
+
+/// Legacy title keys and the stable key each one becomes.
+///
+/// Applied once when settings load, so an alias written before the switch
+/// keeps working.
+///
+/// The stable key may already hold an entry. Two cases, told apart by
+/// comparing against what `Default` seeds: an untouched seed yields to the
+/// legacy entry, and anything the user set after the switch wins.
+fn migrate_title_keys(settings: &mut Settings) -> bool {
+    // (section, old title, new stable key)
+    let moves: [(&str, &str, &str); 8] = [
+        (
+            "clipboard",
+            "Clipboard History",
+            builtin_keys::CLIPBOARD_HISTORY,
+        ),
+        (
+            "clipboard",
+            "Clear Clipboard History",
+            builtin_keys::CLEAR_CLIPBOARD_HISTORY,
+        ),
+        ("snippets", "Search Snippets", builtin_keys::SEARCH_SNIPPETS),
+        ("snippets", "Create Snippet", builtin_keys::CREATE_SNIPPET),
+        ("file-search", "Search Files", builtin_keys::FILE_SEARCH),
+        (
+            "emoji-picker",
+            "Search Emoji & Symbols",
+            builtin_keys::EMOJI_PICKER,
+        ),
+        ("navigation", "Switch Windows", builtin_keys::SWITCH_WINDOWS),
+        (
+            "navigation",
+            "Search Menu Bar Items",
+            builtin_keys::SEARCH_MENU_BAR,
+        ),
+    ];
+
+    // Read the seed from a pristine Settings, so this comparison can never
+    // drift away from the Default impls.
+    let pristine = Settings::default();
+
+    let mut changed = false;
+    for (section, old_key, new_key) in moves {
+        let (map, seed) = match section {
+            "clipboard" => (
+                &mut settings.clipboard.command_items,
+                &pristine.clipboard.command_items,
+            ),
+            "snippets" => (
+                &mut settings.snippets.command_items,
+                &pristine.snippets.command_items,
+            ),
+            "file-search" => (
+                &mut settings.file_search.command_items,
+                &pristine.file_search.command_items,
+            ),
+            "emoji-picker" => (
+                &mut settings.emojis.command_items,
+                &pristine.emojis.command_items,
+            ),
+            "navigation" => (
+                &mut settings.navigation.command_items,
+                &pristine.navigation.command_items,
+            ),
+            _ => continue,
+        };
+
+        let Some(legacy) = map.remove(old_key) else {
+            continue;
+        };
+        changed = true;
+
+        match map.get(new_key) {
+            // Untouched seed: the legacy entry replaces it, so the alias
+            // the user set before the switch survives.
+            Some(current) if seed.get(new_key) == Some(current) => {
+                map.insert(new_key.to_string(), legacy);
+            }
+            // The user wrote here after the switch: keep it, and leave the
+            // legacy entry under its old key rather than deleting it.
+            Some(_) => {
+                map.insert(old_key.to_string(), legacy);
+            }
+            // Nothing at the stable key at all.
+            None => {
+                map.insert(new_key.to_string(), legacy);
+            }
+        }
+    }
+    changed
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Onboarding {
@@ -511,7 +645,7 @@ impl Default for ClipboardSettings {
     fn default() -> Self {
         let mut command_items = std::collections::HashMap::new();
         command_items.insert(
-            "Clipboard History".into(),
+            builtin_keys::CLIPBOARD_HISTORY.into(),
             AppConfig {
                 alias: None,
                 hotkey: Some(default_hotkey("cmd+shift+v")),
@@ -519,7 +653,7 @@ impl Default for ClipboardSettings {
             },
         );
         command_items.insert(
-            "Clear Clipboard History".into(),
+            builtin_keys::CLEAR_CLIPBOARD_HISTORY.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -551,7 +685,7 @@ impl Default for SnippetsSettings {
     fn default() -> Self {
         let mut command_items = std::collections::HashMap::new();
         command_items.insert(
-            "Search Snippets".into(),
+            builtin_keys::SEARCH_SNIPPETS.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -559,7 +693,7 @@ impl Default for SnippetsSettings {
             },
         );
         command_items.insert(
-            "Create Snippet".into(),
+            builtin_keys::CREATE_SNIPPET.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -587,7 +721,7 @@ impl Default for FileSearchSettings {
     fn default() -> Self {
         let mut command_items = std::collections::HashMap::new();
         command_items.insert(
-            "Search Files".into(),
+            builtin_keys::FILE_SEARCH.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -700,7 +834,7 @@ impl Default for NavigationSettings {
     fn default() -> Self {
         let mut command_items = std::collections::HashMap::new();
         command_items.insert(
-            "Switch Windows".into(),
+            builtin_keys::SWITCH_WINDOWS.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -708,7 +842,7 @@ impl Default for NavigationSettings {
             },
         );
         command_items.insert(
-            "Search Menu Bar Items".into(),
+            builtin_keys::SEARCH_MENU_BAR.into(),
             AppConfig {
                 alias: None,
                 hotkey: None,
@@ -764,7 +898,7 @@ impl Default for EmojisSettings {
     fn default() -> Self {
         let mut command_items = std::collections::HashMap::new();
         command_items.insert(
-            "Search Emoji & Symbols".into(),
+            builtin_keys::EMOJI_PICKER.into(),
             AppConfig {
                 alias: None,
                 hotkey: Some(default_hotkey("cmd+alt+space")),
@@ -1469,28 +1603,28 @@ mod tests {
                 "Lock Screen",
             ),
             ("brew:open-page", "brew:open-page", "Homebrew"),
-            ("GitHub", "quicklinks:a1b2c3d4e5f60718", "GitHub"),
             (
-                "Clipboard History",
+                builtin_keys::CLIPBOARD_HISTORY,
                 "clipboard-manager:open",
                 "Clipboard History",
             ),
             (
-                "Search Snippets",
-                "snippets:9f2c1a0b3d4e5f60",
-                "Search Snippets",
-            ),
-            ("Search Files", "file-search:open", "Search Files"),
-            ("left-half", "window-management:left-half", "Left Half"),
-            (
-                "Switch Windows",
-                "navigation:switch-windows",
-                "Switch Windows",
-            ),
-            (
-                "Search Emoji & Symbols",
+                builtin_keys::EMOJI_PICKER,
                 "emoji-picker:open",
                 "Search Emoji & Symbols",
+            ),
+            (
+                builtin_keys::FILE_SEARCH,
+                "file-search:open",
+                "Search Files",
+            ),
+            ("left-half", "window-management:left-half", "Left Half"),
+            // Snippet rows are keyed by the name the user gave them, which is
+            // data rather than UI copy.
+            (
+                "Meeting Notes",
+                "snippets:9f2c1a0b3d4e5f60",
+                "Meeting Notes",
             ),
         ];
 
@@ -1502,6 +1636,22 @@ mod tests {
                 .expect("every case must name a section the match knows")
                 .0;
             map.insert((*key).to_string(), config(key));
+
+            // Every built-in key must resolve on its own, without falling back
+            // to the title. That is what makes a wording change safe.
+            // Snippet and quicklink rows are excluded: their key is a name
+            // the user typed, and the launcher shows that same name.
+            let user_named = id.starts_with("snippets:") || id.starts_with("quicklinks:");
+            if !user_named {
+                let (items, split_key) = settings
+                    .result_items_and_key(id)
+                    .expect("id must name a known section");
+                assert!(
+                    items.contains_key(split_key) || items.contains_key(*id),
+                    "id {id:?} resolves only through its title: key {key:?} is neither \
+                     the split key {split_key:?} nor the full id"
+                );
+            }
 
             let resolved = settings
                 .result_item(id, title)
@@ -1525,5 +1675,142 @@ mod tests {
                 "id {id:?} hide toggle did not round-trip"
             );
         }
+    }
+
+    /// An alias saved before the switch to stable keys was stored under the
+    /// visible title. Loading has to move it, or the user silently loses
+    /// the alias they configured.
+    #[test]
+    fn a_title_keyed_alias_survives_the_switch_to_stable_keys() {
+        let mut settings = Settings::default();
+        settings
+            .clipboard
+            .command_items
+            .insert("Clipboard History".into(), config("cb"));
+        settings
+            .file_search
+            .command_items
+            .insert("Search Files".into(), config("ff"));
+
+        assert!(migrate_title_keys(&mut settings));
+
+        assert!(!settings
+            .clipboard
+            .command_items
+            .contains_key("Clipboard History"));
+        assert_eq!(
+            settings
+                .result_item("clipboard-manager:open", "Any Rewording")
+                .and_then(|c| c.alias.clone()),
+            Some("cb".to_string())
+        );
+        assert_eq!(
+            settings
+                .result_item("file-search:open", "Any Rewording")
+                .and_then(|c| c.alias.clone()),
+            Some("ff".to_string())
+        );
+    }
+
+    /// A title that no longer matches anything is exactly the case this
+    /// switch exists to survive.
+    #[test]
+    fn a_migrated_alias_resolves_after_the_title_changes() {
+        let mut settings = Settings::default();
+        settings
+            .emojis
+            .command_items
+            .insert("Search Emoji & Symbols".into(), config("emo"));
+        assert!(migrate_title_keys(&mut settings));
+
+        // The command reworded its row. The alias still resolves, because
+        // the entry is keyed by the id and not by the display string.
+        assert_eq!(
+            settings
+                .result_item("emoji-picker:open", "Emoji & Symbols")
+                .and_then(|c| c.alias.clone()),
+            Some("emo".to_string())
+        );
+    }
+
+    /// When both keys hold an entry the stable one wins: it is the one the
+    /// pane reads now.
+    #[test]
+    fn a_stable_key_wins_over_the_legacy_title() {
+        let mut settings = Settings::default();
+        settings
+            .clipboard
+            .command_items
+            .insert("Clipboard History".into(), config("old"));
+        settings
+            .clipboard
+            .command_items
+            .insert(builtin_keys::CLIPBOARD_HISTORY.into(), config("new"));
+
+        assert!(migrate_title_keys(&mut settings));
+
+        assert_eq!(
+            settings
+                .result_item("clipboard-manager:open", "Clipboard History")
+                .and_then(|c| c.alias.clone()),
+            Some("new".to_string())
+        );
+    }
+
+    /// Nothing to move means no write, so loading a healthy file does not
+    /// rewrite it on every start.
+    #[test]
+    fn migrating_an_already_migrated_file_changes_nothing() {
+        let mut settings = Settings::default();
+        assert!(!migrate_title_keys(&mut settings));
+    }
+
+    /// These rows have a stable key but no command emits them as a search
+    /// result, so their alias cannot match anything at runtime and their
+    /// visibility toggle cannot filter anything. `Settings::load` will not
+    /// find an emitted row carrying one of these ids.
+    #[test]
+    fn settings_only_rows_have_no_emitted_result() {
+        // Each is settings-only by virtue of the command never building a
+        // result with this id. Keep this list and SETTINGS_ONLY in sync.
+        let emitted_roots = [
+            "clipboard-manager:open",
+            "emoji-picker:open",
+            "file-search:open",
+        ];
+        for key in builtin_keys::SETTINGS_ONLY {
+            assert!(
+                !emitted_roots.contains(key),
+                "{key} is in SETTINGS_ONLY but also a real root result"
+            );
+            assert!(
+                key.contains(':'),
+                "{key} must carry a section prefix so the split still routes it"
+            );
+        }
+    }
+
+    /// A settings-only row still has to round-trip: the pane writes it and
+    /// reads it back, even though no command ever emits it.
+    #[test]
+    fn a_settings_only_row_round_trips_for_its_own_pane() {
+        let mut settings = Settings::default();
+        let key = builtin_keys::SWITCH_WINDOWS;
+        settings
+            .navigation
+            .command_items
+            .insert(key.into(), config("sw"));
+
+        assert_eq!(
+            settings
+                .result_item(key, "Switch Windows")
+                .and_then(|c| c.alias.clone()),
+            Some("sw".to_string())
+        );
+        assert!(settings.set_result_item_flags(key, "Switch Windows", Some(true), None));
+        assert_eq!(
+            settings.navigation.command_items.get(key).map(|c| c.hidden),
+            Some(true)
+        );
     }
 }

@@ -10572,7 +10572,7 @@ pub fn collect_hotkey_bindings(
         for (item_name, cfg) in &settings.clipboard.command_items {
             if let Some(ref hk) = cfg.hotkey {
                 if !hk.is_empty() {
-                    if item_name == "Clipboard History" {
+                    if item_name == corvo_config::builtin_keys::CLIPBOARD_HISTORY {
                         bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
                     } else {
                         bindings.push((
@@ -10589,7 +10589,7 @@ pub fn collect_hotkey_bindings(
     for (item_name, cfg) in &settings.emojis.command_items {
         if let Some(ref hk) = cfg.hotkey {
             if !hk.is_empty() {
-                if item_name == "Search Emoji & Symbols" {
+                if item_name == corvo_config::builtin_keys::EMOJI_PICKER {
                     bindings.push((hk.clone(), corvo_platform::HotkeyIntent::EmojiPicker));
                 } else {
                     bindings.push((
@@ -11227,6 +11227,18 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
         "clipboard-history" | "Clipboard History" => {
             open_launcher_with_page(LauncherPage::Clipboard, cx);
         }
+        // Hotkey routing passes the Settings map key straight into this
+        // function, so every stable key a pane can register needs a case
+        // here or its hotkey does nothing.
+        key if key == corvo_config::builtin_keys::CLIPBOARD_HISTORY => {
+            open_launcher_with_page(LauncherPage::Clipboard, cx);
+        }
+        key if key == corvo_config::builtin_keys::FILE_SEARCH => {
+            open_launcher_with_page(LauncherPage::Files, cx);
+        }
+        key if key == corvo_config::builtin_keys::EMOJI_PICKER => {
+            open_launcher_with_page(LauncherPage::Emoji, cx);
+        }
         // Extension page entries configured from Settings, Commands.
         // The ids match the result ids the commands emit at root.
         "brew:open-page" => {
@@ -11261,6 +11273,23 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
         }
         "Search Files" | "search-files" => {
             open_launcher_with_page(LauncherPage::Files, cx);
+        }
+        // The remaining settings-only built-ins. No command emits them as a
+        // search result, so a hotkey is the only way to reach them.
+        key if key == corvo_config::builtin_keys::SEARCH_SNIPPETS => {
+            open_launcher_with_query("snippet:", cx);
+        }
+        key if key == corvo_config::builtin_keys::CREATE_SNIPPET => {
+            open_settings_tab(SettingsTab::Snippets, cx);
+        }
+        key if key == corvo_config::builtin_keys::CLEAR_CLIPBOARD_HISTORY => {
+            open_launcher_with_page(LauncherPage::Clipboard, cx);
+        }
+        key if key == corvo_config::builtin_keys::SWITCH_WINDOWS => {
+            open_launcher_with_query("switch ", cx);
+        }
+        key if key == corvo_config::builtin_keys::SEARCH_MENU_BAR => {
+            open_launcher_with_query("menu ", cx);
         }
         "define-word" | "Define Word" => {
             open_launcher_with_query("define ", cx);
