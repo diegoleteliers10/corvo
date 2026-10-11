@@ -2622,6 +2622,21 @@ impl Launcher {
 
         // Stage 3: Contextual List Actions
         if self.page == LauncherPage::Clipboard {
+            // Primary+1..9: paste that history entry directly
+            if mods.is_command_alone() {
+                if let Some(entry_index) = digit_key_index(key) {
+                    if let Some(result) = self
+                        .results
+                        .get(entry_index)
+                        .filter(|result| result.id.starts_with("clipboard-manager:entry:"))
+                        .cloned()
+                    {
+                        self.paste_clipboard_result(&result, window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+            }
             // Primary+Backspace / Primary+Delete: Delete selected clipboard entry
             if mods.is_command_alone() && (key == "backspace" || key == "delete") {
                 if let Some(res) = self.selected_result() {
@@ -6377,9 +6392,20 @@ impl Launcher {
     }
 
     fn execute_selected_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(result) = self.selected_result() else {
+        let Some(result) = self.selected_result().cloned() else {
             return;
         };
+        self.paste_clipboard_result(&result, window, cx);
+    }
+
+    /// Pastes one clipboard history entry, shared by Enter on the
+    /// selection and the Primary+1..9 quick-paste shortcuts.
+    fn paste_clipboard_result(
+        &mut self,
+        result: &SearchResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(id) = result.id.strip_prefix("clipboard-manager:entry:") else {
             return;
         };
@@ -8241,6 +8267,27 @@ impl Launcher {
                     .text_overflow(TextOverflow::Truncate(SharedString::new_static("...")))
                     .child(result.title.clone()),
             )
+            .when(index < 9, |row| {
+                row.child(
+                    div()
+                        .ml_auto()
+                        .mr(px(2.0))
+                        .flex_none()
+                        .min_w(px(18.0))
+                        .h(px(18.0))
+                        .px_1()
+                        .rounded_xs()
+                        .bg(rgba(0xffffff14))
+                        .border_1()
+                        .border_color(rgba(0xffffff24))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(SharedString::from(format!("⌘{}", index + 1))),
+                )
+            })
     }
 
     fn clipboard_preview_pane(&self, _cx: &mut Context<Self>) -> Stateful<Div> {
@@ -9753,6 +9800,15 @@ fn search_icon() -> Div {
 }
 
 /// One keycap badge with subtle border, as in the Raycast footer.
+/// Maps a digit keystroke name ("1"..="9") to a zero-based index.
+fn digit_key_index(key: &str) -> Option<usize> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(d @ '1'..='9'), None) => Some(d as usize - '1' as usize),
+        _ => None,
+    }
+}
+
 fn action_keycap(key: &str) -> Div {
     if key == "↵" {
         div()
