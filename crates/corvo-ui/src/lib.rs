@@ -8292,7 +8292,7 @@ impl Launcher {
             )
             .child(
                 div()
-                    .w(px(192.0))
+                    .w(px(168.0))
                     .h_full()
                     .flex()
                     .items_center()
@@ -11226,6 +11226,29 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
         }
         "clipboard-history" | "Clipboard History" => {
             open_launcher_with_page(LauncherPage::Clipboard, cx);
+        }
+        // Extension page entries configured from Settings, Commands.
+        // The ids match the result ids the commands emit at root.
+        "brew:open-page" => {
+            open_launcher_with_page(LauncherPage::Brew, cx);
+        }
+        "countdown:open" => {
+            open_launcher_with_page(LauncherPage::Extension("countdown"), cx);
+        }
+        "media:open" | "media:status" => {
+            open_launcher_with_page(LauncherPage::Extension("media-control"), cx);
+        }
+        "notes:open" => {
+            open_launcher_with_page(LauncherPage::Notes, cx);
+        }
+        "pomodoro:status" => {
+            open_launcher_with_page(LauncherPage::Extension("pomodoro"), cx);
+        }
+        "text-utilities:open-page" => {
+            open_launcher_with_page(LauncherPage::Text, cx);
+        }
+        "weather:current" => {
+            open_launcher_with_page(LauncherPage::Extension("weather"), cx);
         }
         "emojis" | "Search Emoji & Symbols" => {
             open_launcher_with_page(LauncherPage::Emoji, cx);

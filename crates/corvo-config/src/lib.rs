@@ -353,7 +353,31 @@ impl Settings {
 
     pub fn result_item(&self, result_id: &str, title: &str) -> Option<&AppConfig> {
         let (items, key) = self.result_items_and_key(result_id)?;
-        items.get(key).or_else(|| items.get(title))
+        let key = Self::resolve_item_key(items, key, result_id, title)?;
+        items.get(key)
+    }
+
+    /// The key one result's config is stored under, or `None` when the map
+    /// holds no entry for it yet.
+    ///
+    /// Three keys can name the same result. A plain id (`open-camera`)
+    /// resolves to itself. An id carrying a section prefix
+    /// (`snippets:9f2c...`) resolves to the suffix, because that suffix is
+    /// the command's own row key. Extension commands such as
+    /// `brew:open-page` name no known section, so their split suffix is
+    /// meaningless and only the full id resolves.
+    ///
+    /// Callers must try the same order when they write, otherwise a launcher
+    /// toggle creates a second entry the Settings pane never reads.
+    fn resolve_item_key<'a>(
+        items: &'a std::collections::HashMap<String, AppConfig>,
+        key: &'a str,
+        result_id: &'a str,
+        title: &'a str,
+    ) -> Option<&'a str> {
+        [key, result_id, title]
+            .into_iter()
+            .find(|candidate| items.contains_key(*candidate))
     }
 
     pub fn result_is_favorite(&self, result_id: &str) -> bool {
@@ -382,13 +406,10 @@ impl Settings {
         let Some((items, key)) = self.result_items_and_key_mut(result_id) else {
             return false;
         };
-        let key = if items.contains_key(key) {
-            key.to_string()
-        } else if items.contains_key(title) {
-            title.to_string()
-        } else {
-            key.to_string()
-        };
+        // Reuse the entry Settings already wrote. Creating a second entry
+        // under the split suffix leaves the Settings pane on a stale value.
+        let key = Self::resolve_item_key(items, key, result_id, title)
+            .map_or_else(|| key.to_string(), str::to_string);
         let item = items.entry(key).or_default();
         item.hidden = hidden.unwrap_or(item.hidden);
         true
@@ -1316,5 +1337,110 @@ fn file_search_options(settings: &FileSearchSettings) -> FileSearchOptions {
         enabled: settings.enabled,
         search_scopes: settings.search_scopes.clone(),
         ignore_patterns: settings.ignore_patterns.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(alias: &str) -> AppConfig {
+        AppConfig {
+            alias: Some(alias.to_string()),
+            hotkey: None,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn an_extension_command_resolves_under_its_full_id() {
+        let mut settings = Settings::default();
+        settings
+            .commands
+            .items
+            .insert("brew:open-page".into(), config("beer"));
+
+        // The section split yields the suffix "open-page", which no one
+        // writes. Only the full id resolves.
+        assert_eq!(
+            settings
+                .result_item("brew:open-page", "Homebrew")
+                .and_then(|c| c.alias.clone()),
+            Some("beer".to_string())
+        );
+    }
+
+    #[test]
+    fn hiding_an_extension_command_updates_the_settings_entry() {
+        let mut settings = Settings::default();
+        settings
+            .commands
+            .items
+            .insert("brew:open-page".into(), config("beer"));
+
+        assert!(settings.set_result_item_flags("brew:open-page", "Homebrew", Some(true), None));
+
+        // One entry, keyed the way Settings wrote it.
+        assert_eq!(settings.commands.items.len(), 1);
+        assert!(settings.commands.items["brew:open-page"].hidden);
+    }
+
+    #[test]
+    fn a_window_action_resolves_under_its_bare_suffix() {
+        let mut settings = Settings::default();
+        settings
+            .window_management
+            .command_items
+            .insert("left-half".into(), config("lh"));
+
+        // The pane keys window actions by the bare action id, while the
+        // emitted result id carries the section prefix.
+        assert_eq!(
+            settings
+                .result_item("window-management:left-half", "Left Half")
+                .and_then(|c| c.alias.clone()),
+            Some("lh".to_string())
+        );
+    }
+
+    #[test]
+    fn hiding_an_unknown_result_is_a_no_op() {
+        let mut settings = Settings::default();
+        assert!(!settings.set_result_item_flags("about-corvo", "About Corvo", Some(true), None));
+        assert!(settings.commands.items.is_empty());
+    }
+
+    #[test]
+    fn a_snippet_resolves_under_its_hash_key() {
+        let mut settings = Settings::default();
+        settings
+            .snippets
+            .command_items
+            .insert("9f2c1a0b3d4e5f60".into(), config("notes"));
+
+        assert_eq!(
+            settings
+                .result_item("snippets:9f2c1a0b3d4e5f60", "Meeting Notes")
+                .and_then(|c| c.alias.clone()),
+            Some("notes".to_string())
+        );
+    }
+
+    #[test]
+    fn a_snippet_titled_row_resolves_by_name() {
+        let mut settings = Settings::default();
+        settings
+            .snippets
+            .command_items
+            .insert("Meeting Notes".into(), config("notes"));
+
+        // The settings pane keys snippet rows by name, so the title
+        // fallback has to keep working.
+        assert_eq!(
+            settings
+                .result_item("snippets:9f2c1a0b3d4e5f60", "Meeting Notes")
+                .and_then(|c| c.alias.clone()),
+            Some("notes".to_string())
+        );
     }
 }
