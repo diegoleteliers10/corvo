@@ -1,5 +1,6 @@
 //! Pure unified calculation and conversion engine (parse-or-fall, try-don't-guess).
 
+use crate::currency::{self, Rates};
 use crate::scalar::{evaluate_scalar, format_value};
 use crate::units::{convert_units, default_conversion, find_temperature, find_unit, UNITS};
 
@@ -58,8 +59,17 @@ impl CalcOutcome {
 }
 
 /// Evaluates a query according to the strict parse-or-fall pipeline.
-/// Returns `None` if the query does not completely parse as math or conversion.
+/// Returns `None` if the query does not completely parse as math or
+/// conversion. Currency queries use the cached rates from
+/// [`crate::currency`].
 pub fn evaluate(raw_query: &str) -> Option<CalcOutcome> {
+    let rates = currency::active_rates();
+    evaluate_with(raw_query, rates.as_ref())
+}
+
+/// Evaluates with an explicit rates table, so tests convert without
+/// the network. Missing rates behave like "not loaded yet".
+pub fn evaluate_with(raw_query: &str, rates: Option<&Rates>) -> Option<CalcOutcome> {
     let q = raw_query.trim();
 
     // 1. Cheap prefilters
@@ -92,7 +102,7 @@ pub fn evaluate(raw_query: &str) -> Option<CalcOutcome> {
     }
 
     // 3. Explicit conversion (10 kg to lb, 32 f in c)
-    if let Some(outcome) = try_explicit_conversion(&normalized) {
+    if let Some(outcome) = try_explicit_conversion(&normalized, rates) {
         return Some(outcome);
     }
 
@@ -117,7 +127,7 @@ pub fn evaluate(raw_query: &str) -> Option<CalcOutcome> {
     }
 
     // 6. Single quantity autoconversion (1m -> 3.28 ft)
-    if let Some(outcome) = try_single_quantity_autoconvert(&normalized) {
+    if let Some(outcome) = try_single_quantity_autoconvert(&normalized, rates) {
         return Some(outcome);
     }
 
@@ -227,7 +237,7 @@ fn try_radix_conversion(s: &str) -> Option<CalcOutcome> {
     None
 }
 
-fn try_explicit_conversion(expr: &str) -> Option<CalcOutcome> {
+fn try_explicit_conversion(expr: &str, rates: Option<&Rates>) -> Option<CalcOutcome> {
     let lowered = expr.to_lowercase();
     for separator in [" to ", " in ", "->", "→", "=>"] {
         let Some(at) = lowered.find(separator) else { continue };
@@ -273,6 +283,20 @@ fn try_explicit_conversion(expr: &str) -> Option<CalcOutcome> {
                 });
             }
             Err(Err(())) => {
+                // Both sides fiat currency: convert through the USD
+                // pivot, or say the rates are missing.
+                if currency::is_currency(&from_unit) && currency::is_currency(target) {
+                    let r = rates.filter(|r| r.has(&from_unit) && r.has(target))?;
+                    let result_val = currency::convert(val, &from_unit, target, r)?;
+                    let fmt = format_value(result_val);
+                    let display = format!("{fmt} {}", target.to_uppercase());
+                    return Some(CalcOutcome::Conversion {
+                        expression: expr.to_string(),
+                        display_result: display,
+                        raw_value: fmt,
+                        category: "Currency conversion",
+                    });
+                }
                 // If units don't exist, continue checking
                 continue;
             }
@@ -417,18 +441,38 @@ fn find_binary_operator_outside_parens(s: &str, op: char) -> Option<usize> {
     None
 }
 
-fn try_single_quantity_autoconvert(s: &str) -> Option<CalcOutcome> {
+fn try_single_quantity_autoconvert(s: &str, rates: Option<&Rates>) -> Option<CalcOutcome> {
     let (num_part, unit_part) = extract_number_and_unit(s)?;
     let val = evaluate_scalar(num_part).ok()?;
-    let (converted_val, sym) = default_conversion(val, unit_part)?;
-    let fmt = format_value(converted_val);
-    let display = format!("{fmt} {sym}");
-    Some(CalcOutcome::Conversion {
-        expression: s.to_string(),
-        display_result: display,
-        raw_value: fmt,
-        category: "Unit conversion",
-    })
+    if let Some((converted_val, sym)) = default_conversion(val, unit_part) {
+        let fmt = format_value(converted_val);
+        let display = format!("{fmt} {sym}");
+        return Some(CalcOutcome::Conversion {
+            expression: s.to_string(),
+            display_result: display,
+            raw_value: fmt,
+            category: "Unit conversion",
+        });
+    }
+    // Currency autoconversion: `900 clp` shows its USD value. Stays
+    // silent while rates load: a bare amount is ambiguous enough to
+    // fall through to normal search.
+    if let Some(target) = currency::default_target(unit_part) {
+        if let Some(converted_val) = rates
+            .filter(|r| r.has(unit_part) && r.has(target))
+            .and_then(|r| currency::convert(val, unit_part, target, r))
+        {
+            let fmt = format_value(converted_val);
+            let display = format!("{fmt} {}", target.to_uppercase());
+            return Some(CalcOutcome::Conversion {
+                expression: s.to_string(),
+                display_result: display,
+                raw_value: fmt,
+                category: "Currency conversion",
+            });
+        }
+    }
+    None
 }
 
 fn try_partial_hanging_operator(s: &str) -> Option<CalcOutcome> {
@@ -556,5 +600,58 @@ mod tests {
         // 14. Explicit '=' forces calculation even for bare numbers
         let res = evaluate("=42").unwrap();
         assert_eq!(res.display_result(), "42");
+    }
+
+    fn test_rates() -> currency::Rates {
+        let mut rates = std::collections::HashMap::new();
+        rates.insert("usd".to_string(), 1.0);
+        rates.insert("eur".to_string(), 0.9);
+        rates.insert("clp".to_string(), 900.0);
+        currency::Rates(rates)
+    }
+
+    #[test]
+    fn converts_currency_explicitly() {
+        let rates = test_rates();
+        let res = evaluate_with("10 usd to eur", Some(&rates)).unwrap();
+        assert_eq!(res.display_result(), "9 EUR");
+        assert_eq!(res.category(), "Currency conversion");
+
+        let res = evaluate_with("900 clp in usd", Some(&rates)).unwrap();
+        assert_eq!(res.display_result(), "1 USD");
+
+        let res = evaluate_with("10 EUR -> USD", Some(&rates)).unwrap();
+        assert!(res.display_result().starts_with("11.11"));
+    }
+
+    #[test]
+    fn currency_autoconvert_shows_default_target() {
+        let rates = test_rates();
+        let res = evaluate_with("900 clp", Some(&rates)).unwrap();
+        assert_eq!(res.display_result(), "1 USD");
+        assert_eq!(res.category(), "Currency conversion");
+
+        let res = evaluate_with("10 usd", Some(&rates)).unwrap();
+        assert_eq!(res.display_result(), "9 EUR");
+    }
+
+    #[test]
+    fn currency_stays_silent_without_rates() {
+        assert_eq!(evaluate_with("10 usd to eur", None), None);
+        assert_eq!(evaluate_with("900 clp", None), None);
+    }
+
+    #[test]
+    fn unknown_currency_falls_through() {
+        let rates = test_rates();
+        assert_eq!(evaluate_with("10 xyz to eur", Some(&rates)), None);
+    }
+
+    #[test]
+    fn currency_does_not_collide_with_units() {
+        let rates = test_rates();
+        let res = evaluate_with("10 kg to lb", Some(&rates)).unwrap();
+        assert_eq!(res.category(), "Unit conversion");
+        assert_eq!(evaluate_with("today", Some(&rates)), None);
     }
 }

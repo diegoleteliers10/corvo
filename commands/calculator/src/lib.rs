@@ -1,13 +1,20 @@
 //! Inline arithmetic and unit conversion with pure parse-or-fall semantics.
 //! Answers any query that parses completely as math or conversion, like `2+2` or `10 kg to lb`.
 
+pub mod currency;
 pub mod engine;
 pub mod scalar;
 pub mod units;
 
-pub use engine::{evaluate, CalcOutcome};
+pub use engine::{evaluate, evaluate_with, CalcOutcome};
 pub use scalar::{evaluate_scalar, ScalarError};
 pub use units::{convert_units, Dim, UNITS};
+
+/// Starts the background exchange-rates fetch, so the first currency
+/// query usually finds warm rates.
+pub fn warmup() {
+    currency::ensure_warm();
+}
 
 use corvo_core::{
     phosphor_svgs, Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext,
@@ -34,6 +41,7 @@ impl Command for CalculatorCommand {
     }
 
     async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {
+        currency::ensure_warm();
         let Some(outcome) = evaluate(query) else {
             return Vec::new();
         };

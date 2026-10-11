@@ -33,6 +33,7 @@ fn main() {
     corvo_platform::cleanup_old_installations();
     corvo_app_launcher::warmup();
     corvo_emoji_picker::warmup();
+    corvo_calculator::warmup();
     let config = corvo_config::ConfigService::load();
     let launch_at_login = config.settings().launch_at_login;
     std::thread::spawn(move || {

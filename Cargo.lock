@@ -1201,6 +1201,9 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "serde_json",
+ "smol",
+ "ureq",
 ]
 
 [[package]]
