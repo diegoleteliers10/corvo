@@ -109,6 +109,36 @@ fn command_menu_exact_word_match(query: &str, result: &SearchResult) -> bool {
             .all(|query_word| result_words.iter().any(|word| word == query_word))
 }
 
+/// Adds rows whose configured alias exactly matches the query but
+/// whose own command search could not match the alias text. Ranking in
+/// [`apply_result_preferences`] then lifts exact alias matches to the
+/// top. Rows already present keep their normal-search position.
+fn rescue_alias_matches(
+    results: &mut Vec<SearchResult>,
+    settings: &corvo_config::Settings,
+    query: &str,
+) {
+    let q_folded = corvo_core::search::fold(query.trim());
+    if q_folded.is_empty() {
+        return;
+    }
+    for result in cached_initial_results() {
+        let Some(alias) = settings
+            .result_item(&result.id, &result.title)
+            .and_then(|item| item.alias.as_deref())
+        else {
+            continue;
+        };
+        if corvo_core::search::fold(alias) != q_folded {
+            continue;
+        }
+        if results.iter().any(|existing| existing.id == result.id) {
+            continue;
+        }
+        results.push(result);
+    }
+}
+
 fn apply_result_preferences(
     results: &mut Vec<SearchResult>,
     settings: &corvo_config::Settings,
@@ -3943,6 +3973,12 @@ impl Launcher {
                         .as_ref()
                         .is_some_and(|store| store.show_command_in_launcher(command_id))
                 });
+            }
+            // An exact alias match must surface even when the alias
+            // text cannot fuzzy-match its own row: pull those rows in
+            // from the cached empty-query list before ranking.
+            if !query.is_empty() && scoped_command_id.is_none() {
+                rescue_alias_matches(&mut fast_results, &search_settings, &query);
             }
             apply_result_preferences(&mut fast_results, &search_settings, &query);
             if !query.is_empty() {
@@ -11817,6 +11853,71 @@ mod tests {
         assert!(rendered.contains(corvo_core::Primary::current().keycap_label()));
         assert_eq!(shortcut_text("Application"), "Application");
         assert_eq!(shortcut_text("Folder"), "Folder");
+    }
+
+    #[test]
+    fn alias_rescue_pulls_exact_matches_into_the_results() {
+        let brew_row = SearchResult {
+            id: "brew:installed".into(),
+            title: "Homebrew".into(),
+            subtitle: None,
+            icon: Icon::Link,
+            score: 700,
+            accessory: None,
+            section: None,
+            accessories: Vec::new(),
+        };
+        let other_row = SearchResult {
+            id: "weather:now".into(),
+            title: "Weather".into(),
+            subtitle: None,
+            icon: Icon::Link,
+            score: 700,
+            accessory: None,
+            section: None,
+            accessories: Vec::new(),
+        };
+        let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
+        if let Ok(mut lock) = cell.write() {
+            *lock = vec![brew_row.clone(), other_row.clone()];
+        }
+
+        let mut settings = corvo_config::Settings::default();
+        settings.commands.items.insert(
+            "Homebrew".into(),
+            corvo_config::AppConfig {
+                alias: Some("bb".into()),
+                ..Default::default()
+            },
+        );
+
+        // Exact alias match: the row joins even though "bb" cannot
+        // fuzzy-match "Homebrew".
+        let mut results = Vec::new();
+        rescue_alias_matches(&mut results, &settings, "bb");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "brew:installed");
+
+        // A row already found by normal search is not duplicated.
+        let mut results = vec![brew_row.clone()];
+        rescue_alias_matches(&mut results, &settings, "bb");
+        assert_eq!(results.len(), 1);
+
+        // A different query rescues nothing.
+        let mut results = Vec::new();
+        rescue_alias_matches(&mut results, &settings, "brew");
+        assert!(results.is_empty());
+
+        // Ranking lifts the rescued exact alias to the top.
+        let mut results = vec![SearchResult {
+            id: "apps:safari".into(),
+            title: "Safari".into(),
+            score: 900,
+            ..other_row.clone()
+        }];
+        rescue_alias_matches(&mut results, &settings, "bb");
+        apply_result_preferences(&mut results, &settings, "bb");
+        assert_eq!(results.first().map(|r| r.id.as_str()), Some("brew:installed"));
     }
 }
 
