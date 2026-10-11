@@ -415,11 +415,30 @@ impl Settings {
         true
     }
 
+    /// The map a result's config lives in, plus the key that split yields.
+    /// Both the read and the write path must name the same map: a section
+    /// missing here silently falls through to `commands`, which makes the
+    /// entry its own Settings pane writes unreachable.
     fn result_items_and_key<'a>(
         &self,
         result_id: &'a str,
     ) -> Option<(&std::collections::HashMap<String, AppConfig>, &'a str)> {
-        let (items, key) = self.result_items_and_key_for_id(result_id)?;
+        let (section, key) = result_section_and_key(result_id)?;
+        let items = match section {
+            "app-launcher" => &self.applications.app_configs,
+            "system-actions" if result_id.starts_with("system-actions:setting:") => {
+                &self.system_settings.items
+            }
+            "system-actions" => &self.system_actions.items,
+            "quicklinks" => &self.quicklinks.command_items,
+            "clipboard-manager" => &self.clipboard.command_items,
+            "snippets" => &self.snippets.command_items,
+            "file-search" => &self.file_search.command_items,
+            "window-management" => &self.window_management.command_items,
+            "navigation" => &self.navigation.command_items,
+            "emoji-picker" => &self.emojis.command_items,
+            _ => &self.commands.items,
+        };
         Some((items, key))
     }
 
@@ -439,30 +458,9 @@ impl Settings {
             "snippets" => &mut self.snippets.command_items,
             "file-search" => &mut self.file_search.command_items,
             "window-management" => &mut self.window_management.command_items,
+            "navigation" => &mut self.navigation.command_items,
             "emoji-picker" => &mut self.emojis.command_items,
             _ => &mut self.commands.items,
-        };
-        Some((items, key))
-    }
-
-    fn result_items_and_key_for_id<'a>(
-        &self,
-        result_id: &'a str,
-    ) -> Option<(&std::collections::HashMap<String, AppConfig>, &'a str)> {
-        let (section, key) = result_section_and_key(result_id)?;
-        let items = match section {
-            "app-launcher" => &self.applications.app_configs,
-            "system-actions" if result_id.starts_with("system-actions:setting:") => {
-                &self.system_settings.items
-            }
-            "system-actions" => &self.system_actions.items,
-            "quicklinks" => &self.quicklinks.command_items,
-            "clipboard-manager" => &self.clipboard.command_items,
-            "snippets" => &self.snippets.command_items,
-            "file-search" => &self.file_search.command_items,
-            "window-management" => &self.window_management.command_items,
-            "emoji-picker" => &self.emojis.command_items,
-            _ => &self.commands.items,
         };
         Some((items, key))
     }
@@ -1442,5 +1440,90 @@ mod tests {
                 .and_then(|c| c.alias.clone()),
             Some("notes".to_string())
         );
+    }
+
+    /// One case per Settings pane that offers an alias control. The id and
+    /// title are the ones the command really emits at the root, and the key
+    /// is the one that pane writes. A case that stops resolving means the
+    /// alias, hotkey, or visibility toggle went inert for that section.
+    #[test]
+    fn every_alias_pane_round_trips_through_its_own_key() {
+        // (key the pane writes, emitted id, emitted title). Naming the
+        // section a second time here would let this table drift from the
+        // match in result_items_and_key, which is how navigation went
+        // missing in the first place.
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "/Applications/Safari.app",
+                "app-launcher:/Applications/Safari.app",
+                "Safari",
+            ),
+            (
+                "com.apple.preferences",
+                "system-actions:setting:com.apple.preferences",
+                "System Settings",
+            ),
+            (
+                "lock-screen",
+                "system-actions:action:lock-screen",
+                "Lock Screen",
+            ),
+            ("brew:open-page", "brew:open-page", "Homebrew"),
+            ("GitHub", "quicklinks:a1b2c3d4e5f60718", "GitHub"),
+            (
+                "Clipboard History",
+                "clipboard-manager:open",
+                "Clipboard History",
+            ),
+            (
+                "Search Snippets",
+                "snippets:9f2c1a0b3d4e5f60",
+                "Search Snippets",
+            ),
+            ("Search Files", "file-search:open", "Search Files"),
+            ("left-half", "window-management:left-half", "Left Half"),
+            (
+                "Switch Windows",
+                "navigation:switch-windows",
+                "Switch Windows",
+            ),
+            (
+                "Search Emoji & Symbols",
+                "emoji-picker:open",
+                "Search Emoji & Symbols",
+            ),
+        ];
+
+        for (key, id, title) in cases {
+            let mut settings = Settings::default();
+            // Write the entry through the same path the pane uses.
+            let map = settings
+                .result_items_and_key_mut(id)
+                .expect("every case must name a section the match knows")
+                .0;
+            map.insert((*key).to_string(), config(key));
+
+            let resolved = settings
+                .result_item(id, title)
+                .and_then(|c| c.alias.clone());
+            assert_eq!(
+                resolved.as_deref(),
+                Some(*key),
+                "id {id:?} no longer resolves: key {key:?}, title {title:?}"
+            );
+
+            // The write path has to land on that same entry. A launcher
+            // hide toggle that creates a second entry leaves this pane
+            // showing the value it had before.
+            assert!(
+                settings.set_result_item_flags(id, title, Some(true), None),
+                "id {id:?} rejected a hide toggle"
+            );
+            assert_eq!(
+                settings.result_item(id, title).map(|c| c.hidden),
+                Some(true),
+                "id {id:?} hide toggle did not round-trip"
+            );
+        }
     }
 }
