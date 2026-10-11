@@ -107,6 +107,44 @@ pub fn get_builtin_commands() -> &'static [BuiltinCommandDef] {
             title: "About Corvo",
             icon: phosphor_svgs::style::regular::INFO,
         },
+        // Extension page entries: ids match the result ids the commands
+        // emit at root, so their aliases and hotkeys resolve through the
+        // same command_items lookup the launcher uses.
+        BuiltinCommandDef {
+            id: "brew:open-page",
+            title: "Homebrew",
+            icon: phosphor_svgs::style::regular::DOWNLOAD_SIMPLE,
+        },
+        BuiltinCommandDef {
+            id: "countdown:open",
+            title: "Countdown",
+            icon: phosphor_svgs::style::regular::CLOCK,
+        },
+        BuiltinCommandDef {
+            id: "media:open",
+            title: "Media Control",
+            icon: phosphor_svgs::style::regular::MUSIC_NOTES,
+        },
+        BuiltinCommandDef {
+            id: "notes:open",
+            title: "Notes",
+            icon: phosphor_svgs::style::regular::NOTEBOOK,
+        },
+        BuiltinCommandDef {
+            id: "pomodoro:status",
+            title: "Pomodoro",
+            icon: phosphor_svgs::style::regular::TIMER,
+        },
+        BuiltinCommandDef {
+            id: "text-utilities:open-page",
+            title: "Text Utilities",
+            icon: phosphor_svgs::style::regular::TEXT_AA,
+        },
+        BuiltinCommandDef {
+            id: "weather:current",
+            title: "Weather",
+            icon: phosphor_svgs::style::regular::CLOUD_SUN,
+        },
         BuiltinCommandDef {
             id: "calculator-history",
             title: "Calculator History",
@@ -229,6 +267,11 @@ pub struct SettingsView {
     adding_nav_disabled_app: bool,
     new_nav_disabled_app_text: String,
     adding_snippet: bool,
+    editing_snippet_index: Option<usize>,
+    snippet_name_input: String,
+    snippet_keyword_input: String,
+    snippet_body_input: String,
+    snippet_active_field: usize,
     editing_alias_item: Option<(SettingsTab, String)>,
     alias_input_text: String,
     recording_hotkey_item: Option<(SettingsTab, String)>,
@@ -316,6 +359,11 @@ impl SettingsView {
             adding_nav_disabled_app: false,
             new_nav_disabled_app_text: String::new(),
             adding_snippet: false,
+            editing_snippet_index: None,
+            snippet_name_input: String::new(),
+            snippet_keyword_input: String::new(),
+            snippet_body_input: String::new(),
+            snippet_active_field: 0,
             editing_alias_item: None,
             alias_input_text: String::new(),
             recording_hotkey_item: None,
@@ -515,6 +563,11 @@ impl SettingsView {
         self.adding_ignore_pattern = false;
         self.adding_nav_disabled_app = false;
         self.adding_snippet = false;
+        self.editing_snippet_index = None;
+        self.snippet_name_input.clear();
+        self.snippet_keyword_input.clear();
+        self.snippet_body_input.clear();
+        self.snippet_active_field = 0;
         self.adding_quicklink = false;
         self.editing_quicklink_index = None;
         self.confirming_clear_clipboard = false;
@@ -1411,6 +1464,7 @@ impl SettingsView {
             && !self.adding_ignore_pattern
             && !self.adding_nav_disabled_app
             && !self.adding_snippet
+            && self.editing_snippet_index.is_none()
             && !self.adding_quicklink
             && self.editing_quicklink_index.is_none()
         {
@@ -1441,6 +1495,69 @@ impl SettingsView {
                     _ => {}
                 }
             }
+        }
+
+        // Snippet modal input
+        if self.adding_snippet || self.editing_snippet_index.is_some() {
+            let field = self.snippet_active_field;
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.adding_snippet = false;
+                    self.editing_snippet_index = None;
+                    cx.notify();
+                }
+                "tab" => {
+                    self.snippet_active_field = (field + 1) % 3;
+                    cx.notify();
+                }
+                "enter" => {
+                    // Enter adds a line inside the body; it saves from
+                    // the name and keyword fields.
+                    if field == 2 {
+                        self.snippet_body_input.push('\n');
+                        cx.notify();
+                    } else {
+                        self.save_snippet(cx);
+                    }
+                }
+                "backspace" => {
+                    match field {
+                        0 => {
+                            self.snippet_name_input.pop();
+                        }
+                        1 => {
+                            self.snippet_keyword_input.pop();
+                        }
+                        _ => {
+                            self.snippet_body_input.pop();
+                        }
+                    }
+                    cx.notify();
+                }
+                "space" => {
+                    match field {
+                        0 => self.snippet_name_input.push(' '),
+                        1 => self.snippet_keyword_input.push(' '),
+                        _ => self.snippet_body_input.push(' '),
+                    }
+                    cx.notify();
+                }
+                key => {
+                    if !keystroke.modifiers.platform
+                        && !keystroke.modifiers.control
+                        && !keystroke.modifiers.alt
+                        && key.len() == 1
+                    {
+                        match field {
+                            0 => self.snippet_name_input.push_str(key),
+                            1 => self.snippet_keyword_input.push_str(key),
+                            _ => self.snippet_body_input.push_str(key),
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+            return;
         }
 
         // Quicklink modal input
@@ -3861,6 +3978,58 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn save_snippet(&mut self, cx: &mut Context<Self>) {
+        let name = self.snippet_name_input.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let keyword = self.snippet_keyword_input.trim().to_string();
+        let keyword = (!keyword.is_empty()).then_some(keyword);
+        let body = self.snippet_body_input.clone();
+
+        if let Some(idx) = self.editing_snippet_index {
+            // Alias, hotkey, and visibility live in a map keyed by the
+            // snippet name, so a rename has to carry that config over or
+            // the row silently falls back to defaults.
+            let previous_name = self
+                .snippets_file
+                .snippets
+                .get(idx)
+                .map(|entry| entry.name.clone());
+            if let Some(entry) = self.snippets_file.snippets.get_mut(idx) {
+                entry.name = name.clone();
+                entry.keyword = keyword;
+                entry.body = body;
+            }
+            if let Some(previous_name) = previous_name.filter(|old| *old != name) {
+                if let Some(config) = self.settings.snippets.command_items.remove(&previous_name) {
+                    self.settings
+                        .snippets
+                        .command_items
+                        .entry(name)
+                        .or_insert(config);
+                    self.save_settings_file();
+                }
+            }
+        } else if self.adding_snippet {
+            self.snippets_file
+                .snippets
+                .push(corvo_config::SnippetEntry {
+                    name,
+                    keyword,
+                    body,
+                });
+        }
+        self.save_snippets_file();
+        self.adding_snippet = false;
+        self.editing_snippet_index = None;
+        self.snippet_name_input.clear();
+        self.snippet_keyword_input.clear();
+        self.snippet_body_input.clear();
+        self.snippet_active_field = 0;
+        cx.notify();
+    }
+
     fn render_commands_pane(&self, cx: &mut Context<Self>) -> Div {
         let commands = get_builtin_commands();
         let query_lower = self.commands_search_query.to_lowercase();
@@ -5001,7 +5170,7 @@ impl SettingsView {
     }
 
     fn render_snippets_pane(&self, cx: &mut Context<Self>) -> Div {
-        div()
+        let mut pane = div()
             .flex()
             .flex_col()
             .gap_6()
@@ -5124,6 +5293,7 @@ impl SettingsView {
                                         )
                                     }),
                             )
+                            .children(self.render_snippet_library_rows(cx))
                             .child(div().h(px(1.0)).bg(rgb(COLOR_BORDER_SUBTLE)))
                             .child(
                                 div()
@@ -5156,14 +5326,12 @@ impl SettingsView {
                                             .text_color(rgb(COLOR_TEXT))
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, _window, cx| {
-                                                    this.snippets_file.snippets.push(
-                                                        corvo_config::SnippetEntry {
-                                                            name: "New Snippet".into(),
-                                                            keyword: None,
-                                                            body: "".into(),
-                                                        },
-                                                    );
-                                                    this.save_snippets_file();
+                                                    this.adding_snippet = true;
+                                                    this.editing_snippet_index = None;
+                                                    this.snippet_name_input.clear();
+                                                    this.snippet_keyword_input.clear();
+                                                    this.snippet_body_input.clear();
+                                                    this.snippet_active_field = 0;
                                                     cx.notify();
                                                 },
                                             ))
@@ -5226,6 +5394,624 @@ impl SettingsView {
                                                 },
                                             ))
                                             .child("Open Folder"),
+                                    ),
+                            ),
+                    ),
+            );
+
+        if self.adding_snippet || self.editing_snippet_index.is_some() {
+            pane = pane.child(self.render_snippet_modal(cx));
+        }
+        pane
+    }
+
+    /// One row per saved snippet: name, body preview, keyword chip,
+    /// alias, hotkey, edit, delete, and visibility. The alias and
+    /// hotkey live in `settings.snippets.command_items` keyed by the
+    /// snippet name, the same key the launcher uses to resolve a row.
+    fn render_snippet_library_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let snippets = self.snippets_file.snippets.clone();
+        snippets
+            .iter()
+            .enumerate()
+            .map(|(idx, snippet)| {
+                let name = snippet.name.clone();
+                let preview = snippet
+                    .body
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("(empty snippet)")
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                let keyword = snippet.keyword.clone();
+                let config = self
+                    .settings
+                    .snippets
+                    .command_items
+                    .get(&snippet.name)
+                    .cloned()
+                    .unwrap_or_default();
+                let is_hidden = config.hidden;
+                let alias_text = config.alias;
+                let hotkey_text = config.hotkey;
+                let is_editing_alias = self
+                    .editing_alias_item
+                    .as_ref()
+                    .is_some_and(|(t, k)| *t == SettingsTab::Snippets && k == &name);
+                let is_recording_hotkey = self
+                    .recording_hotkey_item
+                    .as_ref()
+                    .is_some_and(|(t, k)| *t == SettingsTab::Snippets && k == &name);
+
+                div()
+                    .id(SharedString::from(format!("snippet-row-{idx}")))
+                    .h(px(46.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(COLOR_BORDER_SUBTLE))
+                    .hover(|s| s.bg(rgb(COLOR_ROW_HOVER)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .child(crate::icons::render_phosphor_svg(
+                                phosphor_svgs::style::regular::CODE,
+                                rgb(COLOR_TEXT_DIM),
+                                16.0,
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if is_hidden {
+                                                rgb(COLOR_TEXT_DIM)
+                                            } else {
+                                                rgb(COLOR_TEXT)
+                                            })
+                                            .child(name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(COLOR_TEXT_DIM))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(preview),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .flex_none()
+                            .when_some(keyword.clone(), |row, keyword| {
+                                row.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(COLOR_CONTROL_BG))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_CONTROL_BORDER))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(COLOR_TEXT_DIM))
+                                        .child(format!("keyword: {keyword}")),
+                                )
+                            })
+                            .child(if is_editing_alias {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(COLOR_CARD_BG))
+                                            .border_1()
+                                            .border_color(rgb(COLOR_ACCENT))
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(COLOR_TEXT))
+                                            .child(if self.alias_input_text.is_empty() {
+                                                "Type alias...".to_string()
+                                            } else {
+                                                self.alias_input_text.clone()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "snippet-done-alias-btn-{idx}"
+                                            )))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(COLOR_ACCENT))
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0x064e3b))
+                                            .on_click(cx.listener({
+                                                let name = name.clone();
+                                                move |this, _: &ClickEvent, _window, cx| {
+                                                    let trimmed = this.alias_input_text.trim();
+                                                    let entry = this
+                                                        .settings
+                                                        .snippets
+                                                        .command_items
+                                                        .entry(name.clone())
+                                                        .or_default();
+                                                    entry.alias = if trimmed.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(trimmed.to_string())
+                                                    };
+                                                    this.save_settings_file();
+                                                    this.editing_alias_item = None;
+                                                    this.alias_input_text.clear();
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child("Done"),
+                                    )
+                                    .into_any_element()
+                            } else if let Some(ref alias) = alias_text {
+                                div()
+                                    .id(SharedString::from(format!("snippet-alias-pill-{idx}")))
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(COLOR_CONTROL_BG))
+                                    .border_1()
+                                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        let alias = alias.clone();
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            this.editing_alias_item =
+                                                Some((SettingsTab::Snippets, name.clone()));
+                                            this.alias_input_text = alias.clone();
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(COLOR_ACCENT))
+                                            .child(format!("alias: {alias}")),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id(SharedString::from(format!("snippet-add-alias-btn-{idx}")))
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(COLOR_CONTROL_BG))
+                                    .border_1()
+                                    .border_color(rgb(COLOR_CONTROL_BORDER))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)).border_color(rgb(0x44474e)))
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            this.editing_alias_item =
+                                                Some((SettingsTab::Snippets, name.clone()));
+                                            this.alias_input_text.clear();
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(COLOR_TEXT_DIM))
+                                            .child("Add Alias"),
+                                    )
+                                    .into_any_element()
+                            })
+                            .child(self.render_hotkey_control(
+                                SettingsTab::Snippets,
+                                &name,
+                                hotkey_text.as_ref(),
+                                is_recording_hotkey,
+                                &format!("snippet-{idx}"),
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("snippet-edit-btn-{idx}")))
+                                    .size(px(26.0))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        let keyword = keyword.clone();
+                                        let body = snippet.body.clone();
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            this.adding_snippet = false;
+                                            this.editing_snippet_index = Some(idx);
+                                            this.snippet_name_input = name.clone();
+                                            this.snippet_keyword_input =
+                                                keyword.clone().unwrap_or_default();
+                                            this.snippet_body_input = body.clone();
+                                            this.snippet_active_field = 0;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(crate::icons::render_phosphor_svg(
+                                        phosphor_svgs::style::regular::PENCIL_SIMPLE,
+                                        rgb(COLOR_TEXT_DIM),
+                                        14.0,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("snippet-delete-btn-{idx}")))
+                                    .size(px(26.0))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|s| s.bg(rgb(0x3a1e20)))
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            if idx < this.snippets_file.snippets.len() {
+                                                this.snippets_file.snippets.remove(idx);
+                                                this.save_snippets_file();
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .child(crate::icons::render_phosphor_svg(
+                                        phosphor_svgs::style::regular::TRASH,
+                                        rgb(0xef4444),
+                                        14.0,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "snippet-toggle-visibility-{idx}"
+                                    )))
+                                    .size(px(16.0))
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(!is_hidden, |b| b.bg(rgb(COLOR_ACCENT)))
+                                    .when(is_hidden, |b| {
+                                        b.bg(rgb(COLOR_CONTROL_BG))
+                                            .border_1()
+                                            .border_color(rgb(COLOR_CONTROL_BORDER))
+                                    })
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            let entry = this
+                                                .settings
+                                                .snippets
+                                                .command_items
+                                                .entry(name.clone())
+                                                .or_default();
+                                            entry.hidden = !entry.hidden;
+                                            this.save_settings_file();
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .when(!is_hidden, |b| {
+                                        b.child(crate::icons::render_phosphor_svg(
+                                            phosphor_svgs::style::regular::CHECK,
+                                            rgb(0x064e3b),
+                                            11.0,
+                                        ))
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// The New/Edit Snippet modal: name, keyword, and a multiline body.
+    /// Tab cycles fields, Enter adds a line inside the body, Enter in
+    /// name or keyword saves, Escape closes without saving.
+    fn render_snippet_modal(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let is_editing = self.editing_snippet_index.is_some();
+        let field_border = |active: bool| {
+            if active {
+                rgb(COLOR_ACCENT)
+            } else {
+                rgb(COLOR_BORDER_SUBTLE)
+            }
+        };
+        let body_lines: Vec<AnyElement> = if self.snippet_body_input.is_empty() {
+            vec![div()
+                .text_size(px(13.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child(
+                    "Template text. {clipboard}, {date}, {time}, and {datetime} expand at paste time.",
+                )
+                .into_any_element()]
+        } else {
+            self.snippet_body_input
+                .split('\n')
+                .map(|line| {
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(COLOR_TEXT))
+                        .child(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        })
+                        .into_any_element()
+                })
+                .collect()
+        };
+        div()
+            .id("snippet-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("snippet-modal-card")
+                    .w(px(440.0))
+                    .rounded_xl()
+                    .bg(rgb(COLOR_CARD_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_BORDER_SUBTLE))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(15.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(COLOR_TEXT))
+                                    .child(if is_editing {
+                                        "Edit Snippet"
+                                    } else {
+                                        "New Snippet"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("close-snippet-modal-btn")
+                                    .size(px(20.0))
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.adding_snippet = false;
+                                        this.editing_snippet_index = None;
+                                        cx.notify();
+                                    }))
+                                    .child(crate::icons::render_phosphor_svg(
+                                        phosphor_svgs::style::regular::X,
+                                        rgb(COLOR_TEXT_DIM),
+                                        12.0,
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child("Name"),
+                            )
+                            .child(
+                                div()
+                                    .id("snippet-modal-name-input")
+                                    .h(px(34.0))
+                                    .px_3()
+                                    .rounded_md()
+                                    .bg(rgb(0x131416))
+                                    .border_1()
+                                    .border_color(field_border(self.snippet_active_field == 0))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.snippet_active_field = 0;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(if self.snippet_name_input.is_empty() {
+                                                rgb(COLOR_TEXT_DIM)
+                                            } else {
+                                                rgb(COLOR_TEXT)
+                                            })
+                                            .child(if self.snippet_name_input.is_empty() {
+                                                "e.g. Meeting Notes".to_string()
+                                            } else {
+                                                self.snippet_name_input.clone()
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child("Keyword (optional)"),
+                            )
+                            .child(
+                                div()
+                                    .id("snippet-modal-keyword-input")
+                                    .h(px(34.0))
+                                    .px_3()
+                                    .rounded_md()
+                                    .bg(rgb(0x131416))
+                                    .border_1()
+                                    .border_color(field_border(self.snippet_active_field == 1))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.snippet_active_field = 1;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(if self.snippet_keyword_input.is_empty() {
+                                                rgb(COLOR_TEXT_DIM)
+                                            } else {
+                                                rgb(COLOR_TEXT)
+                                            })
+                                            .child(if self.snippet_keyword_input.is_empty() {
+                                                "e.g. notes".to_string()
+                                            } else {
+                                                self.snippet_keyword_input.clone()
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child("Body"),
+                            )
+                            .child(
+                                div()
+                                    .id("snippet-modal-body-input")
+                                    .min_h(px(96.0))
+                                    .max_h(px(160.0))
+                                    .overflow_hidden()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(0x131416))
+                                    .border_1()
+                                    .border_color(field_border(self.snippet_active_field == 2))
+                                    .flex()
+                                    .flex_col()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.snippet_active_field = 2;
+                                        cx.notify();
+                                    }))
+                                    .children(body_lines),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(COLOR_TEXT_DIM))
+                                    .child("Tab switches fields. Enter adds a line in the body."),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("snippet-modal-cancel-btn")
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .bg(rgb(COLOR_CONTROL_BG))
+                                            .border_1()
+                                            .border_color(rgb(COLOR_CONTROL_BORDER))
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(rgb(COLOR_CONTROL_HOVER))
+                                                    .border_color(rgb(0x44474e))
+                                            })
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(COLOR_TEXT))
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.adding_snippet = false;
+                                                    this.editing_snippet_index = None;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("snippet-modal-save-btn")
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .bg(rgb(COLOR_ACCENT))
+                                            .cursor_pointer()
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0x064e3b))
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.save_snippet(cx);
+                                                },
+                                            ))
+                                            .child(if is_editing { "Save" } else { "Create" }),
                                     ),
                             ),
                     ),
