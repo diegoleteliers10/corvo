@@ -72,15 +72,20 @@ fn percent_encode(text: &str) -> String {
     out
 }
 
-/// Builds the final URL: replaces `{argument}` with the encoded
-/// argument, or appends the argument when the URL has no placeholder.
-fn build_url(url: &str, argument: &str) -> String {
+/// Builds the final URL: expands dynamic placeholders (`{clipboard}`
+/// percent-encoded, `{date}`, `{time}`, `{datetime}`), replaces
+/// `{argument}` with the encoded argument, or appends the argument when
+/// the URL has no placeholder. Previews pass `clipboard: None` and keep
+/// `{clipboard}` literal; execution passes the real clipboard text.
+fn build_url(url: &str, argument: &str, clipboard: Option<&str>) -> String {
+    let encoded_clipboard = clipboard.map(percent_encode);
+    let url = corvo_ext::placeholders::expand(url, encoded_clipboard.as_deref());
     let argument = argument.trim();
     if url.contains(ARGUMENT_PLACEHOLDER) {
         return url.replace(ARGUMENT_PLACEHOLDER, &percent_encode(argument));
     }
     if argument.is_empty() {
-        return url.to_owned();
+        return url;
     }
     format!("{url}{}", percent_encode(argument))
 }
@@ -121,7 +126,7 @@ impl Command for QuicklinksCommand {
                     return Some(SearchResult {
                         id: format!("quicklinks:{}::{}", quicklink_key(link), argument),
                         title: link.name.clone(),
-                        subtitle: Some(build_url(&link.url, &argument)),
+                        subtitle: Some(build_url(&link.url, &argument, None)),
                         icon: Icon::Link,
                         score: 900,
                         accessory: link.hotkey.clone(),
@@ -176,7 +181,11 @@ impl Command for QuicklinksCommand {
         else {
             return Err(CommandError::NotFound);
         };
-        Ok(Action::OpenUrl(build_url(&link.url, argument)))
+        Ok(Action::OpenUrl(build_url(
+            &link.url,
+            argument,
+            clipboard_argument().as_deref(),
+        )))
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
@@ -189,7 +198,7 @@ impl Command for QuicklinksCommand {
         let Some(link) = cache.iter().find(|link| quicklink_key(link) == index) else {
             return Vec::new();
         };
-        let url = build_url(&link.url, argument);
+        let url = build_url(&link.url, argument, clipboard_argument().as_deref());
 
         vec![
             CommandAction {
@@ -210,6 +219,12 @@ impl Command for QuicklinksCommand {
             },
         ]
     }
+}
+
+/// The current clipboard text for `{clipboard}` placeholders, read
+/// fresh at execution time.
+fn clipboard_argument() -> Option<String> {
+    corvo_platform::read_clipboard_text()
 }
 
 /// The result id is `quicklinks:<16-hex key>` or, when an argument was
@@ -240,7 +255,7 @@ mod tests {
     #[test]
     fn build_url_replaces_the_placeholder() {
         assert_eq!(
-            build_url("https://duckduckgo.com/?q={argument}", "rust lang"),
+            build_url("https://duckduckgo.com/?q={argument}", "rust lang", None),
             "https://duckduckgo.com/?q=rust%20lang"
         );
     }
@@ -248,17 +263,29 @@ mod tests {
     #[test]
     fn build_url_appends_without_placeholder() {
         assert_eq!(
-            build_url("https://example.com/", "a b"),
+            build_url("https://example.com/", "a b", None),
             "https://example.com/a%20b"
         );
-        assert_eq!(build_url("https://example.com", ""), "https://example.com");
+        assert_eq!(build_url("https://example.com", "", None), "https://example.com");
     }
 
     #[test]
     fn build_url_drops_placeholder_when_argument_is_empty() {
         assert_eq!(
-            build_url("https://duckduckgo.com/?q={argument}", ""),
+            build_url("https://duckduckgo.com/?q={argument}", "", None),
             "https://duckduckgo.com/?q="
+        );
+    }
+
+    #[test]
+    fn build_url_expands_clipboard_only_when_supplied() {
+        assert_eq!(
+            build_url("https://translate.example/?q={clipboard}", "", None),
+            "https://translate.example/?q={clipboard}"
+        );
+        assert_eq!(
+            build_url("https://translate.example/?q={clipboard}", "", Some("hola mundo")),
+            "https://translate.example/?q=hola%20mundo"
         );
     }
 

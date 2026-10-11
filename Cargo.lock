@@ -1263,6 +1263,7 @@ dependencies = [
 name = "corvo-ext"
 version = "0.5.1"
 dependencies = [
+ "chrono",
  "corvo-core",
  "directories",
  "serde",
@@ -1356,6 +1357,8 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-ext",
+ "corvo-platform",
 ]
 
 [[package]]
@@ -1364,6 +1367,8 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "corvo-ext",
+ "corvo-platform",
 ]
 
 [[package]]

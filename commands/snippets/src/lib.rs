@@ -83,7 +83,8 @@ impl Command for SnippetsCommand {
         let Some(snippet) = snippets.iter().find(|snippet| snippet_key(snippet) == index) else {
             return Err(CommandError::NotFound);
         };
-        Ok(Action::PasteText(snippet.body.clone()))
+        let body = expand_snippet_body(&snippet.body);
+        Ok(Action::PasteText(body))
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
@@ -96,12 +97,13 @@ impl Command for SnippetsCommand {
         let Some(snippet) = cache.iter().find(|snippet| snippet_key(snippet) == index) else {
             return Vec::new();
         };
+        let body = expand_snippet_body(&snippet.body);
 
         vec![
             CommandAction {
                 id: "snippets-action:paste".into(),
                 label: "Paste to Active App".into(),
-                action: Action::PasteText(snippet.body.clone()),
+                action: Action::PasteText(body.clone()),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
                 group: ActionGroup::Primary,
                 hotkey: Some("enter"),
@@ -109,11 +111,19 @@ impl Command for SnippetsCommand {
             CommandAction {
                 id: "snippets-action:copy".into(),
                 label: "Copy Snippet".into(),
-                action: Action::ShowToast(format!("copy:{}", snippet.body)),
+                action: Action::ShowToast(format!("copy:{body}")),
                 icon: Icon::Svg(corvo_core::phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Standard,
                 hotkey: Some("cmd+enter"),
             },
         ]
     }
+}
+
+/// Expands dynamic placeholders in a snippet body at execution time.
+/// `{clipboard}` reads the current clipboard before the paste path
+/// overwrites it; `{date}`, `{time}`, and `{datetime}` format locally.
+fn expand_snippet_body(body: &str) -> String {
+    let clipboard = corvo_platform::read_clipboard_text();
+    corvo_ext::placeholders::expand(body, clipboard.as_deref())
 }
