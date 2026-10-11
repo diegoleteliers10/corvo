@@ -38,6 +38,10 @@ fn launcher_corner_radius() -> f32 {
 }
 const CONFIDENT_SEARCH_SCORE: i32 = 1800;
 const MAX_WEAK_SEARCH_RESULTS: usize = 8;
+// Score for a row rescued because the query starts its alias. Below a
+// confident command match, above the rows a command returned on a weak
+// match, so a partially typed alias still surfaces its row.
+const ALIAS_PREFIX_SCORE: i32 = 750;
 
 // Raycast-like surfaces, black and gray, with the emerald accent and 90% opacity (10% translucent).
 const COLOR_BACKGROUND: u32 = 0x17181ae6;
@@ -109,10 +113,14 @@ fn command_menu_exact_word_match(query: &str, result: &SearchResult) -> bool {
             .all(|query_word| result_words.iter().any(|word| word == query_word))
 }
 
-/// Adds rows whose configured alias exactly matches the query but
-/// whose own command search could not match the alias text. Ranking in
+/// Adds rows whose configured alias matches the query but whose own
+/// command search could not match the alias text. Ranking in
 /// [`apply_result_preferences`] then lifts exact alias matches to the
 /// top. Rows already present keep their normal-search position.
+///
+/// Only a whole alias or the start of one matches. A scattered match
+/// would make a two-letter alias useless: it would fire on every row
+/// whose name happens to contain those letters in order.
 fn rescue_alias_matches(
     results: &mut Vec<SearchResult>,
     settings: &corvo_config::Settings,
@@ -129,11 +137,20 @@ fn rescue_alias_matches(
         else {
             continue;
         };
-        if corvo_core::search::fold(alias) != q_folded {
+        let alias_folded = corvo_core::search::fold(alias);
+        if !alias_folded.starts_with(&q_folded) {
             continue;
         }
         if results.iter().any(|existing| existing.id == result.id) {
             continue;
+        }
+        let mut result = result;
+        // A rescued row never went through its command's own scoring, so it
+        // carries no quality signal. A partial alias match gets a fixed
+        // score: the ranking stage already tells an exact alias from a
+        // prefix one.
+        if alias_folded != q_folded {
+            result.score = ALIAS_PREFIX_SCORE;
         }
         results.push(result);
     }
@@ -10448,27 +10465,30 @@ struct HotkeyManagerGlobal(std::rc::Rc<std::cell::RefCell<corvo_platform::hotkey
 impl gpui::Global for HotkeyManagerGlobal {}
 
 /// Collects hotkey bindings configured across all settings tabs and files.
+///
+/// A section's "enabled" toggle governs whether its rows appear in search.
+/// It does not govern shortcuts: every pane renders a recorder
+/// unconditionally, so gating collection on the toggle made a recorded
+/// shortcut do nothing until the matching feature was switched on.
 pub fn collect_hotkey_bindings(
     settings: &corvo_config::Settings,
 ) -> Vec<(String, corvo_platform::HotkeyIntent)> {
     let mut bindings = Vec::new();
 
     // 1. Applications
-    if settings.applications.enabled {
-        for (app_key, cfg) in &settings.applications.app_configs {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::LaunchApp(std::path::PathBuf::from(app_key)),
-                    ));
-                }
+    for (app_key, cfg) in &settings.applications.app_configs {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::LaunchApp(std::path::PathBuf::from(app_key)),
+                ));
             }
         }
     }
 
     // 2. Window Management
-    if settings.window_management.enabled {
+    {
         for action in corvo_window_management::WINDOW_ACTIONS {
             let user_cfg = settings.window_management.command_items.get(action.id);
             let is_hidden = user_cfg.is_some_and(|c| c.hidden);
@@ -10528,29 +10548,25 @@ pub fn collect_hotkey_bindings(
     }
 
     // 3. System Actions
-    if settings.system_actions.enabled {
-        for (action_id, cfg) in &settings.system_actions.items {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::RunSystemAction(action_id.clone()),
-                    ));
-                }
+    for (action_id, cfg) in &settings.system_actions.items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::RunSystemAction(action_id.clone()),
+                ));
             }
         }
     }
 
     // 4. System Settings
-    if settings.system_settings.enabled {
-        for (setting_id, cfg) in &settings.system_settings.items {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::OpenSystemSetting(setting_id.clone()),
-                    ));
-                }
+    for (setting_id, cfg) in &settings.system_settings.items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::OpenSystemSetting(setting_id.clone()),
+                ));
             }
         }
     }
@@ -10568,18 +10584,16 @@ pub fn collect_hotkey_bindings(
     }
 
     // 6. Clipboard
-    if settings.clipboard.enabled {
-        for (item_name, cfg) in &settings.clipboard.command_items {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    if item_name == corvo_config::builtin_keys::CLIPBOARD_HISTORY {
-                        bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
-                    } else {
-                        bindings.push((
-                            hk.clone(),
-                            corvo_platform::HotkeyIntent::Command(item_name.clone()),
-                        ));
-                    }
+    for (item_name, cfg) in &settings.clipboard.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                if item_name == corvo_config::builtin_keys::CLIPBOARD_HISTORY {
+                    bindings.push((hk.clone(), corvo_platform::HotkeyIntent::ClipboardHistory));
+                } else {
+                    bindings.push((
+                        hk.clone(),
+                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                    ));
                 }
             }
         }
@@ -10602,34 +10616,43 @@ pub fn collect_hotkey_bindings(
     }
 
     // 8. Snippets
-    if settings.snippets.enabled {
-        for (item_name, cfg) in &settings.snippets.command_items {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
-                    ));
-                }
+    for (item_name, cfg) in &settings.snippets.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                ));
             }
         }
     }
 
     // 9. File Search
-    if settings.file_search.enabled {
-        for (item_name, cfg) in &settings.file_search.command_items {
-            if let Some(ref hk) = cfg.hotkey {
-                if !hk.is_empty() {
-                    bindings.push((
-                        hk.clone(),
-                        corvo_platform::HotkeyIntent::Command(item_name.clone()),
-                    ));
-                }
+    for (item_name, cfg) in &settings.file_search.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                ));
             }
         }
     }
 
-    // 10. Quicklinks
+    // 10. Navigation. The pane renders a recorder for these rows, so the
+    // shortcut has to reach the manager or it records and does nothing.
+    for (item_name, cfg) in &settings.navigation.command_items {
+        if let Some(ref hk) = cfg.hotkey {
+            if !hk.is_empty() {
+                bindings.push((
+                    hk.clone(),
+                    corvo_platform::HotkeyIntent::Command(item_name.clone()),
+                ));
+            }
+        }
+    }
+
+    // 11. Quicklinks
     let quicklinks_file = corvo_config::QuicklinksFile::load();
     for q in &quicklinks_file.quicklinks {
         if let Some(ref hk) = q.hotkey {
@@ -11662,6 +11685,302 @@ fn window_kind() -> WindowKind {
 mod tests {
     use super::*;
 
+    /// Rows are the search surface the rescue pass scans, and that global is
+    /// shared by every test in this module. The mutex serializes the tests
+    /// that swap it out; without it they interleave and each one reads the
+    /// rows another one installed.
+    fn initial_results_mutex() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn with_initial_results(rows: Vec<SearchResult>, test: impl FnOnce()) {
+        let _guard = initial_results_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
+        if let Ok(mut lock) = cell.write() {
+            *lock = rows;
+        }
+        test();
+    }
+
+    fn row(id: &str, title: &str) -> SearchResult {
+        SearchResult {
+            id: id.into(),
+            title: title.into(),
+            subtitle: None,
+            icon: Icon::Link,
+            score: 700,
+            accessory: None,
+            section: None,
+            accessories: Vec::new(),
+        }
+    }
+
+    /// Typing the start of an alias has to surface the row, the same way
+    /// it does for the other names an app is known by.
+    #[test]
+    fn an_alias_prefix_surfaces_the_row() {
+        with_initial_results(
+            vec![row(
+                "app-launcher:/Applications/Adobe Photoshop 2024.app",
+                "Adobe Photoshop 2024",
+            )],
+            || {
+                let mut settings = corvo_config::Settings::default();
+                settings.applications.app_configs.insert(
+                    "Adobe Photoshop 2024".into(),
+                    corvo_config::AppConfig {
+                        alias: Some("photoshop".into()),
+                        ..Default::default()
+                    },
+                );
+
+                let mut results = Vec::new();
+                rescue_alias_matches(&mut results, &settings, "pho");
+                assert_eq!(results.len(), 1, "an alias prefix must surface the row");
+            },
+        );
+    }
+
+    /// Scattered letters must never match an alias. A short alias is only
+    /// worth setting if it always wins, so a subsequence match would make
+    /// it useless.
+    #[test]
+    fn scattered_letters_do_not_match_an_alias() {
+        with_initial_results(
+            vec![row(
+                "app-launcher:/Applications/Pixelmator Studio.app",
+                "Pixelmator Studio",
+            )],
+            || {
+                let mut settings = corvo_config::Settings::default();
+                settings.applications.app_configs.insert(
+                    "Pixelmator Studio".into(),
+                    corvo_config::AppConfig {
+                        alias: Some("ps".into()),
+                        ..Default::default()
+                    },
+                );
+
+                // The whole alias still matches.
+                let mut results = Vec::new();
+                rescue_alias_matches(&mut results, &settings, "ps");
+                assert_eq!(results.len(), 1);
+
+                // "pst" is neither the alias nor the start of it.
+                let mut results = Vec::new();
+                rescue_alias_matches(&mut results, &settings, "pst");
+                assert!(
+                    results.is_empty(),
+                    "a scattered match must not reach an alias"
+                );
+            },
+        );
+    }
+
+    /// An alias must work for every pane, not only the few commands that
+    /// fold it into their own search. This covers the rows that no command
+    /// reads an alias for.
+    #[test]
+    fn an_alias_resolves_for_every_pane() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "app-launcher:/Applications/Safari.app",
+                "/Applications/Safari.app",
+                "Safari",
+            ),
+            (
+                "file-search:open",
+                corvo_config::builtin_keys::FILE_SEARCH,
+                "Search Files",
+            ),
+            (
+                "emoji-picker:open",
+                corvo_config::builtin_keys::EMOJI_PICKER,
+                "Emoji",
+            ),
+            (
+                "clipboard-manager:open",
+                corvo_config::builtin_keys::CLIPBOARD_HISTORY,
+                "Clipboard History",
+            ),
+            (
+                "snippets:9f2c1a0b3d4e5f60",
+                "Meeting Notes",
+                "Meeting Notes",
+            ),
+        ];
+        for (id, key, title) in cases {
+            let mut settings = corvo_config::Settings::default();
+            // Write the entry under the key that pane uses, the same way
+            // the alias editor does.
+            let map_for_pane: &mut std::collections::HashMap<String, corvo_config::AppConfig> =
+                if id.starts_with("app-launcher:") {
+                    &mut settings.applications.app_configs
+                } else if id.starts_with("snippets:") {
+                    &mut settings.snippets.command_items
+                } else {
+                    // The built-in rows reach their map through the shared
+                    // section lookup, so drive it by result id.
+                    match *id {
+                        "file-search:open" => &mut settings.file_search.command_items,
+                        "emoji-picker:open" => &mut settings.emojis.command_items,
+                        "clipboard-manager:open" => &mut settings.clipboard.command_items,
+                        other => panic!("no map for {other}"),
+                    }
+                };
+            map_for_pane.insert(
+                (*key).to_string(),
+                corvo_config::AppConfig {
+                    alias: Some("zz".into()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                settings
+                    .result_item(id, title)
+                    .and_then(|c| c.alias.clone())
+                    .as_deref(),
+                Some("zz"),
+                "id {id} does not resolve its alias from the pane key {key:?}"
+            );
+        }
+    }
+
+    /// Every pane that offers a hotkey recorder must produce a binding the
+    /// hotkey manager can install. A row that records a shortcut and then
+    /// binds nothing is the silent failure users hit.
+    #[test]
+    fn every_pane_hotkey_becomes_a_binding() {
+        const SHORTCUT: &str = "ctrl+alt+cmd+f9";
+        // (pane, the key its pane writes, the map that key lives in)
+        let panes: &[(&str, &str, &str)] = &[
+            ("applications", "/Applications/Fastty.app", "app"),
+            ("system-settings", "com.apple.preferences", "setting"),
+            ("system-actions", "lock", "action"),
+            ("commands", "brew:open-page", "command"),
+            ("quicklinks", "GitHub", "quicklink"),
+            (
+                "clipboard",
+                corvo_config::builtin_keys::CLIPBOARD_HISTORY,
+                "clipboard",
+            ),
+            (
+                "snippets",
+                corvo_config::builtin_keys::SEARCH_SNIPPETS,
+                "snippet",
+            ),
+            (
+                "file-search",
+                corvo_config::builtin_keys::FILE_SEARCH,
+                "file-search",
+            ),
+            (
+                "window-management",
+                corvo_window_management::WINDOW_ACTIONS[0].id,
+                "window",
+            ),
+            (
+                "navigation",
+                corvo_config::builtin_keys::SWITCH_WINDOWS,
+                "navigation",
+            ),
+            ("emojis", corvo_config::builtin_keys::EMOJI_PICKER, "emoji"),
+        ];
+
+        for (pane, key, map_name) in panes {
+            let mut settings = corvo_config::Settings::default();
+            let recorded = corvo_config::AppConfig {
+                hotkey: Some(SHORTCUT.to_string()),
+                ..Default::default()
+            };
+            // Write the entry the way that pane's recorder does.
+            let map: &mut std::collections::HashMap<String, corvo_config::AppConfig> =
+                match *map_name {
+                    "app" => &mut settings.applications.app_configs,
+                    "setting" => &mut settings.system_settings.items,
+                    "action" => &mut settings.system_actions.items,
+                    "command" => &mut settings.commands.items,
+                    "quicklink" => &mut settings.quicklinks.command_items,
+                    "clipboard" => &mut settings.clipboard.command_items,
+                    "snippet" => &mut settings.snippets.command_items,
+                    "file-search" => &mut settings.file_search.command_items,
+                    "window" => &mut settings.window_management.command_items,
+                    "navigation" => &mut settings.navigation.command_items,
+                    "emoji" => &mut settings.emojis.command_items,
+                    other => panic!("unhandled map {other}"),
+                };
+            map.insert((*key).to_string(), recorded);
+
+            let bindings = collect_hotkey_bindings(&settings);
+            assert!(
+                bindings.iter().any(|(hk, _)| hk == SHORTCUT),
+                "pane {pane} recorded {SHORTCUT} but produced no binding for key {key:?}"
+            );
+        }
+    }
+
+    /// A shortcut recorded while the section's feature toggle is off must
+    /// still bind. The toggle governs search visibility, not shortcuts, and
+    /// the recorder renders either way.
+    #[test]
+    fn a_shortcut_binds_even_when_its_feature_is_off() {
+        const SHORTCUT: &str = "ctrl+alt+cmd+f8";
+        let mut settings = corvo_config::Settings::default();
+        settings.navigation.enabled = false;
+        settings.snippets.enabled = false;
+        settings.file_search.enabled = false;
+        settings.navigation.command_items.insert(
+            corvo_config::builtin_keys::SWITCH_WINDOWS.to_string(),
+            corvo_config::AppConfig {
+                hotkey: Some(SHORTCUT.to_string()),
+                ..Default::default()
+            },
+        );
+        settings.snippets.command_items.insert(
+            corvo_config::builtin_keys::SEARCH_SNIPPETS.to_string(),
+            corvo_config::AppConfig {
+                hotkey: Some(SHORTCUT.to_string()),
+                ..Default::default()
+            },
+        );
+        settings.file_search.command_items.insert(
+            corvo_config::builtin_keys::FILE_SEARCH.to_string(),
+            corvo_config::AppConfig {
+                hotkey: Some(SHORTCUT.to_string()),
+                ..Default::default()
+            },
+        );
+
+        let bindings = collect_hotkey_bindings(&settings);
+        assert!(
+            bindings.iter().any(|(hk, _)| hk == SHORTCUT),
+            "shortcuts stopped binding when their feature toggle is off"
+        );
+    }
+
+    /// Clearing a row's shortcut must release the binding.
+    #[test]
+    fn an_empty_shortcut_binds_nothing() {
+        let mut settings = corvo_config::Settings::default();
+        settings.clipboard.command_items.insert(
+            corvo_config::builtin_keys::CLEAR_CLIPBOARD_HISTORY.to_string(),
+            corvo_config::AppConfig {
+                hotkey: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        let bindings = collect_hotkey_bindings(&settings);
+        assert!(
+            !bindings
+                .iter()
+                .any(|(_, intent)| matches!(intent, corvo_platform::HotkeyIntent::Command(k) if k == corvo_config::builtin_keys::CLEAR_CLIPBOARD_HISTORY)),
+            "an emptied shortcut still bound"
+        );
+    }
+
     #[gpui::test]
     fn clipboard_preview_card_keeps_a_constant_height(cx: &mut gpui::TestAppContext) {
         struct ProbeView {
@@ -11909,67 +12228,49 @@ mod tests {
 
     #[test]
     fn alias_rescue_pulls_exact_matches_into_the_results() {
-        let brew_row = SearchResult {
-            id: "brew:installed".into(),
-            title: "Homebrew".into(),
-            subtitle: None,
-            icon: Icon::Link,
-            score: 700,
-            accessory: None,
-            section: None,
-            accessories: Vec::new(),
-        };
-        let other_row = SearchResult {
-            id: "weather:now".into(),
-            title: "Weather".into(),
-            subtitle: None,
-            icon: Icon::Link,
-            score: 700,
-            accessory: None,
-            section: None,
-            accessories: Vec::new(),
-        };
-        let cell = INITIAL_RESULTS.get_or_init(|| std::sync::RwLock::new(Vec::new()));
-        if let Ok(mut lock) = cell.write() {
-            *lock = vec![brew_row.clone(), other_row.clone()];
-        }
+        let brew_row = row("brew:installed", "Homebrew");
+        let other_row = row("weather:now", "Weather");
 
-        let mut settings = corvo_config::Settings::default();
-        settings.commands.items.insert(
-            "Homebrew".into(),
-            corvo_config::AppConfig {
-                alias: Some("bb".into()),
-                ..Default::default()
-            },
-        );
+        with_initial_results(vec![brew_row.clone(), other_row.clone()], || {
+            let mut settings = corvo_config::Settings::default();
+            settings.commands.items.insert(
+                "Homebrew".into(),
+                corvo_config::AppConfig {
+                    alias: Some("bb".into()),
+                    ..Default::default()
+                },
+            );
 
-        // Exact alias match: the row joins even though "bb" cannot
-        // fuzzy-match "Homebrew".
-        let mut results = Vec::new();
-        rescue_alias_matches(&mut results, &settings, "bb");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "brew:installed");
+            // Exact alias match: the row joins even though "bb" cannot
+            // fuzzy-match "Homebrew".
+            let mut results = Vec::new();
+            rescue_alias_matches(&mut results, &settings, "bb");
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].id, "brew:installed");
 
-        // A row already found by normal search is not duplicated.
-        let mut results = vec![brew_row.clone()];
-        rescue_alias_matches(&mut results, &settings, "bb");
-        assert_eq!(results.len(), 1);
+            // A row already found by normal search is not duplicated.
+            let mut results = vec![brew_row.clone()];
+            rescue_alias_matches(&mut results, &settings, "bb");
+            assert_eq!(results.len(), 1);
 
-        // A different query rescues nothing.
-        let mut results = Vec::new();
-        rescue_alias_matches(&mut results, &settings, "brew");
-        assert!(results.is_empty());
+            // A different query rescues nothing.
+            let mut results = Vec::new();
+            rescue_alias_matches(&mut results, &settings, "brew");
+            assert!(results.is_empty());
 
-        // Ranking lifts the rescued exact alias to the top.
-        let mut results = vec![SearchResult {
-            id: "apps:safari".into(),
-            title: "Safari".into(),
-            score: 900,
-            ..other_row.clone()
-        }];
-        rescue_alias_matches(&mut results, &settings, "bb");
-        apply_result_preferences(&mut results, &settings, "bb");
-        assert_eq!(results.first().map(|r| r.id.as_str()), Some("brew:installed"));
+            // Ranking lifts the rescued exact alias to the top.
+            let mut results = vec![SearchResult {
+                id: "apps:safari".into(),
+                title: "Safari".into(),
+                score: 900,
+                ..other_row.clone()
+            }];
+            rescue_alias_matches(&mut results, &settings, "bb");
+            apply_result_preferences(&mut results, &settings, "bb");
+            assert_eq!(
+                results.first().map(|r| r.id.as_str()),
+                Some("brew:installed")
+            );
+        });
     }
 }
-
