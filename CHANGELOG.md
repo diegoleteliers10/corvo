@@ -3,6 +3,42 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
+# Corvo 0.6.0
+
+## Aliases and shortcuts
+
+- An alias works on every row that offers one: typing it brings the row up, including the first letters of the alias, while scattered letters never match so a short alias stays worth setting.
+- A recorded shortcut takes effect at once. Shortcut collection no longer sits behind each section's enable toggle, and the Navigation pane had no collection pass at all.
+- Turning a section off hides its rows from search and keeps its shortcuts.
+- Renaming a snippet or a quicklink carries its alias, shortcut, and visibility over to the new name.
+- Built-in rows are keyed by a stable identifier instead of the sentence they display, so rewording a row no longer discards the alias and shortcut saved under the old wording. Settings migrates older entries the first time it loads.
+
+## Commands
+
+- The Commands pane lists every built-in command in root search. About Corvo, Calculator History, Check for Updates, Define Word, the backup commands, Open Camera, Quit Corvo, Reload Applications, Open Settings, and Toggle System Appearance had a settings row, an alias, and a shortcut but no result to show.
+- The feature panes emit their command rows too: Clear Clipboard History, Search Snippets, Create Snippet, Switch Windows, and Search Menu Bar Items. Menu Bar search appears on macOS, matching the pane that shows it.
+- Create Quicklink, Search Quicklinks, Import Quicklinks, and Export Quicklinks now work from root search. Typing `snippet:` or `quicklink:` searches only that kind of entry.
+
+## Snippets and quicklinks
+
+- Create Snippet and Create Quicklink open an editor over the launcher instead of opening Settings, so the alias on a creation command leads straight into the form.
+- Cmd+E edits the selected snippet or quicklink in place and Cmd+N creates a new one inside a scoped search. Tab moves between fields, Enter saves, Enter inside a body adds a line, and Escape cancels.
+- Snippet rows open an editor for name, keyword, and body instead of writing a blank row to edit by hand.
+- Snippets and quicklinks expand {clipboard}, {date}, {time}, and {datetime} placeholders.
+
+## Calculator
+
+- Currency conversion in the palette: 10 usd to eur or 900 clp in usd convert through a USD pivot. Rates need no key, are cached for six hours, and are fetched on a background task that never blocks a keystroke.
+
+## Clipboard
+
+- History entries can be pasted directly with Cmd+1 through Cmd+9.
+
+## Platform
+
+- A recorded application shortcut toggles the app: it focuses the app when another one is in front and hides it when it is already focused.
+- Exact command aliases surface in search even without a text match.
+
 # Corvo 0.5.1
 
 ## Clipboard
