@@ -2,8 +2,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{OnceLock, RwLock};
 
 use corvo_core::{
-    Action, ActionGroup, Command, CommandAction, CommandError, ExecutionContext, Icon,
-    SearchContext, SearchResult, Snippet, search_match_score,
+    search_match_score, Action, ActionGroup, Command, CommandAction, CommandError,
+    ExecutionContext, Icon, SearchContext, SearchResult, Snippet,
 };
 
 fn cached_snippets() -> &'static RwLock<Vec<Snippet>> {
@@ -34,10 +34,18 @@ impl Command for SnippetsCommand {
         &["snippet", "snippets", "text"]
     }
 
+    /// Typing `snippet:` scopes the launcher to this command. The search
+    /// strips the prefix so the text after it is what matches.
+    fn prefix(&self) -> Option<&'static str> {
+        Some("snippet")
+    }
+
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         let Some(store) = ctx.store.as_ref() else {
             return Vec::new();
         };
+        // The scoped query arrives with the command prefix on it.
+        let query = query.trim().strip_prefix("snippet:").unwrap_or(query);
         let q = query.trim().to_lowercase();
         let snippets = store.snippets();
         if let Ok(mut cache) = cached_snippets().write() {
@@ -51,7 +59,11 @@ impl Command for SnippetsCommand {
                 } else {
                     search_match_score(
                         &q,
-                        &[s.name.as_str(), s.keyword.as_deref().unwrap_or(""), s.body.as_str()],
+                        &[
+                            s.name.as_str(),
+                            s.keyword.as_deref().unwrap_or(""),
+                            s.body.as_str(),
+                        ],
                     )?
                 };
                 Some((s, score))
@@ -72,7 +84,11 @@ impl Command for SnippetsCommand {
         results
     }
 
-    async fn execute(&self, result_id: &str, ctx: &ExecutionContext) -> Result<Action, CommandError> {
+    async fn execute(
+        &self,
+        result_id: &str,
+        ctx: &ExecutionContext,
+    ) -> Result<Action, CommandError> {
         let Some(index) = result_id.strip_prefix("snippets:") else {
             return Err(CommandError::NotFound);
         };
@@ -80,7 +96,10 @@ impl Command for SnippetsCommand {
             return Err(CommandError::NotFound);
         };
         let snippets = store.snippets();
-        let Some(snippet) = snippets.iter().find(|snippet| snippet_key(snippet) == index) else {
+        let Some(snippet) = snippets
+            .iter()
+            .find(|snippet| snippet_key(snippet) == index)
+        else {
             return Err(CommandError::NotFound);
         };
         let body = expand_snippet_body(&snippet.body);

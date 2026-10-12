@@ -105,10 +105,18 @@ impl Command for QuicklinksCommand {
         &["link", "links", "quicklink", "open"]
     }
 
+    /// Typing `quicklink:` scopes the launcher to this command. The search
+    /// strips the prefix so the text after it is what matches.
+    fn prefix(&self) -> Option<&'static str> {
+        Some("quicklink")
+    }
+
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         let Some(store) = ctx.store.as_ref() else {
             return Vec::new();
         };
+        // The scoped query arrives with the command prefix on it.
+        let query = query.trim().strip_prefix("quicklink:").unwrap_or(query);
         let q = query.trim().to_lowercase();
         let links = store.quicklinks();
         if let Ok(mut cache) = cached_quicklinks().write() {
@@ -266,7 +274,10 @@ mod tests {
             build_url("https://example.com/", "a b", None),
             "https://example.com/a%20b"
         );
-        assert_eq!(build_url("https://example.com", "", None), "https://example.com");
+        assert_eq!(
+            build_url("https://example.com", "", None),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -284,7 +295,11 @@ mod tests {
             "https://translate.example/?q={clipboard}"
         );
         assert_eq!(
-            build_url("https://translate.example/?q={clipboard}", "", Some("hola mundo")),
+            build_url(
+                "https://translate.example/?q={clipboard}",
+                "",
+                Some("hola mundo")
+            ),
             "https://translate.example/?q=hola%20mundo"
         );
     }

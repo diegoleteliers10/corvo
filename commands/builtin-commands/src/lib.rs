@@ -32,6 +32,7 @@ fn section_enabled(settings: &corvo_config::Settings, section: &str) -> bool {
         "clipboard" => settings.clipboard.enabled,
         "snippets" => settings.snippets.enabled,
         "navigation" => settings.navigation.enabled,
+        "quicklinks" => settings.quicklinks.enabled,
         _ => true,
     }
 }

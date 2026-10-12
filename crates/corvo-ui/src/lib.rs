@@ -2,6 +2,7 @@
 //! registry, results render as rows, Enter launches and dismisses.
 
 mod icons;
+mod launcher_editors;
 mod note_editor;
 mod onboarding;
 mod settings;
@@ -42,6 +43,11 @@ const MAX_WEAK_SEARCH_RESULTS: usize = 8;
 // confident command match, above the rows a command returned on a weak
 // match, so a partially typed alias still surfaces its row.
 const ALIAS_PREFIX_SCORE: i32 = 750;
+// The in-launcher snippet and quicklink editors render at this fixed
+// size: a form does not need the results list, and a fixed height keeps
+// the body field's room stable while the text grows.
+const EDITOR_WINDOW_WIDTH: f32 = 560.0;
+const EDITOR_WINDOW_HEIGHT: f32 = 440.0;
 
 // Raycast-like surfaces, black and gray, with the emerald accent and 90% opacity (10% translucent).
 const COLOR_BACKGROUND: u32 = 0x17181ae6;
@@ -1257,6 +1263,9 @@ pub struct Launcher {
     clipboard_flat_items: Vec<ClipboardFlatItem>,
     clipboard_to_flat: Vec<usize>,
     uninstaller: UninstallerState,
+    /// The snippet or quicklink editor open over the palette. While it is
+    /// open the palette renders the form instead of search results.
+    editor: Option<launcher_editors::OpenEditor>,
     actions_open: bool,
     actions: Vec<CommandAction>,
     actions_title: String,
@@ -1780,6 +1789,7 @@ impl Launcher {
             clipboard_flat_items: Vec::new(),
             clipboard_to_flat: Vec::new(),
             uninstaller: UninstallerState::Closed,
+            editor: None,
             actions_open: false,
             actions: Vec::new(),
             actions_title: String::new(),
@@ -1850,10 +1860,16 @@ impl Launcher {
     }
 
     fn desired_window_height(&self) -> f32 {
+        if self.editor.is_some() {
+            return EDITOR_WINDOW_HEIGHT * self.size_scale();
+        }
         self.palette_size().height(self.size_scale())
     }
 
     fn desired_window_width(&self) -> f32 {
+        if self.editor.is_some() {
+            return EDITOR_WINDOW_WIDTH * self.size_scale();
+        }
         WINDOW_WIDTH * self.size_scale()
     }
 
@@ -2407,6 +2423,48 @@ impl Launcher {
         let key = keystroke.key.as_str();
         let mods = Shortcuts::from_modifiers(&keystroke.modifiers);
         let alt = mods.alt;
+
+        // The open editor owns every key: it saves on Enter, closes on
+        // Escape, and types everything else into its active field.
+        if self.editor.is_some() {
+            if key == "escape" {
+                self.editor = None;
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            let plain = mods.is_unmodified();
+            let save = self
+                .editor
+                .as_mut()
+                .is_some_and(|editor| editor.handle_key(key, plain));
+            if save {
+                self.save_editor(cx);
+            }
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // Cmd+E edits the selected snippet or quicklink in place; Cmd+N
+        // creates a new one of whatever the scoped query is showing.
+        if mods.command && !alt {
+            let scoped = self.query.trim().to_lowercase();
+            if key == "e" && self.open_editor_for_selection(cx) {
+                cx.stop_propagation();
+                return;
+            }
+            if key == "n" && scoped.starts_with("snippet") {
+                self.open_editor(launcher_editors::OpenEditor::new_snippet(), cx);
+                cx.stop_propagation();
+                return;
+            }
+            if key == "n" && scoped.starts_with("quicklink") {
+                self.open_editor(launcher_editors::OpenEditor::new_quicklink(), cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
 
         if self.page == LauncherPage::Root && self.selected_result_is_port_action() {
             if mods.is_unmodified() && key == "tab" {
@@ -3841,6 +3899,295 @@ impl Launcher {
             });
         })
         .detach();
+    }
+
+    /// The in-launcher snippet and quicklink editor: the palette becomes
+    /// the form, so creating never leaves the launcher.
+    fn render_editor_palette(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::settings::{
+            COLOR_ACCENT, COLOR_BORDER_SUBTLE, COLOR_CARD_BG, COLOR_CONTROL_BG,
+            COLOR_CONTROL_BORDER, COLOR_CONTROL_HOVER, COLOR_TEXT, COLOR_TEXT_DIM,
+        };
+        self.sync_palette_size(window, cx);
+        let Some(editor) = self.editor.clone() else {
+            return div();
+        };
+        let labels = editor.field_labels();
+        let hints = editor.field_hints();
+        let field_border = |active: bool| {
+            if active {
+                rgb(COLOR_ACCENT)
+            } else {
+                rgb(COLOR_BORDER_SUBTLE)
+            }
+        };
+
+        let mut card = div().flex().flex_col().gap_4().w_full();
+        // Title row
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(COLOR_TEXT))
+                        .child(editor.title()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(editor.footer_hint()),
+                ),
+        );
+        // Fields
+        for (index, label) in labels.iter().enumerate() {
+            let active = editor.buffer.active == index;
+            let value = editor.buffer.fields.get(index).cloned().unwrap_or_default();
+            let is_body = editor.kind == launcher_editors::LauncherEditor::Snippet && index == 2;
+            let mut field = div()
+                .id(SharedString::from(format!("editor-field-{index}")))
+                .min_h(px(if is_body { 96.0 } else { 34.0 }))
+                .max_h(px(160.0))
+                .overflow_hidden()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(0x131416))
+                .border_1()
+                .border_color(field_border(active))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |launcher, _: &ClickEvent, _, cx| {
+                    if let Some(editor) = launcher.editor.as_mut() {
+                        editor.buffer.active = index;
+                        cx.notify();
+                    }
+                }));
+            if value.is_empty() {
+                field = field.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child(hints.get(index).map(|h| h.to_string()).unwrap_or_default()),
+                );
+            } else if is_body {
+                field = field.children(value.split('\n').map(|line| {
+                    div().text_size(px(13.0)).text_color(rgb(COLOR_TEXT)).child(
+                        if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        },
+                    )
+                }));
+            } else {
+                field = field.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(COLOR_TEXT))
+                        .child(value),
+                );
+            }
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(COLOR_TEXT_DIM))
+                            .child(*label),
+                    )
+                    .child(field),
+            );
+        }
+        // Footer: Cancel + Save
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(COLOR_TEXT_DIM))
+                        .child("Esc cancels"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("editor-cancel-btn")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(COLOR_CONTROL_BG))
+                                .border_1()
+                                .border_color(rgb(COLOR_CONTROL_BORDER))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
+                                .text_size(px(12.0))
+                                .text_color(rgb(COLOR_TEXT))
+                                .on_click(cx.listener(|launcher, _: &ClickEvent, _, cx| {
+                                    launcher.editor = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        )
+                        .child(
+                            div()
+                                .id("editor-save-btn")
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(COLOR_ACCENT))
+                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x064e3b))
+                                .on_click(cx.listener(|launcher, _: &ClickEvent, _, cx| {
+                                    launcher.save_editor(cx);
+                                }))
+                                .child(editor.save_label()),
+                        ),
+                ),
+        );
+
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("Launcher")
+            .on_key_down(cx.listener(Self::on_key_down))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(self.background_color))
+            .text_color(rgb(COLOR_TEXT))
+            .font_family("Helvetica")
+            .child(
+                div()
+                    .w_full()
+                    .rounded_lg()
+                    .bg(rgb(COLOR_CARD_BG))
+                    .border_1()
+                    .border_color(rgb(COLOR_BORDER_SUBTLE))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .child(card),
+            )
+    }
+
+    /// Persists the open editor and closes it. Reloads the store so the
+    /// saved entry shows up in search right away.
+    fn save_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        match editor.draft() {
+            launcher_editors::SnippetOrQuicklink::Snippet(draft) => {
+                let mut file = corvo_config::SnippetsFile::load();
+                let mut settings = corvo_config::Settings::load();
+                if draft.apply(&mut file.snippets, &mut settings.snippets.command_items) {
+                    let _ = file.save();
+                    let _ = settings.save();
+                    self.store.replace_snippets(
+                        file.snippets
+                            .iter()
+                            .map(|snippet| corvo_core::Snippet {
+                                name: snippet.name.clone(),
+                                keyword: snippet.keyword.clone(),
+                                body: snippet.body.clone(),
+                            })
+                            .collect(),
+                    );
+                    self.refresh(cx);
+                }
+            }
+            launcher_editors::SnippetOrQuicklink::Quicklink(draft) => {
+                let mut file = corvo_config::QuicklinksFile::load();
+                let mut settings = corvo_config::Settings::load();
+                if draft.apply(&mut file, &mut settings) {
+                    let _ = file.save();
+                    let _ = settings.save();
+                    self.store.replace_quicklinks(
+                        file.quicklinks
+                            .iter()
+                            .map(|link| corvo_core::Quicklink {
+                                name: link.name.clone(),
+                                url: link.url.clone(),
+                                alias: link.alias.clone(),
+                                hotkey: link.hotkey.clone(),
+                                hidden: link.hidden,
+                            })
+                            .collect(),
+                    );
+                    self.refresh(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens the snippet or quicklink editor over the palette, creating
+    /// the launcher window if it is not on screen.
+    pub(crate) fn open_editor(
+        &mut self,
+        editor: launcher_editors::OpenEditor,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor = Some(editor);
+        self.page = LauncherPage::Root;
+        self.detail_stack.clear();
+        self.query.clear();
+        self.cursor_idx = 0;
+        cx.notify();
+    }
+
+    /// Opens the editor prefilled with the selected snippet or quicklink.
+    /// Returns `false` when the selection is neither.
+    fn open_editor_for_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(result) = self.results.get(self.selected) else {
+            return false;
+        };
+        if result.id.starts_with("snippets:") {
+            // The result id is a content hash; the title is the name the
+            // file stores.
+            let file = corvo_config::SnippetsFile::load();
+            let Some((_, keyword, body)) = launcher_editors::snippet_fields(&file, &result.title)
+            else {
+                return false;
+            };
+            self.open_editor(
+                launcher_editors::OpenEditor::edit_snippet(result.title.clone(), keyword, body),
+                cx,
+            );
+            return true;
+        }
+        if result.id.starts_with("quicklinks:") {
+            let file = corvo_config::QuicklinksFile::load();
+            let Some((name, url)) = launcher_editors::quicklink_fields(&file, &result.title) else {
+                return false;
+            };
+            self.open_editor(launcher_editors::OpenEditor::edit_quicklink(name, url), cx);
+            return true;
+        }
+        false
     }
 
     /// Runs every command's search on the background executor and swaps
@@ -10257,6 +10604,9 @@ fn icon(icon: Icon, is_application: bool) -> Div {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.editor.is_some() {
+            return self.render_editor_palette(window, cx).into_any_element();
+        }
         self.sync_palette_size(window, cx);
         let is_collapsed = self.is_compact_collapsed();
         let detail_open = !self.detail_stack.is_empty();
@@ -10452,6 +10802,7 @@ impl Render for Launcher {
                 )
                 .child(self.filter_dropdown_menu(cx))
             })
+            .into_any_element()
     }
 }
 
@@ -11304,7 +11655,7 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
             open_launcher_with_query("snippet:", cx);
         }
         "Create Snippet" | "create-snippet" => {
-            open_settings_tab(SettingsTab::Snippets, cx);
+            open_launcher_editor(launcher_editors::OpenEditor::new_snippet(), cx);
         }
         "Search Files" | "search-files" => {
             open_launcher_with_page(LauncherPage::Files, cx);
@@ -11325,6 +11676,20 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
         }
         key if key == corvo_config::builtin_keys::SEARCH_MENU_BAR => {
             open_launcher_with_query("menu ", cx);
+        }
+        // Quicklinks pane commands. The pane writes these keys into the
+        // quicklinks settings section.
+        key if key == corvo_config::builtin_keys::CREATE_QUICKLINK => {
+            open_launcher_editor(launcher_editors::OpenEditor::new_quicklink(), cx);
+        }
+        key if key == corvo_config::builtin_keys::SEARCH_QUICKLINKS => {
+            open_launcher_with_query("quicklink:", cx);
+        }
+        key if key == corvo_config::builtin_keys::IMPORT_QUICKLINKS => {
+            open_settings_tab(SettingsTab::Quicklinks, cx);
+        }
+        key if key == corvo_config::builtin_keys::EXPORT_QUICKLINKS => {
+            open_settings_tab(SettingsTab::Quicklinks, cx);
         }
         "define-word" | "Define Word" => {
             open_launcher_with_query("define ", cx);
@@ -11491,6 +11856,27 @@ fn windows_hwnd(window: &Window) -> isize {
 
 fn open_launcher(cx: &mut App) {
     open_launcher_for(LauncherPage::Root, String::new(), cx);
+}
+
+/// Opens the launcher showing the snippet or quicklink editor. Creating
+/// from a hotkey or a command lands in the form, never in Settings.
+pub(crate) fn open_launcher_editor(editor: launcher_editors::OpenEditor, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |launcher, _window, cx| {
+                launcher.open_editor(editor, cx);
+            });
+            cx.activate(true);
+            return;
+        }
+    }
+    open_launcher_for(LauncherPage::Root, String::new(), cx);
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|g| g.0) {
+        let _ = handle.update(cx, |launcher, _window, cx| {
+            launcher.open_editor(editor, cx);
+        });
+        cx.activate(true);
+    }
 }
 
 /// Brings the launcher on screen after onboarding, on every platform:

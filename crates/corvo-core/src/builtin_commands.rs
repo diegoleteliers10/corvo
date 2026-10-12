@@ -259,6 +259,34 @@ pub const FEATURE_COMMANDS: &[FeatureCommandDef] = &[
             phosphor_svgs::style::regular::MAGNIFYING_GLASS
         )
     },
+    feature!(
+        "quicklinks",
+        "quicklinks:create-quicklink",
+        "Create Quicklink",
+        "create quicklink new link url add",
+        phosphor_svgs::style::regular::LINK_SIMPLE
+    ),
+    feature!(
+        "quicklinks",
+        "quicklinks:search-quicklinks",
+        "Search Quicklinks",
+        "search quicklinks find link open",
+        phosphor_svgs::style::regular::LINK
+    ),
+    feature!(
+        "quicklinks",
+        "quicklinks:import-quicklinks",
+        "Import Quicklinks",
+        "import quicklinks links file restore",
+        phosphor_svgs::style::regular::DOWNLOAD_SIMPLE
+    ),
+    feature!(
+        "quicklinks",
+        "quicklinks:export-quicklinks",
+        "Export Quicklinks",
+        "export quicklinks links file backup",
+        phosphor_svgs::style::regular::EXPORT
+    ),
 ];
 
 #[cfg(test)]

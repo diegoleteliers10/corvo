@@ -166,20 +166,9 @@ pub struct SettingsView {
     new_ignore_pattern_text: String,
     adding_nav_disabled_app: bool,
     new_nav_disabled_app_text: String,
-    adding_snippet: bool,
-    editing_snippet_index: Option<usize>,
-    snippet_name_input: String,
-    snippet_keyword_input: String,
-    snippet_body_input: String,
-    snippet_active_field: usize,
     editing_alias_item: Option<(SettingsTab, String)>,
     alias_input_text: String,
     recording_hotkey_item: Option<(SettingsTab, String)>,
-    adding_quicklink: bool,
-    editing_quicklink_index: Option<usize>,
-    quicklink_name_input: String,
-    quicklink_url_input: String,
-    quicklink_active_field: usize,
     confirming_clear_clipboard: bool,
     clipboard_clear_feedback: Option<bool>,
     save_error: Option<String>,
@@ -258,20 +247,9 @@ impl SettingsView {
             new_ignore_pattern_text: String::new(),
             adding_nav_disabled_app: false,
             new_nav_disabled_app_text: String::new(),
-            adding_snippet: false,
-            editing_snippet_index: None,
-            snippet_name_input: String::new(),
-            snippet_keyword_input: String::new(),
-            snippet_body_input: String::new(),
-            snippet_active_field: 0,
             editing_alias_item: None,
             alias_input_text: String::new(),
             recording_hotkey_item: None,
-            adding_quicklink: false,
-            editing_quicklink_index: None,
-            quicklink_name_input: String::new(),
-            quicklink_url_input: String::new(),
-            quicklink_active_field: 0,
             confirming_clear_clipboard: false,
             clipboard_clear_feedback: None,
             save_error: None,
@@ -462,14 +440,6 @@ impl SettingsView {
         self.adding_file_scope = false;
         self.adding_ignore_pattern = false;
         self.adding_nav_disabled_app = false;
-        self.adding_snippet = false;
-        self.editing_snippet_index = None;
-        self.snippet_name_input.clear();
-        self.snippet_keyword_input.clear();
-        self.snippet_body_input.clear();
-        self.snippet_active_field = 0;
-        self.adding_quicklink = false;
-        self.editing_quicklink_index = None;
         self.confirming_clear_clipboard = false;
         self.clipboard_clear_feedback = None;
         self.content_scroll_handle
@@ -1363,10 +1333,6 @@ impl SettingsView {
             && !self.adding_file_scope
             && !self.adding_ignore_pattern
             && !self.adding_nav_disabled_app
-            && !self.adding_snippet
-            && self.editing_snippet_index.is_none()
-            && !self.adding_quicklink
-            && self.editing_quicklink_index.is_none()
         {
             // The settings window uses the platform's primary modifier:
             // Command on macOS, Control on Windows and Linux. Reading
@@ -1395,120 +1361,6 @@ impl SettingsView {
                     _ => {}
                 }
             }
-        }
-
-        // Snippet modal input
-        if self.adding_snippet || self.editing_snippet_index.is_some() {
-            let field = self.snippet_active_field;
-            match keystroke.key.as_str() {
-                "escape" => {
-                    self.close_snippet_modal(cx);
-                    return;
-                }
-                "tab" => {
-                    self.snippet_active_field = (field + 1) % 3;
-                    cx.notify();
-                }
-                "enter" => {
-                    // Enter adds a line inside the body; it saves from
-                    // the name and keyword fields.
-                    if field == 2 {
-                        self.snippet_body_input.push('\n');
-                        cx.notify();
-                    } else {
-                        self.save_snippet(cx);
-                    }
-                }
-                "backspace" => {
-                    match field {
-                        0 => {
-                            self.snippet_name_input.pop();
-                        }
-                        1 => {
-                            self.snippet_keyword_input.pop();
-                        }
-                        _ => {
-                            self.snippet_body_input.pop();
-                        }
-                    }
-                    cx.notify();
-                }
-                "space" => {
-                    match field {
-                        0 => self.snippet_name_input.push(' '),
-                        1 => self.snippet_keyword_input.push(' '),
-                        _ => self.snippet_body_input.push(' '),
-                    }
-                    cx.notify();
-                }
-                key => {
-                    if !keystroke.modifiers.platform
-                        && !keystroke.modifiers.control
-                        && !keystroke.modifiers.alt
-                        && key.len() == 1
-                    {
-                        match field {
-                            0 => self.snippet_name_input.push_str(key),
-                            1 => self.snippet_keyword_input.push_str(key),
-                            _ => self.snippet_body_input.push_str(key),
-                        }
-                        cx.notify();
-                    }
-                }
-            }
-            return;
-        }
-
-        // Quicklink modal input
-        if self.adding_quicklink || self.editing_quicklink_index.is_some() {
-            match keystroke.key.as_str() {
-                "escape" => {
-                    self.close_quicklink_modal(cx);
-                    return;
-                }
-                "tab" => {
-                    self.quicklink_active_field = if self.quicklink_active_field == 0 {
-                        1
-                    } else {
-                        0
-                    };
-                    cx.notify();
-                }
-                "enter" => {
-                    self.save_quicklink(cx);
-                }
-                "backspace" => {
-                    if self.quicklink_active_field == 0 {
-                        self.quicklink_name_input.pop();
-                    } else {
-                        self.quicklink_url_input.pop();
-                    }
-                    cx.notify();
-                }
-                "space" => {
-                    if self.quicklink_active_field == 0 {
-                        self.quicklink_name_input.push(' ');
-                    } else {
-                        self.quicklink_url_input.push(' ');
-                    }
-                    cx.notify();
-                }
-                key => {
-                    if !keystroke.modifiers.platform
-                        && !keystroke.modifiers.control
-                        && !keystroke.modifiers.alt
-                        && key.len() == 1
-                    {
-                        if self.quicklink_active_field == 0 {
-                            self.quicklink_name_input.push_str(key);
-                        } else {
-                            self.quicklink_url_input.push_str(key);
-                        }
-                        cx.notify();
-                    }
-                }
-            }
-            return;
         }
 
         // Recording hotkey for an item (App, System Setting, System Action, Command, Quicklink, Snippets, FileSearch, WindowManagement, Navigation, Emojis)
@@ -3845,154 +3697,11 @@ impl SettingsView {
             )
     }
 
-    /// Dismiss the quicklink modal from a click. Shared by the close
-    /// button, Cancel, Escape, and a click on the backdrop, so every path
-    /// resets exactly the same state.
-    fn on_close_quicklink_modal(
-        this: &mut Self,
-        _event: &ClickEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        this.close_quicklink_modal(cx);
-    }
 
-    /// Dismiss the quicklink modal without saving.
-    fn close_quicklink_modal(&mut self, cx: &mut Context<Self>) {
-        self.adding_quicklink = false;
-        self.editing_quicklink_index = None;
-        self.quicklink_name_input.clear();
-        self.quicklink_url_input.clear();
-        cx.notify();
-    }
 
-    /// Dismiss the snippet modal from a click. Shared by the close
-    /// button, Cancel, Escape, and a click on the backdrop.
-    fn on_close_snippet_modal(
-        this: &mut Self,
-        _event: &ClickEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        this.close_snippet_modal(cx);
-    }
 
-    /// Dismiss the snippet modal without saving.
-    fn close_snippet_modal(&mut self, cx: &mut Context<Self>) {
-        self.adding_snippet = false;
-        self.editing_snippet_index = None;
-        self.snippet_name_input.clear();
-        self.snippet_keyword_input.clear();
-        self.snippet_body_input.clear();
-        self.snippet_active_field = 0;
-        cx.notify();
-    }
 
-    fn save_quicklink(&mut self, cx: &mut Context<Self>) {
-        let name = self.quicklink_name_input.trim().to_string();
-        let url = self.quicklink_url_input.trim().to_string();
-        if name.is_empty() || url.is_empty() {
-            return;
-        }
 
-        if let Some(idx) = self.editing_quicklink_index {
-            // settings.quicklinks.command_items is keyed by quicklink name,
-            // so a rename has to carry that entry over or the row falls
-            // back to defaults.
-            let previous_name = self
-                .quicklinks_file
-                .quicklinks
-                .get(idx)
-                .map(|entry| entry.name.clone());
-            if let Some(entry) = self.quicklinks_file.quicklinks.get_mut(idx) {
-                entry.name = name.clone();
-                entry.url = url;
-            }
-            if let Some(previous_name) = previous_name.filter(|old| *old != name) {
-                if let Some(config) = self
-                    .settings
-                    .quicklinks
-                    .command_items
-                    .remove(&previous_name)
-                {
-                    self.settings
-                        .quicklinks
-                        .command_items
-                        .entry(name)
-                        .or_insert(config);
-                    self.save_settings_file();
-                }
-            }
-        } else if self.adding_quicklink {
-            self.quicklinks_file
-                .quicklinks
-                .push(corvo_config::QuicklinkEntry {
-                    name,
-                    url,
-                    alias: None,
-                    hotkey: None,
-                    hidden: false,
-                });
-        }
-        self.save_quicklinks_file();
-        self.adding_quicklink = false;
-        self.editing_quicklink_index = None;
-        self.quicklink_name_input.clear();
-        self.quicklink_url_input.clear();
-        cx.notify();
-    }
-
-    fn save_snippet(&mut self, cx: &mut Context<Self>) {
-        let name = self.snippet_name_input.trim().to_string();
-        if name.is_empty() {
-            return;
-        }
-        let keyword = self.snippet_keyword_input.trim().to_string();
-        let keyword = (!keyword.is_empty()).then_some(keyword);
-        let body = self.snippet_body_input.clone();
-
-        if let Some(idx) = self.editing_snippet_index {
-            // Alias, hotkey, and visibility live in a map keyed by the
-            // snippet name, so a rename has to carry that config over or
-            // the row silently falls back to defaults.
-            let previous_name = self
-                .snippets_file
-                .snippets
-                .get(idx)
-                .map(|entry| entry.name.clone());
-            if let Some(entry) = self.snippets_file.snippets.get_mut(idx) {
-                entry.name = name.clone();
-                entry.keyword = keyword;
-                entry.body = body;
-            }
-            if let Some(previous_name) = previous_name.filter(|old| *old != name) {
-                if let Some(config) = self.settings.snippets.command_items.remove(&previous_name) {
-                    self.settings
-                        .snippets
-                        .command_items
-                        .entry(name)
-                        .or_insert(config);
-                    self.save_settings_file();
-                }
-            }
-        } else if self.adding_snippet {
-            self.snippets_file
-                .snippets
-                .push(corvo_config::SnippetEntry {
-                    name,
-                    keyword,
-                    body,
-                });
-        }
-        self.save_snippets_file();
-        self.adding_snippet = false;
-        self.editing_snippet_index = None;
-        self.snippet_name_input.clear();
-        self.snippet_keyword_input.clear();
-        self.snippet_body_input.clear();
-        self.snippet_active_field = 0;
-        cx.notify();
-    }
 
     fn render_commands_pane(&self, cx: &mut Context<Self>) -> Div {
         let commands = get_builtin_commands();
@@ -4167,7 +3876,7 @@ impl SettingsView {
             .map(|(i, q)| (i, q.clone()))
             .collect();
 
-        let mut pane = div()
+        let pane = div()
             .relative()
             .flex()
             .flex_col()
@@ -4514,13 +4223,15 @@ impl SettingsView {
                                                         .on_click(cx.listener({
                                                             let name_clone = name_clone.clone();
                                                             let url_clone = url_clone.clone();
-                                                            move |this, _: &ClickEvent, _window, cx| {
-                                                                this.adding_quicklink = false;
-                                                                this.editing_quicklink_index = Some(orig_idx);
-                                                                this.quicklink_name_input = name_clone.clone();
-                                                                this.quicklink_url_input = url_clone.clone();
-                                                                this.quicklink_active_field = 0;
-                                                                cx.notify();
+                                                            move |_this, _: &ClickEvent, window, cx| {
+                                                                close_settings_window(window, cx);
+                                                                crate::open_launcher_editor(
+                                                                    crate::launcher_editors::OpenEditor::edit_quicklink(
+                                                                        name_clone.clone(),
+                                                                        url_clone.clone(),
+                                                                    ),
+                                                                    cx,
+                                                                );
                                                             }
                                                         }))
                                                         .child(crate::icons::render_phosphor_svg(
@@ -4605,14 +4316,15 @@ impl SettingsView {
                                     .text_size(px(12.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(COLOR_TEXT))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.adding_quicklink = true;
-                                        this.editing_quicklink_index = None;
-                                        this.quicklink_name_input.clear();
-                                        this.quicklink_url_input.clear();
-                                        this.quicklink_active_field = 0;
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(
+                                        |_this, _: &ClickEvent, window, cx| {
+                                            close_settings_window(window, cx);
+                                            crate::open_launcher_editor(
+                                                crate::launcher_editors::OpenEditor::new_quicklink(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
                                     .child("Add Quicklink"),
                             ),
                     ),
@@ -4651,187 +4363,6 @@ impl SettingsView {
                             )),
                     ),
             );
-
-        if self.adding_quicklink || self.editing_quicklink_index.is_some() {
-            let is_editing = self.editing_quicklink_index.is_some();
-            pane = pane.child(
-                div()
-                    .id("quicklink-modal-backdrop")
-                    .absolute()
-                    .inset_0()
-                    .bg(rgba(0x00000099))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // A click outside the card dismisses. The card stops
-                    // propagation, so clicks inside it never reach here.
-                    .on_click(cx.listener(Self::on_close_quicklink_modal))
-                    .child(
-                        div()
-                            .id("quicklink-modal-card")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.stop_propagation();
-                            }))
-                            .w(px(420.0))
-                            .rounded_xl()
-                            .bg(rgb(COLOR_CARD_BG))
-                            .border_1()
-                            .border_color(rgb(COLOR_BORDER_SUBTLE))
-                            .p_5()
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_size(px(15.0))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(COLOR_TEXT))
-                                            .child(if is_editing { "Edit Quicklink" } else { "New Quicklink" }),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("close-quicklink-modal-btn")
-                                            .size(px(20.0))
-                                            .rounded_full()
-                                            .cursor_pointer()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                            .on_click(cx.listener(Self::on_close_quicklink_modal))
-                                            .child(crate::icons::render_phosphor_svg(
-                                                phosphor_svgs::style::regular::X,
-                                                rgb(COLOR_TEXT_DIM),
-                                                12.0,
-                                            )),
-                                    ),
-                            )
-                            // Name input
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1p5()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(COLOR_TEXT_DIM))
-                                            .child("Name"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("quicklink-modal-name-input")
-                                            .h(px(34.0))
-                                            .px_3()
-                                            .rounded_md()
-                                            .bg(rgb(0x131416))
-                                            .border_1()
-                                            .border_color(if self.quicklink_active_field == 0 { rgb(COLOR_ACCENT) } else { rgb(COLOR_BORDER_SUBTLE) })
-                                            .flex()
-                                            .items_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                this.quicklink_active_field = 0;
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.0))
-                                                    .text_color(if self.quicklink_name_input.is_empty() { rgb(COLOR_TEXT_DIM) } else { rgb(COLOR_TEXT) })
-                                                    .child(if self.quicklink_name_input.is_empty() { "e.g. GitHub Pull Requests".to_string() } else { self.quicklink_name_input.clone() }),
-                                            ),
-                                    ),
-                            )
-                            // URL input
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1p5()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(COLOR_TEXT_DIM))
-                                            .child("Link / URL"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("quicklink-modal-url-input")
-                                            .h(px(34.0))
-                                            .px_3()
-                                            .rounded_md()
-                                            .bg(rgb(0x131416))
-                                            .border_1()
-                                            .border_color(if self.quicklink_active_field == 1 { rgb(COLOR_ACCENT) } else { rgb(COLOR_BORDER_SUBTLE) })
-                                            .flex()
-                                            .items_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                this.quicklink_active_field = 1;
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.0))
-                                                    .text_color(if self.quicklink_url_input.is_empty() { rgb(COLOR_TEXT_DIM) } else { rgb(COLOR_TEXT) })
-                                                    .child(if self.quicklink_url_input.is_empty() { "e.g. https://github.com/pulls or with {argument}".to_string() } else { self.quicklink_url_input.clone() }),
-                                            ),
-                                    ),
-                            )
-                            // Action buttons
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_2()
-                                    .pt_2()
-                                    .child(
-                                        div()
-                                            .id("quicklink-modal-cancel-btn")
-                                            .px_3()
-                                            .py_1p5()
-                                            .rounded_md()
-                                            .bg(rgb(COLOR_CONTROL_BG))
-                                            .border_1()
-                                            .border_color(rgb(COLOR_CONTROL_BORDER))
-                                            .cursor_pointer()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(COLOR_TEXT))
-                                            .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                            .on_click(cx.listener(Self::on_close_quicklink_modal))
-                                            .child("Cancel"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("quicklink-modal-save-btn")
-                                            .px_3p5()
-                                            .py_1p5()
-                                            .rounded_md()
-                                            .bg(rgb(COLOR_ACCENT))
-                                            .cursor_pointer()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x064e3b))
-                                            .hover(|s| s.bg(rgb(0x3eeaa8)))
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                                this.save_quicklink(cx);
-                                            }))
-                                            .child("Save"),
-                                    ),
-                            ),
-                    ),
-            );
-        }
-
         pane
     }
 
@@ -5138,7 +4669,7 @@ impl SettingsView {
     }
 
     fn render_snippets_pane(&self, cx: &mut Context<Self>) -> Div {
-        let mut pane = div()
+        let pane = div()
             .flex()
             .flex_col()
             .gap_6()
@@ -5293,14 +4824,12 @@ impl SettingsView {
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(COLOR_TEXT))
                                             .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.adding_snippet = true;
-                                                    this.editing_snippet_index = None;
-                                                    this.snippet_name_input.clear();
-                                                    this.snippet_keyword_input.clear();
-                                                    this.snippet_body_input.clear();
-                                                    this.snippet_active_field = 0;
-                                                    cx.notify();
+                                                |_this, _: &ClickEvent, window, cx| {
+                                                    close_settings_window(window, cx);
+                                                    crate::open_launcher_editor(
+                                                        crate::launcher_editors::OpenEditor::new_snippet(),
+                                                        cx,
+                                                    );
                                                 },
                                             ))
                                             .child("Add..."),
@@ -5366,10 +4895,6 @@ impl SettingsView {
                             ),
                     ),
             );
-
-        if self.adding_snippet || self.editing_snippet_index.is_some() {
-            pane = pane.child(self.render_snippet_modal(cx));
-        }
         pane
     }
 
@@ -5623,15 +5148,16 @@ impl SettingsView {
                                         let name = name.clone();
                                         let keyword = keyword.clone();
                                         let body = snippet.body.clone();
-                                        move |this, _: &ClickEvent, _window, cx| {
-                                            this.adding_snippet = false;
-                                            this.editing_snippet_index = Some(idx);
-                                            this.snippet_name_input = name.clone();
-                                            this.snippet_keyword_input =
-                                                keyword.clone().unwrap_or_default();
-                                            this.snippet_body_input = body.clone();
-                                            this.snippet_active_field = 0;
-                                            cx.notify();
+                                        move |_this, _: &ClickEvent, window, cx| {
+                                            close_settings_window(window, cx);
+                                            crate::open_launcher_editor(
+                                                crate::launcher_editors::OpenEditor::edit_snippet(
+                                                    name.clone(),
+                                                    keyword.clone().unwrap_or_default(),
+                                                    body.clone(),
+                                                ),
+                                                cx,
+                                            );
                                         }
                                     }))
                                     .child(crate::icons::render_phosphor_svg(
@@ -5710,281 +5236,6 @@ impl SettingsView {
             .collect()
     }
 
-    /// The New/Edit Snippet modal: name, keyword, and a multiline body.
-    /// Tab cycles fields, Enter adds a line inside the body, Enter in
-    /// name or keyword saves, Escape closes without saving.
-    fn render_snippet_modal(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let is_editing = self.editing_snippet_index.is_some();
-        let field_border = |active: bool| {
-            if active {
-                rgb(COLOR_ACCENT)
-            } else {
-                rgb(COLOR_BORDER_SUBTLE)
-            }
-        };
-        let body_lines: Vec<AnyElement> = if self.snippet_body_input.is_empty() {
-            vec![div()
-                .text_size(px(13.0))
-                .text_color(rgb(COLOR_TEXT_DIM))
-                .child(
-                    "Template text. {clipboard}, {date}, {time}, and {datetime} expand at paste time.",
-                )
-                .into_any_element()]
-        } else {
-            self.snippet_body_input
-                .split('\n')
-                .map(|line| {
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(COLOR_TEXT))
-                        .child(if line.is_empty() {
-                            " ".to_string()
-                        } else {
-                            line.to_string()
-                        })
-                        .into_any_element()
-                })
-                .collect()
-        };
-        div()
-            .id("snippet-modal-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(rgba(0x00000099))
-            .flex()
-            .items_center()
-            .justify_center()
-            // A click outside the card dismisses. The card stops
-            // propagation, so clicks inside it never reach here.
-            .on_click(cx.listener(Self::on_close_snippet_modal))
-            .child(
-                div()
-                    .id("snippet-modal-card")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.stop_propagation();
-                    }))
-                    .w(px(440.0))
-                    .rounded_xl()
-                    .bg(rgb(COLOR_CARD_BG))
-                    .border_1()
-                    .border_color(rgb(COLOR_BORDER_SUBTLE))
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(15.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(COLOR_TEXT))
-                                    .child(if is_editing {
-                                        "Edit Snippet"
-                                    } else {
-                                        "New Snippet"
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("close-snippet-modal-btn")
-                                    .size(px(20.0))
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .hover(|s| s.bg(rgb(COLOR_CONTROL_HOVER)))
-                                    .on_click(cx.listener(Self::on_close_snippet_modal))
-                                    .child(crate::icons::render_phosphor_svg(
-                                        phosphor_svgs::style::regular::X,
-                                        rgb(COLOR_TEXT_DIM),
-                                        12.0,
-                                    )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child("Name"),
-                            )
-                            .child(
-                                div()
-                                    .id("snippet-modal-name-input")
-                                    .h(px(34.0))
-                                    .px_3()
-                                    .rounded_md()
-                                    .bg(rgb(0x131416))
-                                    .border_1()
-                                    .border_color(field_border(self.snippet_active_field == 0))
-                                    .flex()
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.snippet_active_field = 0;
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(if self.snippet_name_input.is_empty() {
-                                                rgb(COLOR_TEXT_DIM)
-                                            } else {
-                                                rgb(COLOR_TEXT)
-                                            })
-                                            .child(if self.snippet_name_input.is_empty() {
-                                                "e.g. Meeting Notes".to_string()
-                                            } else {
-                                                self.snippet_name_input.clone()
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child("Keyword (optional)"),
-                            )
-                            .child(
-                                div()
-                                    .id("snippet-modal-keyword-input")
-                                    .h(px(34.0))
-                                    .px_3()
-                                    .rounded_md()
-                                    .bg(rgb(0x131416))
-                                    .border_1()
-                                    .border_color(field_border(self.snippet_active_field == 1))
-                                    .flex()
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.snippet_active_field = 1;
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(if self.snippet_keyword_input.is_empty() {
-                                                rgb(COLOR_TEXT_DIM)
-                                            } else {
-                                                rgb(COLOR_TEXT)
-                                            })
-                                            .child(if self.snippet_keyword_input.is_empty() {
-                                                "e.g. notes".to_string()
-                                            } else {
-                                                self.snippet_keyword_input.clone()
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child("Body"),
-                            )
-                            .child(
-                                div()
-                                    .id("snippet-modal-body-input")
-                                    .min_h(px(96.0))
-                                    .max_h(px(160.0))
-                                    .overflow_hidden()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x131416))
-                                    .border_1()
-                                    .border_color(field_border(self.snippet_active_field == 2))
-                                    .flex()
-                                    .flex_col()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.snippet_active_field = 2;
-                                        cx.notify();
-                                    }))
-                                    .children(body_lines),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(COLOR_TEXT_DIM))
-                                    .child("Tab switches fields. Enter adds a line in the body."),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id("snippet-modal-cancel-btn")
-                                            .px_3()
-                                            .py_1p5()
-                                            .rounded_md()
-                                            .bg(rgb(COLOR_CONTROL_BG))
-                                            .border_1()
-                                            .border_color(rgb(COLOR_CONTROL_BORDER))
-                                            .cursor_pointer()
-                                            .hover(|s| {
-                                                s.bg(rgb(COLOR_CONTROL_HOVER))
-                                                    .border_color(rgb(0x44474e))
-                                            })
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(COLOR_TEXT))
-                                            .on_click(cx.listener(Self::on_close_snippet_modal))
-                                            .child("Cancel"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("snippet-modal-save-btn")
-                                            .px_3()
-                                            .py_1p5()
-                                            .rounded_md()
-                                            .bg(rgb(COLOR_ACCENT))
-                                            .cursor_pointer()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x064e3b))
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.save_snippet(cx);
-                                                },
-                                            ))
-                                            .child(if is_editing { "Save" } else { "Create" }),
-                                    ),
-                            ),
-                    ),
-            )
-    }
 
     fn render_file_search_pane(&self, cx: &mut Context<Self>) -> Div {
         div()

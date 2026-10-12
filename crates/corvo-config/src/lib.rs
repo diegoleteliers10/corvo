@@ -531,7 +531,12 @@ pub mod builtin_keys {
     pub const SWITCH_WINDOWS: &str = "navigation:switch-windows";
     pub const SEARCH_MENU_BAR: &str = "navigation:search-menu-bar";
 
-    /// The panes these five rows render in. The builtin-commands command
+    pub const CREATE_QUICKLINK: &str = "quicklinks:create-quicklink";
+    pub const SEARCH_QUICKLINKS: &str = "quicklinks:search-quicklinks";
+    pub const IMPORT_QUICKLINKS: &str = "quicklinks:import-quicklinks";
+    pub const EXPORT_QUICKLINKS: &str = "quicklinks:export-quicklinks";
+
+    /// The panes these rows render in. The builtin-commands command
     /// emits each of them as `builtin-commands:` plus this key, gated on
     /// its pane's toggle.
     pub const FEATURE_PANES: &[(&str, &str)] = &[
@@ -540,6 +545,10 @@ pub mod builtin_keys {
         ("snippets", CREATE_SNIPPET),
         ("navigation", SWITCH_WINDOWS),
         ("navigation", SEARCH_MENU_BAR),
+        ("quicklinks", CREATE_QUICKLINK),
+        ("quicklinks", SEARCH_QUICKLINKS),
+        ("quicklinks", IMPORT_QUICKLINKS),
+        ("quicklinks", EXPORT_QUICKLINKS),
     ];
 }
 
@@ -553,7 +562,7 @@ pub mod builtin_keys {
 /// legacy entry, and anything the user set after the switch wins.
 fn migrate_title_keys(settings: &mut Settings) -> bool {
     // (section, old title, new stable key)
-    let moves: [(&str, &str, &str); 8] = [
+    let moves: [(&str, &str, &str); 12] = [
         (
             "clipboard",
             "Clipboard History",
@@ -577,6 +586,26 @@ fn migrate_title_keys(settings: &mut Settings) -> bool {
             "navigation",
             "Search Menu Bar Items",
             builtin_keys::SEARCH_MENU_BAR,
+        ),
+        (
+            "quicklinks",
+            "create-quicklink",
+            builtin_keys::CREATE_QUICKLINK,
+        ),
+        (
+            "quicklinks",
+            "search-quicklinks",
+            builtin_keys::SEARCH_QUICKLINKS,
+        ),
+        (
+            "quicklinks",
+            "import-quicklinks",
+            builtin_keys::IMPORT_QUICKLINKS,
+        ),
+        (
+            "quicklinks",
+            "export-quicklinks",
+            builtin_keys::EXPORT_QUICKLINKS,
         ),
     ];
 
