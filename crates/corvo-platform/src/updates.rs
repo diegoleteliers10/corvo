@@ -78,6 +78,7 @@ pub enum UpdateError {
     Io(io::Error),
     InvalidVersion(String),
     NoMatchingAsset(String),
+    MissingVerificationAsset(String),
     ChecksumMismatch { expected: String, actual: String },
     SignatureVerificationFailed(String),
     Translocated(String),
@@ -94,6 +95,7 @@ impl std::fmt::Display for UpdateError {
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::InvalidVersion(msg) => write!(f, "Invalid version: {msg}"),
             Self::NoMatchingAsset(msg) => write!(f, "No matching release asset: {msg}"),
+            Self::MissingVerificationAsset(msg) => write!(f, "Missing verification asset: {msg}"),
             Self::ChecksumMismatch { expected, actual } => {
                 write!(f, "Checksum mismatch (expected {expected}, got {actual})")
             }
@@ -428,6 +430,15 @@ pub fn download_and_verify(
     cancel_flag: &AtomicBool,
     on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<PathBuf, UpdateError> {
+    // Fail closed: a release without a checksum asset is refused outright.
+    // A compromised feed must never yield an unverifiable install.
+    let Some(checksum_url) = release.checksum_url.as_ref() else {
+        return Err(UpdateError::MissingVerificationAsset(format!(
+            "Release {} has no SHA-256 checksum asset for {} and cannot be verified; update refused.",
+            release.tag_name, release.asset.name
+        )));
+    };
+
     let cache_dir = update_cache_dir()?;
     let dest_path = cache_dir.join(&release.asset.name);
 
@@ -503,14 +514,22 @@ pub fn download_and_verify(
             }
         }
 
-        if let Some(expected) = expected_hash {
-            if computed_hash != expected {
-                let _ = fs::remove_file(&dest_path);
-                return Err(UpdateError::ChecksumMismatch {
-                    expected,
-                    actual: computed_hash,
-                });
-            }
+        let expected = expected_hash.unwrap_or_else(|| {
+            fs::remove_file(&dest_path).ok();
+            String::new()
+        });
+        if expected.is_empty() {
+            return Err(UpdateError::MissingVerificationAsset(format!(
+                "Checksum asset does not contain an entry for {}; update refused.",
+                release.asset.name
+            )));
+        }
+        if computed_hash != expected {
+            let _ = fs::remove_file(&dest_path);
+            return Err(UpdateError::ChecksumMismatch {
+                expected,
+                actual: computed_hash,
+            });
         }
     }
 
@@ -1103,8 +1122,37 @@ rm -f "$old"
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::macos_designated_requirement;
+    use super::{download_and_verify, macos_designated_requirement, ReleaseAsset, UpdateError, UpdateRelease};
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+
+    /// Fail-closed updater: a release without a checksum asset must be
+    /// refused before any download starts, so a compromised feed can never
+    /// yield an unverifiable install.
+    #[test]
+    fn refuses_a_release_without_a_checksum_asset() {
+        let release = UpdateRelease {
+            version: semver::Version::new(0, 0, 1),
+            tag_name: "v0.0.1".into(),
+            title: "test".into(),
+            release_notes: String::new(),
+            published_at: String::new(),
+            asset: ReleaseAsset {
+                name: "corvo.tar.gz".into(),
+                browser_download_url: "https://example.invalid/corvo.tar.gz".into(),
+                size: 1,
+            },
+            checksum_url: None,
+            signature_url: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = download_and_verify(&release, &cancel, None);
+        assert!(
+            matches!(result, Err(UpdateError::MissingVerificationAsset(_))),
+            "expected MissingVerificationAsset, got {result:?}"
+        );
+    }
+
 
     /// `codesign -dr -` writes the requirement to stdout and the
     /// `Executable=` line to stderr. A reader that looks at stderr alone
