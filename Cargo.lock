@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "corvo"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "corvo-app-launcher",
  "corvo-brew",
