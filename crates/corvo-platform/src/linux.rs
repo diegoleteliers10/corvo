@@ -854,6 +854,20 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     frontmost_app_info_inner(false)
 }
 
+/// Whether `xdotool` answers on this session. Probed once per process:
+/// the answer only changes if the user installs the package, and probing
+/// on every clipboard poll would spawn a process for nothing.
+pub fn xdotool_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("xdotool")
+            .arg("version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
 /// The pid and display name of the frontmost app, including this process.
 pub fn frontmost_app_identity() -> Option<(i32, String)> {
     frontmost_app_info_inner(true)

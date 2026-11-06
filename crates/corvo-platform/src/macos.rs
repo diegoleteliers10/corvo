@@ -806,16 +806,14 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
 pub fn frontmost_app_identity() -> Option<(i32, String)> {
     let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let pid = frontmost.processIdentifier();
-    let name = frontmost
-        .localizedName()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            if pid == std::process::id() as i32 {
-                "Corvo".into()
-            } else {
-                "Active App".into()
-            }
-        });
+    // A named app is attributed by name. Without a name only Corvo itself
+    // is safe to record, because its own copy cannot be a password
+    // manager's; any other app stays unknown, which fails closed.
+    let name = match frontmost.localizedName() {
+        Some(name) => name.to_string(),
+        None if pid == std::process::id() as i32 => "Corvo".into(),
+        None => return None,
+    };
     Some((pid, name))
 }
 

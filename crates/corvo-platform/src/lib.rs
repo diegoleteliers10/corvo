@@ -196,16 +196,32 @@ pub fn frontmost_app_identity() -> Option<(i32, String)> {
 
 /// Whether the OS can name the app that owns the clipboard.
 ///
-/// macOS and Windows always can. Linux can through `xdotool` on X11; a
-/// Wayland session exposes no window-manager query, so a failed lookup
-/// there means "unavailable", not "the app is unknown".
+/// macOS and Windows always can. Linux can only on X11 with `xdotool`
+/// installed; Wayland exposes no window-manager query, and X11 without
+/// `xdotool` cannot answer either, so both report "unavailable".
 pub fn clipboard_source_attribution_available() -> bool {
     #[cfg(target_os = "macos")]
     return true;
     #[cfg(target_os = "windows")]
     return true;
     #[cfg(target_os = "linux")]
-    return std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+    {
+        let x11 =
+            std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        if !x11 {
+            return false;
+        }
+        let available = linux::xdotool_available();
+        if !available {
+            // One line in the diagnostic log, so a missing package is not
+            // a silent loss of clipboard history.
+            static REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            REPORTED.get_or_init(|| {
+                diagnostics::record_error("clipboard", "xdotool_missing_source_attribution");
+            });
+        }
+        return available;
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return false;
 }
