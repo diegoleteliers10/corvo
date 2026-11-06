@@ -323,6 +323,13 @@ impl Settings {
             let _ = settings.save();
             return settings;
         }
+        // The revision stamp must be persisted even when no value moved,
+        // so the migration does not run again on the next load.
+        if settings.clipboard.defaults_revision == 0 {
+            let _ = migrate_clipboard_defaults(&mut settings);
+            let _ = settings.save();
+            return settings;
+        }
         if let Some(stamp) = stamp {
             if let Ok(mut cache) = Self::cache().write() {
                 *cache = Some((stamp, settings.clone()));
@@ -552,6 +559,34 @@ pub mod builtin_keys {
     ];
 }
 
+/// The clipboard defaults moved from 500 entries / 30 days to 2000
+/// entries / 90 days. A settings file written before that change holds
+/// the old values explicitly, so the new defaults never reach an
+/// existing install. Each field that still matches the legacy default is
+/// moved once; a value the user changed stays.
+fn migrate_clipboard_defaults(settings: &mut Settings) -> bool {
+    const LEGACY_MAX_ENTRIES: usize = 500;
+    const LEGACY_RETENTION_DAYS: u32 = 30;
+    const LEGACY_RETENTION_OPTION: usize = 2;
+    if settings.clipboard.defaults_revision >= 1 {
+        return false;
+    }
+    let mut changed = false;
+    if settings.clipboard.max_entries == LEGACY_MAX_ENTRIES {
+        settings.clipboard.max_entries = 2_000;
+        changed = true;
+    }
+    if settings.clipboard.retention_days == LEGACY_RETENTION_DAYS
+        && settings.clipboard.retention_option == LEGACY_RETENTION_OPTION
+    {
+        settings.clipboard.retention_days = 90;
+        settings.clipboard.retention_option = 3;
+        changed = true;
+    }
+    settings.clipboard.defaults_revision = 1;
+    changed
+}
+
 /// Legacy title keys and the stable key each one becomes.
 ///
 /// Applied once when settings load, so an alias written before the switch
@@ -680,6 +715,10 @@ pub struct ClipboardSettings {
     pub auto_paste: bool,
     pub save_images: bool,
     pub save_colors: bool,
+    /// Bumped when the clipboard defaults change. A file written before
+    /// the 2000-entry, 90-day defaults deserialises to 0 and the loader
+    /// migrates it once.
+    pub defaults_revision: u32,
     pub command_items: std::collections::HashMap<String, AppConfig>,
 }
 
@@ -710,6 +749,7 @@ impl Default for ClipboardSettings {
             auto_paste: true,
             save_images: true,
             save_colors: true,
+            defaults_revision: 1,
             command_items,
         }
     }
@@ -1524,6 +1564,51 @@ mod tests {
             hotkey: None,
             hidden: false,
         }
+    }
+
+    #[test]
+    fn clipboard_defaults_migrate_legacy_values_once() {
+        let mut settings = Settings::default();
+        settings.clipboard.max_entries = 500;
+        settings.clipboard.retention_days = 30;
+        settings.clipboard.retention_option = 2;
+        settings.clipboard.defaults_revision = 0;
+
+        assert!(migrate_clipboard_defaults(&mut settings));
+        assert_eq!(settings.clipboard.max_entries, 2_000);
+        assert_eq!(settings.clipboard.retention_days, 90);
+        assert_eq!(settings.clipboard.retention_option, 3);
+        assert_eq!(settings.clipboard.defaults_revision, 1);
+
+        assert!(!migrate_clipboard_defaults(&mut settings));
+        assert_eq!(settings.clipboard.max_entries, 2_000);
+    }
+
+    #[test]
+    fn clipboard_defaults_migration_keeps_a_chosen_value() {
+        let mut settings = Settings::default();
+        settings.clipboard.max_entries = 800;
+        settings.clipboard.retention_days = 7;
+        settings.clipboard.retention_option = 1;
+        settings.clipboard.defaults_revision = 0;
+
+        assert!(!migrate_clipboard_defaults(&mut settings));
+        assert_eq!(settings.clipboard.max_entries, 800);
+        assert_eq!(settings.clipboard.retention_days, 7);
+        assert_eq!(settings.clipboard.defaults_revision, 1);
+    }
+
+    #[test]
+    fn clipboard_defaults_migration_moves_the_cap_alone() {
+        let mut settings = Settings::default();
+        settings.clipboard.max_entries = 500;
+        settings.clipboard.retention_days = 7;
+        settings.clipboard.retention_option = 1;
+        settings.clipboard.defaults_revision = 0;
+
+        assert!(migrate_clipboard_defaults(&mut settings));
+        assert_eq!(settings.clipboard.max_entries, 2_000);
+        assert_eq!(settings.clipboard.retention_days, 7);
     }
 
     #[test]
