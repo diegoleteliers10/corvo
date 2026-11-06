@@ -179,6 +179,37 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     return None;
 }
 
+/// The pid and display name of the frontmost app, including this process.
+///
+/// Callers that must tell "Corvo is frontmost" from "the lookup failed"
+/// use this instead of [`frontmost_app_info`], which reports both as `None`.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    #[cfg(target_os = "macos")]
+    return macos::frontmost_app_identity();
+    #[cfg(target_os = "windows")]
+    return windows::frontmost_app_identity();
+    #[cfg(target_os = "linux")]
+    return linux::frontmost_app_identity();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return None;
+}
+
+/// Whether the OS can name the app that owns the clipboard.
+///
+/// macOS and Windows always can. Linux can through `xdotool` on X11; a
+/// Wayland session exposes no window-manager query, so a failed lookup
+/// there means "unavailable", not "the app is unknown".
+pub fn clipboard_source_attribution_available() -> bool {
+    #[cfg(target_os = "macos")]
+    return true;
+    #[cfg(target_os = "windows")]
+    return true;
+    #[cfg(target_os = "linux")]
+    return std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return false;
+}
+
 /// Reads the current string from the system clipboard.
 pub fn read_clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]

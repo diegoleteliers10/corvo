@@ -224,11 +224,19 @@ tabs on Windows and Linux (Firefox removed its CDP endpoint).
   marker, and skip copies whose source app holds secrets: Keychain Access,
   Passwords, 1Password, Bitwarden, KeePassXC, LastPass, Dashlane, Enpass,
   NordPass, Proton Pass, RoboForm, Seahorse, and GNOME Keyring.
+- Fail closed when macOS or Windows cannot name the frontmost app: the
+  copy is not recorded, because without a name the secret-app guard
+  cannot run. A Wayland session has no attribution at all, so there the
+  source shows as Unknown and history keeps working.
+- Bound storage by bytes as well as entries: 64 MB total, oldest entries
+  removed first. Images count with their PNG size.
 
 Remaining work: Linux cannot enumerate pasteboard formats, so
 `x-kde-passwordManagerHint` is not detected there and only the source-app
-guard applies. File-drag clipboard types, per-entry pinning, and a size cap
-per text entry remain planned.
+guard applies. Every capture rewrites the whole JSON file, which stays
+O(history) per copy; an append-only store remains planned. File-drag
+clipboard types, per-entry pinning, and a size cap per text entry also
+remain planned.
 
 ## Shared changes
 
