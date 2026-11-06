@@ -11,6 +11,11 @@ are in RELEASE_NOTES.md.
 - Clipboard history skips copies made in Keychain Access, Apple Passwords, and common password managers. A pasteboard marker already covered most managers; the source app now covers the ones that expose no marker.
 - "Direct paste on Enter" now controls clipboard entries. With it off, Enter copies the entry to the clipboard instead of pasting into the previous app.
 
+## Define Word and calculator history
+
+- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition, Cmd+Enter opens Dictionary, and a single word also gets a low-ranked definition row as a fallback.
+- The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again. `Clear Calculator History` empties the list.
+
 # Corvo 0.6.2
 
 This release cuts idle memory, keeps the launcher in one place, and makes the

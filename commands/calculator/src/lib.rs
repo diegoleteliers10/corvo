@@ -3,6 +3,7 @@
 
 pub mod currency;
 pub mod engine;
+pub mod history;
 pub mod scalar;
 pub mod units;
 
@@ -11,9 +12,43 @@ pub use scalar::{evaluate_scalar, ScalarError};
 pub use units::{convert_units, Dim, UNITS};
 
 /// Starts the background exchange-rates fetch, so the first currency
-/// query usually finds warm rates.
+/// query usually finds warm rates. Also loads the evaluation history off
+/// the search path.
 pub fn warmup() {
     currency::ensure_warm();
+    history::warmup();
+}
+
+fn history_enabled(ctx: &SearchContext) -> bool {
+    ctx.store
+        .as_ref()
+        .is_none_or(|store| store.command_enabled("calculator-history"))
+}
+
+fn history_row(entry: &history::HistoryEntry, index: usize) -> SearchResult {
+    SearchResult {
+        id: format!("calculator:history:{index}"),
+        title: entry.result.clone(),
+        subtitle: Some(entry.expression.clone()),
+        icon: Icon::Calculator,
+        score: 900 - index as i32,
+        accessory: Some("History".into()),
+        section: None,
+        accessories: Vec::new(),
+    }
+}
+
+fn clear_history_row() -> SearchResult {
+    SearchResult {
+        id: "calculator:clear-history".into(),
+        title: "Clear Calculator History".into(),
+        subtitle: Some("Remove every stored evaluation".into()),
+        icon: Icon::Svg(phosphor_svgs::style::regular::TRASH),
+        score: 10,
+        accessory: Some("History".into()),
+        section: None,
+        accessories: Vec::new(),
+    }
 }
 
 use corvo_core::{
@@ -40,9 +75,34 @@ impl Command for CalculatorCommand {
         80
     }
 
-    async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {
+    fn prefix(&self) -> Option<&'static str> {
+        Some("calculator")
+    }
+
+    async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         currency::ensure_warm();
-        let Some(outcome) = evaluate(query) else {
+        let trimmed = query.trim();
+        let after_prefix = trimmed
+            .get(.."calculator".len())
+            .filter(|head| head.eq_ignore_ascii_case("calculator"))
+            .map(|_| trimmed["calculator".len()..].trim_start());
+        let scoped = after_prefix.is_some();
+        let expression = after_prefix.unwrap_or(trimmed);
+
+        if scoped && expression.is_empty() {
+            if !history_enabled(ctx) {
+                return Vec::new();
+            }
+            let mut rows: Vec<SearchResult> = history::all()
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| history_row(entry, index))
+                .collect();
+            rows.push(clear_history_row());
+            return rows;
+        }
+
+        let Some(outcome) = evaluate(expression) else {
             return Vec::new();
         };
 
@@ -51,6 +111,9 @@ impl Command for CalculatorCommand {
         let subtitle = Some(format!("= {}", outcome.expression()));
         let accessory = Some(outcome.category().to_string());
         let raw_val = outcome.raw_value().to_string();
+        if !is_error {
+            history::record(outcome.expression(), &title);
+        }
 
         vec![SearchResult {
             id: if is_error {
@@ -69,6 +132,18 @@ impl Command for CalculatorCommand {
     }
 
     async fn execute(&self, result_id: &str, _ctx: &ExecutionContext) -> Result<Action, CommandError> {
+        if result_id == "calculator:clear-history" {
+            history::clear();
+            return Ok(Action::ShowToast("Calculator history cleared".into()));
+        }
+        if let Some(index) = result_id.strip_prefix("calculator:history:") {
+            let index: usize = index.parse().map_err(|_| CommandError::NotFound)?;
+            let entry = history::all()
+                .into_iter()
+                .nth(index)
+                .ok_or(CommandError::NotFound)?;
+            return Ok(Action::Copy(entry.result));
+        }
         let value = if let Some(err) = result_id.strip_prefix("calculator:error:") {
             err
         } else if let Some(val) = result_id.strip_prefix("calculator:") {
@@ -80,6 +155,54 @@ impl Command for CalculatorCommand {
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
+        if result_id == "calculator:clear-history" {
+            return Vec::new();
+        }
+        if let Some(index) = result_id.strip_prefix("calculator:history:") {
+            let Ok(index) = index.parse::<usize>() else {
+                return Vec::new();
+            };
+            let Some(entry) = history::all().into_iter().nth(index) else {
+                return Vec::new();
+            };
+            let rerun = evaluate(&entry.expression)
+                .map(|outcome| outcome.display_result().to_string())
+                .unwrap_or_else(|| entry.result.clone());
+            return vec![
+                CommandAction {
+                    id: "calculator:history-copy".into(),
+                    label: "Copy Result".into(),
+                    action: Action::Copy(entry.result.clone()),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
+                    group: ActionGroup::Primary,
+                    hotkey: Some("enter"),
+                },
+                CommandAction {
+                    id: "calculator:history-paste".into(),
+                    label: "Paste Result".into(),
+                    action: Action::PasteText(entry.result.clone()),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
+                    group: ActionGroup::Standard,
+                    hotkey: Some("cmd+enter"),
+                },
+                CommandAction {
+                    id: "calculator:history-copy-expression".into(),
+                    label: "Copy Expression".into(),
+                    action: Action::Copy(entry.expression.clone()),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::MATH_OPERATIONS),
+                    group: ActionGroup::Standard,
+                    hotkey: Some("alt+enter"),
+                },
+                CommandAction {
+                    id: "calculator:history-rerun".into(),
+                    label: "Run Again".into(),
+                    action: Action::Copy(rerun),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_CLOCKWISE),
+                    group: ActionGroup::Standard,
+                    hotkey: None,
+                },
+            ];
+        }
         let (value, is_error) = if let Some(err) = result_id.strip_prefix("calculator:error:") {
             (err, true)
         } else if let Some(val) = result_id.strip_prefix("calculator:") {
@@ -123,6 +246,52 @@ impl Command for CalculatorCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_context() -> SearchContext {
+        SearchContext {
+            max_results: 50,
+            store: None,
+        }
+    }
+
+    #[test]
+    fn scoped_query_lists_history_and_a_clear_row() {
+        history::record("2+2", "4");
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("calculator", &search_context()));
+        assert!(results.iter().any(|result| result.title == "4"));
+        assert!(results
+            .iter()
+            .any(|result| result.id == "calculator:clear-history"));
+    }
+
+    #[test]
+    fn scoped_query_still_evaluates() {
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("calculator 7*6", &search_context()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "42");
+    }
+
+    #[test]
+    fn a_plain_expression_still_evaluates() {
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("7*6", &search_context()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "42");
+    }
+
+    #[test]
+    fn clearing_history_leaves_the_clear_row_alone() {
+        history::record("9*9", "81");
+        history::clear();
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("calculator", &search_context()));
+        assert!(!results.iter().any(|result| result.title == "81"));
+        assert!(results
+            .iter()
+            .any(|result| result.id == "calculator:clear-history"));
+    }
 
     #[test]
     fn acceptance_test_cases() {
