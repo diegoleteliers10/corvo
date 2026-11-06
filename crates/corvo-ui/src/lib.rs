@@ -2,6 +2,7 @@
 //! registry, results render as rows, Enter launches and dismisses.
 
 mod icons;
+mod image_preview;
 mod launcher_editors;
 mod note_editor;
 mod onboarding;
@@ -1191,6 +1192,15 @@ enum FilePreview {
     Error(String),
 }
 
+/// The decoded preview of the clipboard image on screen, keyed by entry
+/// id. Only one image is kept: browsing the history must not stack
+/// decoded screenshots in memory.
+enum ClipboardPreviewState {
+    Empty,
+    Loading(String),
+    Ready(String, std::sync::Arc<gpui::RenderImage>),
+}
+
 #[derive(Clone)]
 struct FileSearchCandidate {
     result: SearchResult,
@@ -1262,6 +1272,14 @@ pub struct Launcher {
     root_to_flat: Vec<usize>,
     clipboard_flat_items: Vec<ClipboardFlatItem>,
     clipboard_to_flat: Vec<usize>,
+    clipboard_preview: ClipboardPreviewState,
+    /// Settings snapshot for this window. It decides the shortcut shown at
+    /// the right edge of a row, so the row always agrees with Settings.
+    settings: corvo_config::Settings,
+    /// Decoded images the window is drawing. GPUI's process-wide asset
+    /// cache never evicts, so without this every app icon and screenshot
+    /// preview stayed resident after the launcher closed.
+    image_cache: gpui::Entity<gpui::RetainAllImageCache>,
     uninstaller: UninstallerState,
     /// The snippet or quicklink editor open over the palette. While it is
     /// open the palette renders the form instead of search results.
@@ -1748,6 +1766,7 @@ impl Launcher {
             ROW_HEIGHT
         };
         window.focus(&focus_handle, cx);
+        let image_cache = gpui::RetainAllImageCache::new(cx);
         let _activation_sub = cx.observe_window_activation(window, |launcher, window, _cx| {
             if !window.is_window_active() {
                 launcher.dismiss(window);
@@ -1788,6 +1807,9 @@ impl Launcher {
             root_to_flat: Vec::new(),
             clipboard_flat_items: Vec::new(),
             clipboard_to_flat: Vec::new(),
+            clipboard_preview: ClipboardPreviewState::Empty,
+            settings: corvo_config::Settings::load(),
+            image_cache,
             uninstaller: UninstallerState::Closed,
             editor: None,
             actions_open: false,
@@ -4570,6 +4592,54 @@ impl Launcher {
             });
         })
         .detach();
+    }
+
+    /// The downscaled preview of a clipboard image, decoded in the
+    /// background the first time the entry is shown.
+    ///
+    /// GPUI keeps every image it loads from a path for the life of the
+    /// process, and one Retina screenshot is tens of megabytes decoded.
+    /// Decoding here to the card size keeps the image in this window only,
+    /// and keeps one entry at a time.
+    fn clipboard_preview_image(
+        &mut self,
+        entry_id: &str,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        match &self.clipboard_preview {
+            ClipboardPreviewState::Ready(cached_id, image) if cached_id == entry_id => {
+                return Some(image.clone());
+            }
+            // Still decoding, or already failed: keep the placeholder and
+            // never spawn a second decode for the same entry.
+            ClipboardPreviewState::Loading(loading_id) if loading_id == entry_id => return None,
+            _ => {}
+        }
+
+        let requested_id = entry_id.to_string();
+        self.clipboard_preview = ClipboardPreviewState::Loading(requested_id.clone());
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let decoded = smol::unblock(move || image_preview::load_clipboard_preview(&path)).await;
+            let Some(image) = decoded else {
+                return;
+            };
+            let _ = this.update(cx, |launcher, cx| {
+                let still_wanted = matches!(
+                    &launcher.clipboard_preview,
+                    ClipboardPreviewState::Loading(id) if id == &requested_id
+                );
+                if !still_wanted {
+                    return;
+                }
+                launcher.clipboard_preview =
+                    ClipboardPreviewState::Ready(requested_id, image);
+                cx.notify();
+            });
+        })
+        .detach();
+        None
     }
 
     fn refresh_files(&mut self, cx: &mut Context<Self>) {
@@ -7497,6 +7567,7 @@ impl Launcher {
 
     #[cfg(target_os = "windows")]
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = corvo_config::Settings::load();
         corvo_app_launcher::reload_corpus();
         let (pid, name) = match corvo_platform::frontmost_app_info() {
             Some((pid, name)) => (Some(pid), Some(name)),
@@ -8550,7 +8621,7 @@ impl Launcher {
         }
     }
 
-    fn clipboard_split_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn clipboard_split_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("clipboard-split-view")
             .flex_1()
@@ -8702,7 +8773,7 @@ impl Launcher {
             })
     }
 
-    fn clipboard_preview_pane(&self, _cx: &mut Context<Self>) -> Stateful<Div> {
+    fn clipboard_preview_pane(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let entry = self
             .results
             .get(self.selected)
@@ -8746,6 +8817,7 @@ impl Launcher {
                     (180.0, 180.0)
                 };
 
+            let image = self.clipboard_preview_image(&entry.id, &img_path, cx);
             div()
                 .id("clip-preview-image-box")
                 .flex_1()
@@ -8759,14 +8831,23 @@ impl Launcher {
                 .bg(rgb(0x121315))
                 .border_1()
                 .border_color(rgb(0x27272a))
-                .child(
-                    img(img_path)
+                .child(match image {
+                    Some(image) => img(image)
                         .w(px(disp_w))
                         .h(px(disp_h))
                         .max_w_full()
                         .max_h_full()
-                        .rounded_md(),
-                )
+                        .rounded_md()
+                        .into_any_element(),
+                    None => div()
+                        .w(px(disp_w))
+                        .h(px(disp_h))
+                        .max_w_full()
+                        .max_h_full()
+                        .rounded_md()
+                        .bg(rgb(0x1b1e22))
+                        .into_any_element(),
+                })
         } else {
             Self::render_clipboard_text_preview(&entry.text)
         };
@@ -10054,6 +10135,17 @@ impl Launcher {
             )
     }
 
+    /// The accessory a result row shows at its right edge.
+    ///
+    /// Settings owns the shortcut of every row that has an entry there, so
+    /// the row never shows a value the user changed, or one the command
+    /// crate baked in. A row with no settings entry keeps its own
+    /// accessory, and a row whose entry has no shortcut keeps a state or
+    /// category label.
+    fn result_accessory(&self, result: &SearchResult) -> Option<String> {
+        accessory_from_settings(&self.settings, result)
+    }
+
     fn result_row(
         &self,
         index: usize,
@@ -10135,7 +10227,7 @@ impl Launcher {
                     }),
             )
             .child(div().flex_none())
-            .when_some(result.accessory.clone(), |row, accessory| {
+            .when_some(self.result_accessory(result), |row, accessory| {
                 // An accessory can be a shortcut, written in token form
                 // by the command crate. Render it with this platform's
                 // labels so a Windows row reads "Ctrl Alt C" and not the
@@ -10372,6 +10464,39 @@ fn file_preview_image(path: std::path::PathBuf) -> impl IntoElement {
         .into_any_element()
 }
 
+/// Resolves the accessory a row shows from the shortcut Settings stores
+/// for it, falling back to the accessory the command crate provided.
+fn accessory_from_settings(
+    settings: &corvo_config::Settings,
+    result: &SearchResult,
+) -> Option<String> {
+    let Some(item) = settings.result_item(&result.id, &result.title) else {
+        return result.accessory.clone();
+    };
+    if let Some(hotkey) = item
+        .hotkey
+        .as_deref()
+        .map(str::trim)
+        .filter(|hotkey| !hotkey.is_empty())
+    {
+        return Some(hotkey.to_string());
+    }
+    // Settings owns this row and stores no shortcut. Drop a shortcut the
+    // command crate baked in; keep a state or category label.
+    match &result.accessory {
+        Some(accessory) if looks_like_shortcut(accessory) => None,
+        other => other.clone(),
+    }
+}
+
+/// True when an accessory is a shortcut written in token form, such as
+/// `cmd+alt+space`, rather than a label or a state.
+fn looks_like_shortcut(accessory: &str) -> bool {
+    corvo_core::shortcut::tokens(accessory)
+        .iter()
+        .any(|token| corvo_core::shortcut::primary_from_token(token).is_some())
+}
+
 /// Renders a result accessory for display.
 ///
 /// Most accessories are plain words such as "Application". A few carry a
@@ -10379,10 +10504,7 @@ fn file_preview_image(path: std::path::PathBuf) -> impl IntoElement {
 /// the accessory with a shortcut translated to this platform's labels,
 /// and every other string untouched.
 fn shortcut_text(accessory: &str) -> String {
-    let looks_like_shortcut = corvo_core::shortcut::tokens(accessory)
-        .iter()
-        .any(|token| corvo_core::shortcut::primary_from_token(token).is_some());
-    if !looks_like_shortcut {
+    if !looks_like_shortcut(accessory) {
         return accessory.to_string();
     }
     corvo_core::shortcut::keycaps(accessory).join("+")
@@ -10623,6 +10745,7 @@ impl Render for Launcher {
         let is_processes = self.page == LauncherPage::Processes && !detail_open;
         let is_uninstaller = self.page == LauncherPage::Uninstaller && !detail_open;
         div()
+            .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
             .key_context("Launcher")
             .on_action(cx.listener(
@@ -11137,6 +11260,7 @@ pub fn run(
                     let settings = corvo_config::Settings::load();
                     corvo_platform::set_window_gap(settings.window_management.gap_between_windows);
                     reload_active_hotkeys(&settings, cx);
+                    refresh_launcher_settings(&settings, cx);
                 });
             }
         })
@@ -11904,6 +12028,7 @@ fn sync_launcher_preferences(cx: &mut App) {
     if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
         if cx.windows().contains(&handle.into()) {
             let _ = handle.update(cx, |launcher, window, cx| {
+                launcher.settings = corvo_config::Settings::load();
                 launcher.sync_palette_size(window, cx);
                 cx.notify();
             });
@@ -11911,8 +12036,20 @@ fn sync_launcher_preferences(cx: &mut App) {
     }
 }
 
-fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
-    corvo_app_launcher::reload_corpus();
+/// Pushes a fresh settings snapshot into the resident launcher so row
+/// shortcuts follow a hotkey the user just changed.
+fn refresh_launcher_settings(settings: &corvo_config::Settings, cx: &mut App) {
+    if let Some(handle) = cx.try_global::<LauncherWindow>().map(|global| global.0) {
+        if cx.windows().contains(&handle.into()) {
+            let _ = handle.update(cx, |launcher, _window, cx| {
+                launcher.settings = settings.clone();
+                cx.notify();
+            });
+        }
+    }
+}
+
+fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {    corvo_app_launcher::reload_corpus();
     let store = cx.global::<StoreGlobal>().0.clone();
     let (previous_pid, previous_name) = match corvo_platform::frontmost_app_info() {
         Some((pid, name)) => (Some(pid), Some(name)),
@@ -11934,10 +12071,14 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         false,
     )
     .height(size_scale);
-    // Center on the height the window will actually open at. Centering on
-    // the full height and then overwriting the height leaves a compact
-    // window sitting well above the middle of the screen.
-    let initial_bounds = launcher_bounds(size(px(window_width), px(initial_height)), cx);
+    // Every page opens with the same top edge: the one the launcher uses
+    // when it first appears. A taller page grows downward from it.
+    let anchor_height = launcher_anchor_height(store.compact_mode(), size_scale);
+    let initial_bounds = launcher_bounds(
+        size(px(window_width), px(initial_height)),
+        anchor_height,
+        cx,
+    );
     let display_id = active_display_id();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(initial_bounds)),
@@ -11947,7 +12088,9 @@ fn open_launcher_for(page: LauncherPage, query: String, cx: &mut App) {
         titlebar: None,
         kind: window_kind(),
         is_resizable: false,
-        is_movable: true,
+        // The launcher is pinned: it opens at one fixed spot and cannot be
+        // dragged. Settings and onboarding keep their own movable windows.
+        is_movable: false,
         focus: true,
         show: !cfg!(target_os = "macos"),
         window_background: if cfg!(target_os = "windows") {
@@ -12033,11 +12176,17 @@ const LAUNCHER_TOP_MARGIN: f32 = 24.0;
 
 /// Where the launcher panel opens.
 ///
-/// The panel changes height between compact and expanded, so the position
-/// is derived from where the middle of the panel should sit rather than
-/// from a fixed offset. A fixed offset puts a short compact panel near the
-/// top and leaves a tall expanded panel low on the screen.
-fn launcher_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+/// The top edge is the one the launcher first appears at, whatever page
+/// opens later. A tall page, such as Clipboard or Files, keeps that top
+/// edge and grows downward instead of jumping upward. The anchor sits a
+/// third of the way down the usable display, which puts the first result
+/// rows near eye level instead of dead center. The panel cannot be
+/// dragged; see `is_movable` in `open_launcher_for`.
+fn launcher_bounds(
+    window_size: Size<Pixels>,
+    anchor_height: f32,
+    cx: &App,
+) -> Bounds<Pixels> {
     let display_id = active_display_id();
     let mut bounds = Bounds::centered(display_id, window_size, cx);
     let display = cx
@@ -12048,12 +12197,26 @@ fn launcher_bounds(window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
     if let Some(display) = display {
         // `Bounds::centered` works from the visible bounds, which leave
         // out the menu bar, so this has to use the same rect.
-        let visible = display.visible_bounds();
-        let target_center = visible.origin.y + visible.size.height * LAUNCHER_CENTER_FRACTION;
-        bounds.origin.y = (target_center - window_size.height / 2.0)
-            .max(visible.origin.y + px(LAUNCHER_TOP_MARGIN));
+        bounds.origin.y = launcher_anchor_y(display.visible_bounds(), anchor_height);
     }
     bounds
+}
+
+/// The height of the panel the launcher opens with on a fresh summon.
+///
+/// Compact mode starts as a short search field, so that field owns the
+/// anchor. Other pages reuse it even when they are taller.
+fn launcher_anchor_height(compact_mode: bool, size_scale: f32) -> f32 {
+    palette_size(compact_mode, false, LauncherPage::Root, "", false, false, false).height(size_scale)
+}
+
+/// The fixed top edge of the launcher on one display.
+///
+/// The top edge comes from the panel the launcher opens with, so the
+/// compact field and a tall clipboard page both start on the same line.
+fn launcher_anchor_y(visible: Bounds<Pixels>, anchor_height: f32) -> Pixels {
+    let target_center = visible.origin.y + visible.size.height * LAUNCHER_CENTER_FRACTION;
+    (target_center - px(anchor_height / 2.0)).max(visible.origin.y + px(LAUNCHER_TOP_MARGIN))
 }
 
 /// Wayland compositors get a centered overlay through layer shell (SPEC
@@ -12731,6 +12894,30 @@ mod tests {
     }
 
     #[test]
+    fn the_launcher_top_matches_the_initial_panel() {
+        let visible = Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(1512.0), px(945.0)),
+        );
+        let compact_top = launcher_anchor_y(visible, COMPACT_WINDOW_HEIGHT);
+        let extended_top = launcher_anchor_y(visible, WINDOW_HEIGHT);
+
+        assert_eq!(
+            compact_top,
+            px(945.0 * LAUNCHER_CENTER_FRACTION - COMPACT_WINDOW_HEIGHT / 2.0)
+        );
+        assert_eq!(
+            extended_top,
+            px(945.0 * LAUNCHER_CENTER_FRACTION - WINDOW_HEIGHT / 2.0)
+        );
+        // A tall page opens with the compact field's top edge, so it grows
+        // downward instead of jumping above the initial launcher position.
+        assert!(compact_top > extended_top);
+        assert_eq!(launcher_anchor_height(true, 1.0), COMPACT_WINDOW_HEIGHT);
+        assert_eq!(launcher_anchor_height(false, 1.0), WINDOW_HEIGHT);
+    }
+
+    #[test]
     fn the_reveal_label_names_the_platform_file_manager() {
         // "Show in Finder" points at an application that does not exist on
         // Windows or Linux.
@@ -12753,6 +12940,69 @@ mod tests {
         assert!(rendered.contains(corvo_core::Primary::current().keycap_label()));
         assert_eq!(shortcut_text("Application"), "Application");
         assert_eq!(shortcut_text("Folder"), "Folder");
+    }
+
+    #[test]
+    fn a_row_shows_the_shortcut_settings_stores() {
+        // The command crate writes a default shortcut; Settings holds the
+        // one the user recorded. Settings wins.
+        let mut settings = corvo_config::Settings::default();
+        settings.emojis.command_items.insert(
+            "emoji-picker:open".into(),
+            corvo_config::AppConfig {
+                hotkey: Some("ctrl+cmd+space".into()),
+                ..Default::default()
+            },
+        );
+        let mut result = row("emoji-picker:open", "Search Emoji & Symbols");
+        result.accessory = Some("cmd+alt+space".into());
+
+        assert_eq!(
+            accessory_from_settings(&settings, &result).as_deref(),
+            Some("ctrl+cmd+space")
+        );
+    }
+
+    #[test]
+    fn a_configured_row_without_a_shortcut_keeps_its_state() {
+        let mut settings = corvo_config::Settings::default();
+        settings.clipboard.command_items.insert(
+            "clipboard-manager:open".into(),
+            corvo_config::AppConfig::default(),
+        );
+
+        // A shortcut baked into the command must not survive after the
+        // user cleared it in Settings.
+        let mut result = row("clipboard-manager:open", "Clipboard History");
+        result.accessory = Some("cmd+alt+c".into());
+        assert_eq!(accessory_from_settings(&settings, &result), None);
+
+        // A state label is not a shortcut, so it stays.
+        let mut status = row("weather:current", "21 °C");
+        status.accessory = Some("Now".into());
+        assert_eq!(
+            accessory_from_settings(&settings, &status).as_deref(),
+            Some("Now")
+        );
+    }
+
+    #[test]
+    fn an_application_row_shows_its_settings_shortcut() {
+        let mut settings = corvo_config::Settings::default();
+        settings.applications.app_configs.insert(
+            "Journal".into(),
+            corvo_config::AppConfig {
+                hotkey: Some("ctrl+alt+j".into()),
+                ..Default::default()
+            },
+        );
+        let mut result = row("app-launcher:/Applications/Journal.app", "Journal");
+        result.accessory = Some("Application".into());
+
+        assert_eq!(
+            accessory_from_settings(&settings, &result).as_deref(),
+            Some("ctrl+alt+j")
+        );
     }
 
     #[test]
