@@ -432,7 +432,7 @@ pub fn download_and_verify(
 ) -> Result<PathBuf, UpdateError> {
     // Fail closed: a release without a checksum asset is refused outright.
     // A compromised feed must never yield an unverifiable install.
-    let Some(checksum_url) = release.checksum_url.as_ref() else {
+    if release.checksum_url.is_none() {
         return Err(UpdateError::MissingVerificationAsset(format!(
             "Release {} has no SHA-256 checksum asset for {} and cannot be verified; update refused.",
             release.tag_name, release.asset.name
