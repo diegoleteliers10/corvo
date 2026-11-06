@@ -10,6 +10,7 @@ are in RELEASE_NOTES.md.
 - Clipboard history keeps three months by default instead of 30 days, with an entry cap of 2000 instead of 500. Settings still offer 24 hours, 7 days, 30 days, 3 months, and 1 year.
 - Clipboard history skips copies made in Keychain Access, Apple Passwords, and common password managers. A pasteboard marker already covered most managers; the source app now covers the ones that expose no marker.
 - On macOS and Windows, a copy whose frontmost app cannot be named is not recorded. Without a name the secret-app guard cannot run, so the history fails closed instead of storing a possible password.
+- On Wayland, Corvo cannot identify the source app, so the copy is stored with the source `Unknown`. The password-manager guard cannot run there; content copied from a password manager may enter the history. This is the accepted trade-off for keeping history on Wayland.
 - History is bounded by bytes as well as entries: 64 MB total, with the oldest entries removed first.
 - "Direct paste on Enter" now controls clipboard entries. With it off, Enter copies the entry to the clipboard instead of pasting into the previous app.
 
