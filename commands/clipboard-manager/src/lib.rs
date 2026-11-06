@@ -20,6 +20,8 @@ const RETENTION_SECS: u64 = 90 * 86_400;
 /// window to a few days.
 const DEFAULT_MAX_ENTRIES: usize = 2_000;
 const DEFAULT_RETENTION_DAYS: u32 = 90;
+const CORVO_SOURCE: &str = "Corvo";
+const UNKNOWN_SOURCE: &str = "Unknown";
 
 /// App names that handle secrets. The pasteboard markers in
 /// `corvo_platform::clipboard_is_concealed` cover most password managers,
@@ -147,12 +149,62 @@ fn simple_hash(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// Total bytes the history may hold. The entry cap alone lets a few large
+/// screenshots or long documents grow the file without limit.
+const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// Bytes one entry keeps on disk: its text plus its PNG file size.
+fn entry_bytes(entry: &ClipboardEntry) -> usize {
+    entry.text.len() + entry.image_bytes.unwrap_or(0)
+}
+
+/// Drops expired entries, then the oldest entries until the count and the
+/// byte budget fit. Entries are ordered newest first, so the tail goes
+/// first. Returns the removed entries so callers can delete their images.
+fn prune_entries(
+    entries: &mut Vec<ClipboardEntry>,
+    max_entries: usize,
+    max_bytes: usize,
+    cutoff_secs: u64,
+) -> Vec<ClipboardEntry> {
+    let mut removed = Vec::new();
+    let mut kept = Vec::with_capacity(entries.len());
+    for entry in entries.drain(..) {
+        if entry.timestamp_secs >= cutoff_secs {
+            kept.push(entry);
+        } else {
+            removed.push(entry);
+        }
+    }
+    let mut total_bytes: usize = kept.iter().map(entry_bytes).sum();
+    while kept.len() > max_entries {
+        let Some(entry) = kept.pop() else { break };
+        total_bytes = total_bytes.saturating_sub(entry_bytes(&entry));
+        removed.push(entry);
+    }
+    while total_bytes > max_bytes {
+        let Some(entry) = kept.pop() else { break };
+        total_bytes = total_bytes.saturating_sub(entry_bytes(&entry));
+        removed.push(entry);
+    }
+    *entries = kept;
+    removed
+}
+
+fn remove_entry_files(entries: &[ClipboardEntry]) {
+    for entry in entries {
+        if let Some(path) = entry.image_path() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn load_persisted_entries() -> Vec<ClipboardEntry> {
     let path = history_file_path();
     let Ok(data) = fs::read_to_string(&path) else {
         return Vec::new();
     };
-    let Ok(entries) = serde_json::from_str::<Vec<ClipboardEntry>>(&data) else {
+    let Ok(mut entries) = serde_json::from_str::<Vec<ClipboardEntry>>(&data) else {
         corvo_platform::diagnostics::record_error("clipboard", "history_parse_failed");
         eprintln!("corvo: clipboard_history.json malformed, starting fresh");
         return Vec::new();
@@ -163,24 +215,13 @@ fn load_persisted_entries() -> Vec<ClipboardEntry> {
         .unwrap_or_default()
         .as_secs();
     let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
-
-    let (keep, expired): (Vec<_>, Vec<_>) = entries
-        .into_iter()
-        .partition(|e| e.timestamp_secs >= cutoff);
-    for e in expired {
-        if let Some(path) = e.image_path() {
-            let _ = fs::remove_file(path);
-        }
-    }
-    let mut entries = keep;
-    let max_entries = preferences().max_entries;
-    if entries.len() > max_entries {
-        for e in entries.drain(max_entries..) {
-            if let Some(path) = e.image_path() {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
+    let removed = prune_entries(
+        &mut entries,
+        preferences().max_entries,
+        MAX_TOTAL_BYTES,
+        cutoff,
+    );
+    remove_entry_files(&removed);
     entries
 }
 
@@ -198,23 +239,13 @@ fn save_entries_atomic(entries: &[ClipboardEntry]) -> Result<(), String> {
         .as_secs();
     let cutoff = now.saturating_sub(u64::from(preferences().retention_days) * 86_400);
 
-    let (keep, expired): (Vec<_>, Vec<_>) = entries
-        .iter()
-        .cloned()
-        .partition(|e| e.timestamp_secs >= cutoff);
-    let mut cleanup_images: Vec<_> = expired
-        .iter()
-        .filter_map(ClipboardEntry::image_path)
-        .collect();
-    let mut filtered = keep;
-    let max_entries = preferences().max_entries;
-    if filtered.len() > max_entries {
-        cleanup_images.extend(
-            filtered
-                .drain(max_entries..)
-                .filter_map(|entry| entry.image_path()),
-        );
-    }
+    let mut filtered = entries.to_vec();
+    let removed = prune_entries(
+        &mut filtered,
+        preferences().max_entries,
+        MAX_TOTAL_BYTES,
+        cutoff,
+    );
 
     let json = serde_json::to_string_pretty(&filtered)
         .map_err(|error| format!("Could not encode clipboard history: {error}"))?;
@@ -226,9 +257,7 @@ fn save_entries_atomic(entries: &[ClipboardEntry]) -> Result<(), String> {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("Could not save clipboard history: {error}"));
     }
-    for image_path in cleanup_images {
-        let _ = fs::remove_file(image_path);
-    }
+    remove_entry_files(&removed);
     Ok(())
 }
 
@@ -282,17 +311,11 @@ fn store() -> &'static Arc<RwLock<ClipboardHistory>> {
         let count = corvo_platform::clipboard_change_count();
         history.last_change_count = count;
         if preferences().enabled && !corvo_platform::clipboard_is_concealed() {
-            let source = match corvo_platform::frontmost_app_info() {
-                Some((_, name)) if name != "Corvo" && name != "corvo" => name,
-                // Corvo itself copied (an Action::Copy from the
-                // launcher); no frontmost info at all stays unattributed.
-                Some(_) => "Corvo".into(),
-                None => "Unknown".into(),
-            };
+            let source = resolve_capture_source(None);
 
             // stamp_top: false — a relaunch is not a copy event, so
             // content already sitting at the top keeps its timestamp.
-            if ingest_current_clipboard(&mut history, &source, false) {
+            if ingest_current_clipboard(&mut history, source.as_deref(), false) {
                 let _ = save_entries_atomic(&history.entries);
             }
         }
@@ -425,20 +448,48 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
         return;
     }
 
-    let source = preferred_source
-        .map(|s| s.to_string())
-        .or_else(|| {
-            corvo_platform::frontmost_app_info()
-                .map(|(_, name)| name)
-                .filter(|name| name != "Corvo" && name != "corvo")
-        })
-        .unwrap_or_else(|| "Unknown".into());
+    let Some(source) = resolve_capture_source(preferred_source) else {
+        // The OS can name the frontmost app but could not this time.
+        // Recording anyway would store a secret whenever the copy came
+        // from Keychain Access or a password manager, so skip it.
+        return;
+    };
 
     // stamp_top: true — a pasteboard change is a real copy event (an
     // external copy, or Corvo's own paste/copy writing its content back),
     // so re-copying the top entry refreshes its timestamp.
-    if ingest_current_clipboard(&mut history, &source, true) {
+    if ingest_current_clipboard(&mut history, Some(&source), true) {
         let _ = save_entries_atomic(&history.entries);
+    }
+}
+
+/// The app that owns the copy, or `None` when the platform can attribute
+/// copies but could not name the frontmost app.
+///
+/// `None` is the fail-closed case: without a name the secret-app guard
+/// cannot run, and the pasteboard markers do not cover Keychain Access.
+/// Platforms with no attribution at all report `"Unknown"` instead, so
+/// their history keeps working.
+fn resolve_capture_source(preferred_source: Option<&str>) -> Option<String> {
+    if let Some(name) = preferred_source
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    if let Some((pid, name)) = corvo_platform::frontmost_app_identity() {
+        if pid == std::process::id() as i32 {
+            return Some(CORVO_SOURCE.into());
+        }
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    if corvo_platform::clipboard_source_attribution_available() {
+        None
+    } else {
+        Some(UNKNOWN_SOURCE.into())
     }
 }
 
@@ -450,7 +501,14 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
 /// `stamp_top` decides whether a match already at the top is re-stamped:
 /// polling follows real copy events (true), while process start is not a
 /// copy event (false).
-fn ingest_current_clipboard(history: &mut ClipboardHistory, source: &str, stamp_top: bool) -> bool {
+fn ingest_current_clipboard(
+    history: &mut ClipboardHistory,
+    source: Option<&str>,
+    stamp_top: bool,
+) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
     if is_secret_source_app(source) {
         return false;
     }
@@ -518,13 +576,13 @@ fn merge_text(history: &mut ClipboardHistory, text: String, source: &str, stamp_
 /// (and its image file) once the history exceeds the cap.
 fn insert_new_entry(history: &mut ClipboardHistory, entry: ClipboardEntry) {
     history.entries.insert(0, entry);
-    if history.entries.len() > preferences().max_entries {
-        if let Some(removed) = history.entries.pop() {
-            if let Some(path) = removed.image_path() {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
+    let removed = prune_entries(
+        &mut history.entries,
+        preferences().max_entries,
+        MAX_TOTAL_BYTES,
+        0,
+    );
+    remove_entry_files(&removed);
 }
 
 /// Moves `entries[pos]` to the front and stamps it as just-captured.
@@ -595,23 +653,13 @@ fn prune_history_to_preferences() {
     let prefs = preferences();
     let cutoff = now.saturating_sub(u64::from(prefs.retention_days) * 86_400);
     if let Ok(mut history) = store.write() {
-        let (keep, expired): (Vec<_>, Vec<_>) = history
-            .entries
-            .drain(..)
-            .partition(|entry| entry.timestamp_secs >= cutoff);
-        for entry in expired {
-            if let Some(path) = entry.image_path() {
-                let _ = fs::remove_file(path);
-            }
-        }
-        history.entries = keep;
-        if history.entries.len() > prefs.max_entries {
-            for entry in history.entries.drain(prefs.max_entries..) {
-                if let Some(path) = entry.image_path() {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
+        let removed = prune_entries(
+            &mut history.entries,
+            prefs.max_entries,
+            MAX_TOTAL_BYTES,
+            cutoff,
+        );
+        remove_entry_files(&removed);
         let _ = save_entries_atomic(&history.entries);
     }
 }
@@ -1151,7 +1199,19 @@ mod tests {
     fn capture_skips_secret_source_apps_without_reading_the_clipboard() {
         let mut history = test_history(Vec::new());
 
-        assert!(!ingest_current_clipboard(&mut history, "1Password", true));
+        assert!(!ingest_current_clipboard(
+            &mut history,
+            Some("1Password"),
+            true
+        ));
+        assert!(history.entries.is_empty());
+    }
+
+    #[test]
+    fn capture_skips_an_unresolved_source() {
+        let mut history = test_history(Vec::new());
+
+        assert!(!ingest_current_clipboard(&mut history, None, true));
         assert!(history.entries.is_empty());
     }
 
@@ -1160,6 +1220,44 @@ mod tests {
         let prefs = ClipboardPreferences::default();
         assert_eq!(prefs.retention_days, 90);
         assert!(prefs.max_entries >= 2000);
+    }
+
+    #[test]
+    fn prune_drops_oldest_entries_until_the_byte_budget_fits() {
+        let now = 1_700_000_000;
+        let mut entries = vec![
+            create_entry("a".repeat(40), "A".into()),
+            create_entry("b".repeat(40), "B".into()),
+            create_entry("c".repeat(40), "C".into()),
+        ];
+        for entry in &mut entries {
+            entry.timestamp_secs = now;
+        }
+
+        let removed = prune_entries(&mut entries, 10, 90, now);
+
+        assert_eq!(entries.len(), 2, "the tail entry is dropped");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].text, "c".repeat(40));
+        let total: usize = entries.iter().map(entry_bytes).sum();
+        assert!(total <= 90);
+    }
+
+    #[test]
+    fn prune_drops_expired_entries_before_the_byte_budget() {
+        let now = 1_700_000_000;
+        let mut expired = create_entry("old".into(), "A".into());
+        expired.timestamp_secs = now - 10;
+        let mut fresh = create_entry("new".into(), "B".into());
+        fresh.timestamp_secs = now;
+        let mut entries = vec![fresh, expired];
+
+        let removed = prune_entries(&mut entries, 10, 10_000, now);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "new");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].text, "old");
     }
 
     /// Minimal valid 1×1 PNG; no pasteboard is touched.

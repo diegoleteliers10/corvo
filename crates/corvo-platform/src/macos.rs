@@ -642,6 +642,23 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     Some((pid, name))
 }
 
+/// The pid and display name of the frontmost app, including this process.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let pid = frontmost.processIdentifier();
+    let name = frontmost
+        .localizedName()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            if pid == std::process::id() as i32 {
+                "Corvo".into()
+            } else {
+                "Active App".into()
+            }
+        });
+    Some((pid, name))
+}
+
 /// Returns the CGDirectDisplayID of the display where user interaction is focused
 /// (the display containing the mouse cursor, or primary display as fallback).
 pub fn active_display_id() -> Option<u32> {

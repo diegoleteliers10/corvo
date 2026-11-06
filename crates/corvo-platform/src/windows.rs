@@ -837,6 +837,15 @@ pub fn set_launcher_window_visible(handle: isize, visible: bool) {
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
+    frontmost_app_info_inner(false)
+}
+
+/// The pid and display name of the frontmost app, including this process.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    frontmost_app_info_inner(true)
+}
+
+fn frontmost_app_info_inner(include_self: bool) -> Option<(i32, String)> {
     use std::ffi::c_void;
 
     #[allow(non_snake_case)]
@@ -864,7 +873,7 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     }
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(window, &mut pid) };
-    if pid == 0 || pid == std::process::id() {
+    if pid == 0 || (!include_self && pid == std::process::id()) {
         return None;
     }
     let process = unsafe { OpenProcess(0x1000, 0, pid) };

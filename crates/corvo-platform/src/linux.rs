@@ -850,6 +850,15 @@ fn valid_package_id(value: &str) -> bool {
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
+    frontmost_app_info_inner(false)
+}
+
+/// The pid and display name of the frontmost app, including this process.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    frontmost_app_info_inner(true)
+}
+
+fn frontmost_app_info_inner(include_self: bool) -> Option<(i32, String)> {
     if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
         return None;
     }
@@ -874,7 +883,7 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
         .trim()
         .parse::<i32>()
         .ok()?;
-    if pid == std::process::id() as i32 {
+    if !include_self && pid == std::process::id() as i32 {
         return None;
     }
     let process_name = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
