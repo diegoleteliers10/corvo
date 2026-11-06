@@ -3,6 +3,14 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
+# Unreleased
+
+## Clipboard history
+
+- Clipboard history keeps three months by default instead of 30 days, with an entry cap of 2000 instead of 500. Settings still offer 24 hours, 7 days, 30 days, 3 months, and 1 year.
+- Clipboard history skips copies made in Keychain Access, Apple Passwords, and common password managers. A pasteboard marker already covered most managers; the source app now covers the ones that expose no marker.
+- "Direct paste on Enter" now controls clipboard entries. With it off, Enter copies the entry to the clipboard instead of pasting into the previous app.
+
 # Corvo 0.6.2
 
 This release cuts idle memory, keeps the launcher in one place, and makes the

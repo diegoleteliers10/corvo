@@ -704,9 +704,9 @@ impl Default for ClipboardSettings {
         );
         Self {
             enabled: true,
-            max_entries: 500,
-            retention_days: 30,
-            retention_option: 2,
+            max_entries: 2_000,
+            retention_days: 90,
+            retention_option: 3,
             auto_paste: true,
             save_images: true,
             save_colors: true,

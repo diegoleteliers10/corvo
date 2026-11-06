@@ -22,6 +22,7 @@ remaining work. Native command crates compile into the application.
 | dia | Available (AppleScript) | CDP port 9226 | CDP port 9226 |
 | safari | Available | Unavailable | Unavailable |
 | aside | Available | CDP port 9227 | CDP port 9227 |
+| clipboard-manager | Available | Available | Available |
 
 Media Control reads Windows SMTC through PowerShell and Linux MPRIS
 through zbus. Browser extensions register on every OS but appear only
@@ -201,6 +202,33 @@ icon. The former unified Browser Tabs page is gone.
 Remaining work: Firefox bookmarks (places.sqlite), Arc bookmarks (its
 own store), history on every platform, tab closure, and Firefox live
 tabs on Windows and Linux (Firefox removed its CDP endpoint).
+
+## 9. clipboard-manager — P0
+
+- Keep local history for three months by default: `retention_days` 90,
+  `retention_option` 3, and `max_entries` 2000. Settings offer 24 hours,
+  7 days, 30 days, 3 months, and 1 year.
+- Record plain text and PNG images. Promote content that already has an
+  entry instead of recording it twice, so Corvo's own copy and paste
+  refresh the existing row.
+- Watch the clipboard every 400 ms from a background task. Persist history
+  to `data_dir()/clipboard_history.json` through a temporary file and an
+  atomic rename. Store images under `data_dir()/clipboard_images/`.
+- Search history on the Clipboard page. Filter chips cover all, text,
+  links, images, and JSON. Rank by match quality and show the source app.
+- Paste back with Enter: Corvo restores the previous app, writes the entry
+  to the clipboard, and posts the paste keystroke. With `auto_paste` off,
+  the entry goes to the clipboard only.
+- Copy, delete, and clear actions. Delete and clear remove the image file.
+- Never record secrets. Skip content with a password-manager pasteboard
+  marker, and skip copies whose source app holds secrets: Keychain Access,
+  Passwords, 1Password, Bitwarden, KeePassXC, LastPass, Dashlane, Enpass,
+  NordPass, Proton Pass, RoboForm, Seahorse, and GNOME Keyring.
+
+Remaining work: Linux cannot enumerate pasteboard formats, so
+`x-kde-passwordManagerHint` is not detected there and only the source-app
+guard applies. File-drag clipboard types, per-entry pinning, and a size cap
+per text entry remain planned.
 
 ## Shared changes
 
