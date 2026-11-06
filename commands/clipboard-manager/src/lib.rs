@@ -13,7 +13,46 @@ use corvo_core::{
 
 const MAX_ENTRY_CHARS: usize = 100_000;
 #[cfg(test)]
-const RETENTION_SECS: u64 = 30 * 86_400;
+const RETENTION_SECS: u64 = 90 * 86_400;
+
+/// Three months of history is the product target. The entry cap has to be
+/// high enough that heavy use does not silently truncate the retention
+/// window to a few days.
+const DEFAULT_MAX_ENTRIES: usize = 2_000;
+const DEFAULT_RETENTION_DAYS: u32 = 90;
+
+/// App names that handle secrets. The pasteboard markers in
+/// `corvo_platform::clipboard_is_concealed` cover most password managers,
+/// but Keychain Access and Apple's Passwords app expose no marker, so the
+/// frontmost app is the second guard.
+const SECRET_APP_FRAGMENTS: [&str; 15] = [
+    "keychain",
+    "passwords",
+    "1password",
+    "bitwarden",
+    "keepass",
+    "lastpass",
+    "dashlane",
+    "enpass",
+    "nordpass",
+    "proton pass",
+    "protonpass",
+    "roboform",
+    "seahorse",
+    "gnome-keyring",
+    "keeper password",
+];
+
+/// True when the app that owns the copy holds secrets. Matching is
+/// case-insensitive and substring-based: the OS reports names such as
+/// "1Password 8" or a Linux process name such as "keepassxc".
+fn is_secret_source_app(source_app: &str) -> bool {
+    let name = source_app.trim().to_lowercase();
+    !name.is_empty()
+        && SECRET_APP_FRAGMENTS
+            .iter()
+            .any(|fragment| name.contains(fragment))
+}
 
 #[derive(Clone, Copy)]
 pub struct ClipboardPreferences {
@@ -28,8 +67,8 @@ impl Default for ClipboardPreferences {
     fn default() -> Self {
         Self {
             enabled: true,
-            retention_days: 30,
-            max_entries: 500,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            max_entries: DEFAULT_MAX_ENTRIES,
             save_images: true,
             save_colors: true,
         }
@@ -412,6 +451,9 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
 /// polling follows real copy events (true), while process start is not a
 /// copy event (false).
 fn ingest_current_clipboard(history: &mut ClipboardHistory, source: &str, stamp_top: bool) -> bool {
+    if is_secret_source_app(source) {
+        return false;
+    }
     if let Some(png_bytes) = current_clipboard_image() {
         return merge_image(history, png_bytes, source, stamp_top);
     }
@@ -1050,23 +1092,74 @@ mod tests {
     }
 
     #[test]
-    fn retention_filters_entries_older_than_30_days() {
+    fn retention_filters_entries_older_than_three_months() {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
         let mut fresh = create_entry("Fresh Entry".into(), "TestApp".into());
-        fresh.timestamp_secs = now - 5 * 86_400; // 5 days old
+        fresh.timestamp_secs = now - 60 * 86_400; // 60 days old
 
         let mut expired = create_entry("Expired Entry".into(), "TestApp".into());
-        expired.timestamp_secs = now - 35 * 86_400; // 35 days old
+        expired.timestamp_secs = now - 95 * 86_400; // 95 days old
 
         let cutoff = now.saturating_sub(RETENTION_SECS);
         let mut entries = vec![fresh, expired];
         entries.retain(|e| e.timestamp_secs >= cutoff);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "Fresh Entry");
+    }
+
+    #[test]
+    fn secret_source_apps_are_excluded() {
+        for name in [
+            "Keychain Access",
+            "Passwords",
+            "1Password",
+            "1Password 8",
+            "Bitwarden",
+            "KeePassXC",
+            "keepassxc",
+            "LastPass",
+            "Dashlane",
+            "Enpass",
+            "NordPass",
+            "Proton Pass",
+            "RoboForm",
+            "Seahorse",
+            "gnome-keyring",
+            "Keeper Password Manager",
+        ] {
+            assert!(is_secret_source_app(name), "{name} must be excluded");
+        }
+
+        for name in [
+            "Safari",
+            "Terminal",
+            "Visual Studio Code",
+            "Notes",
+            "Corvo",
+            "Unknown",
+            "",
+        ] {
+            assert!(!is_secret_source_app(name), "{name} must be recorded");
+        }
+    }
+
+    #[test]
+    fn capture_skips_secret_source_apps_without_reading_the_clipboard() {
+        let mut history = test_history(Vec::new());
+
+        assert!(!ingest_current_clipboard(&mut history, "1Password", true));
+        assert!(history.entries.is_empty());
+    }
+
+    #[test]
+    fn default_retention_is_three_months() {
+        let prefs = ClipboardPreferences::default();
+        assert_eq!(prefs.retention_days, 90);
+        assert!(prefs.max_entries >= 2000);
     }
 
     /// Minimal valid 1×1 PNG; no pasteboard is touched.
@@ -1125,7 +1218,12 @@ mod tests {
     fn merge_text_records_new_content_at_top() {
         let mut history = test_history(vec![create_entry("top".into(), "A".into())]);
 
-        assert!(merge_text(&mut history, "fresh copy".into(), "Safari", true));
+        assert!(merge_text(
+            &mut history,
+            "fresh copy".into(),
+            "Safari",
+            true
+        ));
 
         assert_eq!(history.entries.len(), 2);
         assert_eq!(history.entries[0].text, "fresh copy");

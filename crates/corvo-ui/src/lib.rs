@@ -7221,10 +7221,17 @@ impl Launcher {
                     .selected_result()
                     .map(|result| result.id.clone())
                     .unwrap_or_default();
-                let previous_pid = self
-                    .previous_app
-                    .take()
-                    .or_else(corvo_platform::frontmost_app_pid);
+                // Clipboard entries honour "Direct paste on Enter"; other
+                // commands always paste into the previous app.
+                let direct_paste = !result_id.starts_with("clipboard-manager:entry:")
+                    || self.store.clipboard_auto_paste();
+                let previous_pid = direct_paste
+                    .then(|| {
+                        self.previous_app
+                            .take()
+                            .or_else(corvo_platform::frontmost_app_pid)
+                    })
+                    .flatten();
                 corvo_platform::forget_launcher_panel();
                 window.remove_window();
                 if let Some(pid) = previous_pid {
@@ -7257,10 +7264,19 @@ impl Launcher {
                 show_action_toast(notice, cx);
             }
             Ok(Action::PasteImage(path)) => {
-                let previous_pid = self
-                    .previous_app
-                    .take()
-                    .or_else(corvo_platform::frontmost_app_pid);
+                let result_id = self
+                    .selected_result()
+                    .map(|result| result.id.clone())
+                    .unwrap_or_default();
+                let direct_paste = !result_id.starts_with("clipboard-manager:entry:")
+                    || self.store.clipboard_auto_paste();
+                let previous_pid = direct_paste
+                    .then(|| {
+                        self.previous_app
+                            .take()
+                            .or_else(corvo_platform::frontmost_app_pid)
+                    })
+                    .flatten();
                 corvo_platform::forget_launcher_panel();
                 window.remove_window();
                 cx.spawn(async move |_this, cx| {
