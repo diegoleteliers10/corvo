@@ -13,6 +13,11 @@ are in RELEASE_NOTES.md.
 - History is bounded by bytes as well as entries: 64 MB total, with the oldest entries removed first.
 - "Direct paste on Enter" now controls clipboard entries. With it off, Enter copies the entry to the clipboard instead of pasting into the previous app.
 
+## Define Word and calculator history
+
+- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition, Cmd+Enter opens Dictionary, and a single word also gets a low-ranked definition row as a fallback.
+- The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again. `Clear Calculator History` empties the list.
+
 # Corvo 0.6.2
 
 This release cuts idle memory, keeps the launcher in one place, and makes the

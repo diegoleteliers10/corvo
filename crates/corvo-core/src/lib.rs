@@ -123,6 +123,8 @@ pub enum NativeAction {
     MediaPlayPause,
     /// Safely eject every removable drive.
     EjectRemovableDisks,
+    /// Open the system Dictionary application.
+    OpenDictionary,
 }
 
 /// What the launcher does after the user picks a result.

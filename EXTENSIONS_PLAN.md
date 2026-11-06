@@ -238,6 +238,37 @@ O(history) per copy; an append-only store remains planned. File-drag
 clipboard types, per-entry pinning, and a size cap per text entry also
 remain planned.
 
+## 10. define-word and calculator history — P0.2
+
+### define-word
+
+- `define <word>` looks the word up in the local macOS dictionaries
+  through CoreServices (`DCSCopyTextDefinition`) and shows the word, its
+  part of speech, and a one-line preview.
+- A single plain word also returns a low-ranked definition row, so the
+  dictionary works as a fallback. That row disappears with the command
+  when Settings hides it.
+- Enter copies the definition. Cmd+Enter opens the Dictionary app through
+  `NativeAction::OpenDictionary`. Alt+Enter pushes the full definition as
+  a Detail page.
+- A word the dictionaries do not know shows "No definition found".
+  Windows and Linux report that the system dictionary is macOS only
+  instead of failing silently.
+
+### calculator history
+
+- Every successful evaluation is stored with its expression and result,
+  newest first, capped at 200 entries in
+  `data_dir()/calculator_history.json`.
+- The same expression and result pair is not stored twice in a row, so a
+  held query does not flood the list.
+- `calculator` lists the history, with Copy Result, Paste Result, Copy
+  Expression, and Run Again. `Clear Calculator History` empties the file.
+- Expressions keep working as before: `2+2` and `calculator 2+2` both
+  evaluate.
+- The history list obeys the `calculator-history` row in Settings; hiding
+  that command removes the list.
+
 ## Shared changes
 
 - Add a shared placeholder expander in corvo-ext (`corvo-ext::placeholders`):

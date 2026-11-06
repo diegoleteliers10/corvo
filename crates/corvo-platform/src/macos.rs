@@ -17,7 +17,9 @@ use objc2_foundation::{
     MainThreadMarker, NSData, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
-use super::{AppEntry, PlatformError, PlatformOps, PlatformResult, WindowHandle};
+use super::{
+    AppEntry, DictionaryDefinition, PlatformError, PlatformOps, PlatformResult, WindowHandle,
+};
 
 thread_local! {
     static LAUNCHER_PANEL: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>> = const { RefCell::new(None) };
@@ -312,6 +314,164 @@ pub fn clipboard_is_concealed() -> bool {
         }
     }
     false
+}
+
+type CFStringRef = *const std::ffi::c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CFRange {
+    location: isize,
+    length: isize,
+}
+
+const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn DCSCopyTextDefinition(
+        dictionary: CFStringRef,
+        text: CFStringRef,
+        range: CFRange,
+    ) -> CFStringRef;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFStringCreateWithCharacters(
+        allocator: *const std::ffi::c_void,
+        characters: *const u16,
+        length: isize,
+    ) -> CFStringRef;
+    fn CFStringGetLength(text: CFStringRef) -> isize;
+    fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
+    fn CFStringGetCString(
+        text: CFStringRef,
+        buffer: *mut i8,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> u8;
+}
+
+/// Looks a word up in the local dictionaries through CoreServices.
+pub fn dictionary_definitions(word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    let word = word.trim();
+    if word.is_empty() {
+        return Ok(Vec::new());
+    }
+    let utf16: Vec<u16> = word.encode_utf16().collect();
+    // Safety: every pointer comes from a CoreFoundation call and is
+    // released on the same path.
+    let raw = unsafe {
+        let cf_word =
+            CFStringCreateWithCharacters(std::ptr::null(), utf16.as_ptr(), utf16.len() as isize);
+        if cf_word.is_null() {
+            None
+        } else {
+            let range = CFRange {
+                location: 0,
+                length: CFStringGetLength(cf_word),
+            };
+            // A null dictionary asks for the active dictionaries.
+            let definition = DCSCopyTextDefinition(std::ptr::null(), cf_word, range);
+            CFRelease(cf_word);
+            if definition.is_null() {
+                None
+            } else {
+                let text = cf_string_to_string(definition);
+                CFRelease(definition);
+                text
+            }
+        }
+    };
+    Ok(parse_definitions(raw.as_deref().unwrap_or_default()))
+}
+
+/// Safety: `value` must be a valid CFString.
+unsafe fn cf_string_to_string(value: CFStringRef) -> Option<String> {
+    let length = CFStringGetLength(value);
+    if length <= 0 {
+        return None;
+    }
+    let max = CFStringGetMaximumSizeForEncoding(length, CF_STRING_ENCODING_UTF8);
+    if max <= 0 {
+        return None;
+    }
+    let mut buffer = vec![0i8; max as usize + 1];
+    if CFStringGetCString(
+        value,
+        buffer.as_mut_ptr(),
+        buffer.len() as isize,
+        CF_STRING_ENCODING_UTF8,
+    ) == 0
+    {
+        return None;
+    }
+    let bytes: Vec<u8> = buffer
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    String::from_utf8(bytes).ok()
+}
+
+/// Splits dictionary text into senses. A line that is only a part of
+/// speech starts a new sense; every other line continues the current one.
+fn parse_definitions(raw: &str) -> Vec<DictionaryDefinition> {
+    const PARTS_OF_SPEECH: [&str; 12] = [
+        "noun",
+        "verb",
+        "adjective",
+        "adverb",
+        "pronoun",
+        "preposition",
+        "conjunction",
+        "interjection",
+        "determiner",
+        "numeral",
+        "article",
+        "abbreviation",
+    ];
+    let mut senses: Vec<DictionaryDefinition> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.trim_end_matches(':').to_ascii_lowercase();
+        if PARTS_OF_SPEECH.contains(&lower.as_str()) {
+            senses.push(DictionaryDefinition {
+                part_of_speech: Some(lower),
+                text: String::new(),
+            });
+            continue;
+        }
+        match senses.last_mut() {
+            Some(sense) if !sense.text.is_empty() => {
+                sense.text.push(' ');
+                sense.text.push_str(trimmed);
+            }
+            Some(sense) => sense.text.push_str(trimmed),
+            None => senses.push(DictionaryDefinition {
+                part_of_speech: None,
+                text: trimmed.to_string(),
+            }),
+        }
+    }
+    senses.retain(|sense| !sense.text.trim().is_empty());
+    for sense in &mut senses {
+        sense.text = sense.text.trim().to_string();
+    }
+    senses
+}
+
+/// Opens the Dictionary app.
+pub fn open_dictionary() -> PlatformResult<()> {
+    std::process::Command::new("open")
+        .args(["-a", "Dictionary"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| PlatformError::Os(format!("failed to open Dictionary: {error}")))
 }
 
 /// Lists installed applications within custom search scopes.
@@ -2707,6 +2867,30 @@ pub fn focus_browser_tab(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_definitions_splits_senses_on_a_part_of_speech_line() {
+        let raw = "noun\na solid piece of hard material.\nverb\ncome together.";
+        let senses = super::parse_definitions(raw);
+        assert_eq!(senses.len(), 2);
+        assert_eq!(senses[0].part_of_speech.as_deref(), Some("noun"));
+        assert_eq!(senses[0].text, "a solid piece of hard material.");
+        assert_eq!(senses[1].part_of_speech.as_deref(), Some("verb"));
+        assert_eq!(senses[1].text, "come together.");
+    }
+
+    #[test]
+    fn parse_definitions_keeps_text_without_a_part_of_speech() {
+        let senses = super::parse_definitions("a unit of language.\nwith meaning.");
+        assert_eq!(senses.len(), 1);
+        assert_eq!(senses[0].part_of_speech, None);
+        assert_eq!(senses[0].text, "a unit of language. with meaning.");
+    }
+
+    #[test]
+    fn parse_definitions_ignores_blank_text() {
+        assert!(super::parse_definitions("   \n\n").is_empty());
+    }
+
     #[test]
     fn copy_text_roundtrips_unicode() {
         // A uniquely named pasteboard keeps the roundtrip off the real
