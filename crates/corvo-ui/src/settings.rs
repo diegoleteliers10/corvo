@@ -174,6 +174,10 @@ pub struct SettingsView {
     save_error: Option<String>,
     content_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
+    /// Decoded images this window draws. GPUI's process-wide asset cache
+    /// never evicts, so the applications list would keep every icon
+    /// resident after the window closed.
+    image_cache: gpui::Entity<gpui::RetainAllImageCache>,
     pub update_status: UpdateStatusUI,
     cancel_update_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -255,6 +259,7 @@ impl SettingsView {
             save_error: None,
             content_scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
+            image_cache: gpui::RetainAllImageCache::new(cx),
             update_status: UpdateStatusUI::Idle,
             cancel_update_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -8809,6 +8814,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .image_cache(self.image_cache.clone())
             .size_full()
             .key_context("SettingsView")
             .track_focus(&self.focus_handle)

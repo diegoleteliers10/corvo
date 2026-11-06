@@ -406,21 +406,26 @@ fn bundle_app_name(path: &Path) -> Option<String> {
     }
 }
 
-/// Extracts a high-definition 256x256 PNG icon directly via AppKit.
+/// Extracts a 128x128 PNG icon directly via AppKit.
+///
+/// 128 pixels covers the largest slot the launcher draws (44 points at
+/// 2x) and keeps the decoded RGBA copy at 64 KB instead of 256 KB. The
+/// launcher decodes every visible app icon, so the smaller size saves
+/// tens of megabytes.
 /// This queries LaunchServices via NSWorkspace, which has direct access to
 /// the system master icon catalog (including system apps where .icns is only a 16px stub).
 fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
     let ns_path = NSString::from_str(bundle.to_str()?);
     let ws = NSWorkspace::sharedWorkspace();
     let image = ws.iconForFile(&ns_path);
-    image.setSize(NSSize::new(256.0, 256.0));
+    image.setSize(NSSize::new(128.0, 128.0));
 
     unsafe {
         let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
-            256,
-            256,
+            128,
+            128,
             8,
             4,
             true,
@@ -435,7 +440,7 @@ fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
         NSGraphicsContext::setCurrentContext(Some(&ctx));
         ctx.setImageInterpolation(NSImageInterpolation::High);
 
-        let target_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(256.0, 256.0));
+        let target_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(128.0, 128.0));
         image.drawInRect_fromRect_operation_fraction(
             target_rect,
             target_rect,
@@ -455,11 +460,11 @@ fn extract_app_icon_appkit(bundle: &Path, png_path: &Path) -> Option<()> {
     Some(())
 }
 
-/// Renders a bundle icon to a validated, atomically written 256x256 PNG.
+/// Renders a bundle icon to a validated, atomically written 128x128 PNG.
 /// Read app bundle assets before querying LaunchServices for newly installed apps.
 pub(crate) fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
     let stem = bundle_app_name(bundle)?;
-    let cache_dir = std::env::temp_dir().join("corvo-icons-v4");
+    let cache_dir = std::env::temp_dir().join("corvo-icons-v5");
     let png = cache_dir.join(format!("{}.png", app_icon_cache_key(bundle, &stem)));
     if is_valid_png(&png) {
         return Some(png);
@@ -489,7 +494,7 @@ pub(crate) fn extract_app_icon(bundle: &Path) -> Option<PathBuf> {
     let resources = bundle.join("Contents/Resources");
     if let Some(icns) = icns_in(bundle, &resources, &stem) {
         let res = std::process::Command::new("/usr/bin/sips")
-            .args(["-Z", "256", "-s", "format", "png"])
+            .args(["-Z", "128", "-s", "format", "png"])
             .arg(&icns)
             .arg("--out")
             .arg(&temporary_png)
@@ -787,6 +792,11 @@ pub fn make_panel_instant(width: f64, height: f64) {
         "corvo_launcher_panel",
     ));
     panel.setLevel(101); // NSPopUpWindowLevel
+    // The launcher stays where it opens. `is_movable: false` already
+    // covers the GPUI window options; this locks the native panel too, so
+    // AppKit cannot drag it from the invisible titlebar strip.
+    panel.setMovable(false);
+    panel.setMovableByWindowBackground(false);
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
@@ -2730,11 +2740,11 @@ mod tests {
             assert!(icon_path.exists());
             let bytes = std::fs::read(&icon_path).expect("reads icon bytes");
             let dims = super::parse_png_dimensions(&bytes).expect("parses dimensions");
-            assert_eq!(dims, (256, 256));
-            // High-res icon should be richly detailed (> 15KB), not a 1.8KB blurry stub
+            assert_eq!(dims, (128, 128));
+            // The icon should be richly detailed (> 6KB), not a blurry stub
             assert!(
-                bytes.len() > 15_000,
-                "expected >15KB high res icon, got {}",
+                bytes.len() > 6_000,
+                "expected >6KB detailed icon, got {}",
                 bytes.len()
             );
         }
