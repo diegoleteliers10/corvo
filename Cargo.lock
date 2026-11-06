@@ -1142,6 +1142,7 @@ dependencies = [
  "corvo-config",
  "corvo-core",
  "corvo-countdown",
+ "corvo-define-word",
  "corvo-emoji-picker",
  "corvo-file-search",
  "corvo-kill-process",
@@ -1211,6 +1212,8 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "corvo-core",
+ "directories",
+ "serde",
  "serde_json",
  "smol",
  "ureq",
@@ -1260,6 +1263,16 @@ dependencies = [
  "corvo-ext",
  "serde",
  "smol",
+]
+
+[[package]]
+name = "corvo-define-word"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "corvo-core",
+ "corvo-ext",
+ "corvo-platform",
 ]
 
 [[package]]

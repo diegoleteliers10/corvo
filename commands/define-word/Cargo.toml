@@ -1,0 +1,11 @@
+[package]
+name = "corvo-define-word"
+version = "0.6.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+corvo-core = { workspace = true }
+corvo-ext = { workspace = true }
+corvo-platform = { workspace = true }

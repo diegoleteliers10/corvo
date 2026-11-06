@@ -12,7 +12,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use sha2::{Digest, Sha256};
 
 use super::{
-    AppEntry, AppFileEntry, AppFileScan, PlatformError, PlatformOps, PlatformResult, WindowHandle,
+    AppEntry, AppFileEntry, AppFileScan, DictionaryDefinition, PlatformError, PlatformOps,
+    PlatformResult, WindowHandle,
 };
 
 #[path = "windows_icons.rs"]
@@ -121,6 +122,20 @@ pub fn set_launcher_window_region(handle: isize, radius: f32) {
         crate::diagnostics::record_error("window", "region_apply_failed");
         unsafe { DeleteObject(region) };
     }
+}
+
+/// The system dictionary is macOS only, so this reports the limit instead
+/// of guessing at a definition.
+pub fn dictionary_definitions(_word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    Err(PlatformError::Unsupported(
+        "the system dictionary is macOS only".into(),
+    ))
+}
+
+pub fn open_dictionary() -> PlatformResult<()> {
+    Err(PlatformError::Unsupported(
+        "the Dictionary app is macOS only".into(),
+    ))
 }
 
 /// Checks whether the clipboard carries a password manager's exclusion

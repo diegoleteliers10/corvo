@@ -61,6 +61,7 @@ members = [
     "commands/media-control",
     "commands/browser-tabs",
     "commands/builtin-commands",
+    "commands/define-word",
 ]
 
 [workspace.dependencies]
@@ -101,6 +102,7 @@ corvo-pomodoro = { path = "commands/pomodoro" }
 corvo-weather = { path = "commands/weather" }
 corvo-notes = { path = "commands/notes" }
 corvo-builtin-commands = { path = "commands/builtin-commands" }
+corvo-define-word = { path = "commands/define-word" }
 corvo-media-control = { path = "commands/media-control" }
 corvo-browser-tabs = { path = "commands/browser-tabs" }
 corvo-quicklinks = { path = "commands/quicklinks" }

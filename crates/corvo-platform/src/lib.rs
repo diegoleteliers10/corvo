@@ -179,6 +179,45 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     return None;
 }
 
+/// One definition of a word, as the system dictionary returns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DictionaryDefinition {
+    /// The part of speech, when the entry names one.
+    pub part_of_speech: Option<String>,
+    pub text: String,
+}
+
+/// Looks a word up in the system dictionaries.
+///
+/// macOS reads its local dictionaries. Windows and Linux have no system
+/// dictionary API here, so they return `Unsupported`.
+pub fn dictionary_definitions(word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    #[cfg(target_os = "macos")]
+    return macos::dictionary_definitions(word);
+    #[cfg(target_os = "windows")]
+    return windows::dictionary_definitions(word);
+    #[cfg(target_os = "linux")]
+    return linux::dictionary_definitions(word);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err(PlatformError::Unsupported(
+        "the system dictionary is unavailable on this platform".into(),
+    ));
+}
+
+/// Opens the macOS Dictionary app.
+pub fn open_dictionary() -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::open_dictionary();
+    #[cfg(target_os = "windows")]
+    return windows::open_dictionary();
+    #[cfg(target_os = "linux")]
+    return linux::open_dictionary();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err(PlatformError::Unsupported(
+        "the Dictionary app is macOS only".into(),
+    ));
+}
+
 /// Reads the current string from the system clipboard.
 pub fn read_clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]
@@ -614,6 +653,9 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 /// implementation reports `Unsupported` rather than doing nothing, so a
 /// missing capability is visible instead of silent.
 pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<String> {
+    if matches!(action, corvo_core::NativeAction::OpenDictionary) {
+        return open_dictionary().map(|()| "Dictionary".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         use corvo_core::NativeAction as A;
@@ -630,6 +672,7 @@ pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<Str
             A::MediaPreviousTrack => windows::media_previous_track().map(|()| String::new()),
             A::MediaPlayPause => windows::media_play_pause().map(|()| String::new()),
             A::EjectRemovableDisks => windows::eject_removable_disks(),
+            A::OpenDictionary => windows::open_dictionary().map(|()| String::new()),
         };
     }
     #[cfg(not(target_os = "windows"))]

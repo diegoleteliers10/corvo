@@ -12,7 +12,8 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use super::{
-    AppEntry, AppFileEntry, AppFileScan, PlatformError, PlatformOps, PlatformResult, WindowHandle,
+    AppEntry, AppFileEntry, AppFileScan, DictionaryDefinition, PlatformError, PlatformOps,
+    PlatformResult, WindowHandle,
 };
 
 pub struct LinuxPlatform;
@@ -879,6 +880,20 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     }
     let process_name = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some((pid, process_name.trim().to_owned()))
+}
+
+/// The system dictionary is macOS only, so this reports the limit instead
+/// of guessing at a definition.
+pub fn dictionary_definitions(_word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    Err(PlatformError::Unsupported(
+        "the system dictionary is macOS only".into(),
+    ))
+}
+
+pub fn open_dictionary() -> PlatformResult<()> {
+    Err(PlatformError::Unsupported(
+        "the Dictionary app is macOS only".into(),
+    ))
 }
 
 pub fn activate_app(pid: i32) -> PlatformResult<()> {
