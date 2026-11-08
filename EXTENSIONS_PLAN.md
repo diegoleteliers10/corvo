@@ -245,9 +245,11 @@ remain planned.
 - `define <word>` looks the word up in the local macOS dictionaries
   through CoreServices (`DCSCopyTextDefinition`) and shows the word, its
   part of speech, and a one-line preview.
-- A single plain word also returns a low-ranked definition row, so the
-  dictionary works as a fallback. That row disappears with the command
-  when Settings hides it.
+- A single plain word can still return a low-ranked definition row, but only
+  when that word was already defined in this session: the row comes from a
+  bounded cache of the last 8 definitions. Ordinary launcher typing never
+  calls the system dictionary, because the launcher searches on every
+  keystroke. That row disappears with the command when Settings hides it.
 - Enter copies the definition. Cmd+Enter opens the Dictionary app through
   `NativeAction::OpenDictionary`. Alt+Enter pushes the full definition as
   a Detail page.
