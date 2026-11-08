@@ -1,8 +1,9 @@
 //! Define a word with the system dictionary, and open Dictionary.
 //!
-//! `define word` is the explicit form. A single word with no other match
-//! also returns a low-ranked definition row, the way a dictionary fallback
-//! works, and that row disappears when the command is hidden in Settings.
+//! `define word` is the explicit form and the only one that asks the system
+//! dictionary. A bare word can still return a low-ranked definition row, but
+//! only when that word was already defined this session: ordinary launcher
+//! typing must not run a system lookup per keystroke.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -14,6 +15,9 @@ use corvo_platform::DictionaryDefinition;
 
 const PREFIX: &str = "define ";
 const MAX_FALLBACK_WORD_CHARS: usize = 40;
+/// Definitions kept for the implicit fallback. Small on purpose: this only
+/// avoids repeating a lookup the user already asked for.
+const MAX_CACHED_WORDS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Lookup {
@@ -25,24 +29,52 @@ enum Lookup {
     Unsupported,
 }
 
-fn cache() -> &'static Mutex<Option<(String, Lookup)>> {
-    static CACHE: OnceLock<Mutex<Option<(String, Lookup)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+fn cache() -> &'static Mutex<Vec<(String, Lookup)>> {
+    static CACHE: OnceLock<Mutex<Vec<(String, Lookup)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Looks `word` up and keeps the last answer, because search and execute
-/// both need it and the dictionary call is not free.
-fn lookup(word: &str) -> Option<Lookup> {
-    let key = word.trim().to_lowercase();
+fn normalize(word: &str) -> String {
+    word.trim().to_lowercase()
+}
+
+/// A word the user already defined. Never touches the system dictionary.
+fn cached(word: &str) -> Option<Lookup> {
+    let key = normalize(word);
     if key.is_empty() {
         return None;
     }
-    if let Ok(cached) = cache().lock() {
-        if let Some((cached_word, result)) = cached.as_ref() {
-            if cached_word == &key {
-                return Some(result.clone());
-            }
-        }
+    let mut entries = cache().lock().ok()?;
+    let position = entries.iter().position(|(entry, _)| entry == &key)?;
+    let entry = entries.remove(position);
+    let result = entry.1.clone();
+    entries.push(entry);
+    Some(result)
+}
+
+fn remember(word: &str, result: &Lookup) {
+    let key = normalize(word);
+    if key.is_empty() {
+        return;
+    }
+    let Ok(mut entries) = cache().lock() else {
+        return;
+    };
+    entries.retain(|(entry, _)| entry != &key);
+    entries.push((key, result.clone()));
+    if entries.len() > MAX_CACHED_WORDS {
+        entries.remove(0);
+    }
+}
+
+/// Ask the system dictionary. Only the explicit `define ` path calls this.
+fn lookup(word: &str) -> Option<Lookup> {
+    let key = normalize(word);
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(result) = cached(&key) {
+        return Some(result);
     }
 
     let result = match corvo_platform::dictionary_definitions(&key) {
@@ -56,10 +88,7 @@ fn lookup(word: &str) -> Option<Lookup> {
         Ok(_) => Lookup::Missing,
         Err(_) => Lookup::Unsupported,
     };
-
-    if let Ok(mut cached) = cache().lock() {
-        *cached = Some((key, result.clone()));
-    }
+    remember(&key, &result);
     Some(result)
 }
 
@@ -145,6 +174,59 @@ fn notice_row(word: &str, title: &str, subtitle: &str) -> SearchResult {
     }
 }
 
+/// Rows for one query. `lookup_word` is the system call, injected so a test can
+/// prove when it runs and when it must not.
+///
+/// Only an explicit `define ` query calls it. A bare word reads the session
+/// cache and nothing else: the launcher searches on every keystroke, and a
+/// system dictionary query per keystroke is exactly what this command must not
+/// do while the user is typing an ordinary search.
+fn search_with<F>(query: &str, mut lookup_word: F) -> Vec<SearchResult>
+where
+    F: FnMut(&str) -> Option<Lookup>,
+{
+    let Some((word, explicit)) = requested_word(query) else {
+        return Vec::new();
+    };
+    if word.is_empty() {
+        return if explicit {
+            vec![notice_row(
+                "hint",
+                "Type a word to define",
+                "For example: define stone",
+            )]
+        } else {
+            Vec::new()
+        };
+    }
+    if !explicit && !query.trim().eq_ignore_ascii_case(&word) {
+        return Vec::new();
+    }
+
+    let found = if explicit {
+        // The cache answers first so a repeated explicit query, and the row
+        // that follows it, never repeat the system call.
+        cached(&word).or_else(|| lookup_word(&word))
+    } else {
+        cached(&word)
+    };
+
+    match found {
+        Some(Lookup::Sense { word, sense }) => vec![sense_row(&word, &sense, explicit)],
+        Some(Lookup::Missing) if explicit => vec![notice_row(
+            &word,
+            &format!("No definition found for {word}"),
+            "The system dictionaries have no entry for this word.",
+        )],
+        Some(Lookup::Unsupported) if explicit => vec![notice_row(
+            &word,
+            "Dictionary is unavailable",
+            "The system dictionary is available on macOS only.",
+        )],
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Default)]
 pub struct DefineWordCommand;
 
@@ -169,38 +251,7 @@ impl Command for DefineWordCommand {
     }
 
     async fn search(&self, query: &str, _ctx: &SearchContext) -> Vec<SearchResult> {
-        let Some((word, explicit)) = requested_word(query) else {
-            return Vec::new();
-        };
-        if word.is_empty() {
-            return if explicit {
-                vec![notice_row(
-                    "hint",
-                    "Type a word to define",
-                    "For example: define stone",
-                )]
-            } else {
-                Vec::new()
-            };
-        }
-        if !explicit && !query.trim().eq_ignore_ascii_case(&word) {
-            return Vec::new();
-        }
-
-        match lookup(&word) {
-            Some(Lookup::Sense { word, sense }) => vec![sense_row(&word, &sense, explicit)],
-            Some(Lookup::Missing) if explicit => vec![notice_row(
-                &word,
-                &format!("No definition found for {word}"),
-                "The system dictionaries have no entry for this word.",
-            )],
-            Some(Lookup::Unsupported) if explicit => vec![notice_row(
-                &word,
-                "Dictionary is unavailable",
-                "The system dictionary is available on macOS only.",
-            )],
-            _ => Vec::new(),
-        }
+        search_with(query, lookup)
     }
 
     async fn execute(
@@ -309,6 +360,144 @@ mod tests {
         assert_eq!(requested_word("stone soup"), None);
         assert_eq!(requested_word("2+2"), None);
         assert_eq!(requested_word("ab"), None);
+    }
+
+    /// Serializes the cases: the definition cache is process-wide.
+    fn isolate() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        let guard = LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(mut entries) = cache().lock() {
+            entries.clear();
+        }
+        guard
+    }
+
+    fn sense(text: &str) -> Lookup {
+        Lookup::Sense {
+            word: "stone".into(),
+            sense: DictionaryDefinition {
+                part_of_speech: Some("noun".into()),
+                text: text.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn ordinary_search_never_calls_the_dictionary() {
+        let _guard = isolate();
+        let mut calls = 0;
+        let results = search_with("stone", |_| {
+            calls += 1;
+            None
+        });
+        assert_eq!(calls, 0, "an ordinary keystroke must not query the system dictionary");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn every_keystroke_of_an_ordinary_word_stays_off_the_dictionary() {
+        let _guard = isolate();
+        let mut calls = 0;
+        for query in ["sto", "ston", "stone", "stonex"] {
+            search_with(query, |_| {
+                calls += 1;
+                None
+            });
+        }
+        assert_eq!(calls, 0, "typing a word must not accumulate lookups");
+    }
+
+    #[test]
+    fn explicit_query_asks_the_dictionary_once() {
+        let _guard = isolate();
+        let mut calls = 0;
+        let mut seen = None;
+        let results = search_with("define stone", |word| {
+            calls += 1;
+            seen = Some(word.to_string());
+            Some(sense("a hard solid mineral."))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(seen.as_deref(), Some("stone"));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 980);
+    }
+
+    #[test]
+    fn a_cached_word_answers_an_ordinary_query_without_a_lookup() {
+        let _guard = isolate();
+        remember("stone", &sense("a hard solid mineral."));
+        let mut calls = 0;
+        let results = search_with("stone", |_| {
+            calls += 1;
+            None
+        });
+        assert_eq!(calls, 0, "the fallback row comes from the cache");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 25);
+    }
+
+    #[test]
+    fn an_explicit_query_answers_from_the_cache_too() {
+        let _guard = isolate();
+        remember("stone", &sense("a hard solid mineral."));
+        let mut calls = 0;
+        let results = search_with("define stone", |word| {
+            calls += 1;
+            lookup(word)
+        });
+        assert_eq!(results.len(), 1, "the cache must answer before the system call");
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn the_definition_cache_is_bounded() {
+        let _guard = isolate();
+        for index in 0..(MAX_CACHED_WORDS + 4) {
+            remember(&format!("word{index}"), &sense("x"));
+        }
+        assert_eq!(cache().lock().unwrap().len(), MAX_CACHED_WORDS);
+        assert!(
+            cached("word0").is_none(),
+            "the oldest entry is evicted"
+        );
+        assert!(cached(&format!("word{}", MAX_CACHED_WORDS + 3)).is_some());
+    }
+
+    #[test]
+    fn a_missing_definition_is_a_notice_only_when_explicit() {
+        let _guard = isolate();
+        let explicit = search_with("define zzzz", |_| Some(Lookup::Missing));
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(explicit[0].score, 970);
+        let implicit = search_with("zzzz", |_| Some(Lookup::Missing));
+        assert!(implicit.is_empty());
+    }
+
+    #[test]
+    fn non_word_queries_do_not_reach_the_dictionary() {
+        let _guard = isolate();
+        let mut calls = 0;
+        for query in ["git status", "2+2", "ab", ""] {
+            search_with(query, |_| {
+                calls += 1;
+                None
+            });
+        }
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn an_empty_prefix_asks_for_a_word_without_a_lookup() {
+        let _guard = isolate();
+        let mut calls = 0;
+        let results = search_with("define ", |_| {
+            calls += 1;
+            None
+        });
+        assert_eq!(calls, 0);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].id.starts_with("define-word:notice:hint"));
     }
 
     #[test]

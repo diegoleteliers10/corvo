@@ -16,7 +16,7 @@ are in RELEASE_NOTES.md.
 
 ## Define Word and calculator history
 
-- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition, Cmd+Enter opens Dictionary, and a single word also gets a low-ranked definition row as a fallback.
+- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition and Cmd+Enter opens Dictionary. A single word still gets a low-ranked definition row as a fallback, but only when it was already defined this session: ordinary launcher typing no longer calls the system dictionary on every keystroke.
 - The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again. `Clear Calculator History` empties the list.
 
 # Corvo 0.6.2
