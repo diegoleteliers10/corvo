@@ -226,17 +226,22 @@ tabs on Windows and Linux (Firefox removed its CDP endpoint).
   NordPass, Proton Pass, RoboForm, Seahorse, and GNOME Keyring.
 - Fail closed when macOS or Windows cannot name the frontmost app: the
   copy is not recorded, because without a name the secret-app guard
-  cannot run. A Wayland session has no attribution at all, so there the
-  source shows as Unknown and history keeps working.
+  cannot run.
+- Wayland cannot identify the source app at all. The accepted policy is
+  to keep the copy in the history with `Unknown` as its source. The
+  secret-app guard cannot run for those entries, so a password copied
+  from a password manager may be stored. The history otherwise keeps
+  working on Wayland.
 - Bound storage by bytes as well as entries: 64 MB total, oldest entries
   removed first. Images count with their PNG size.
 
 Remaining work: Linux cannot enumerate pasteboard formats, so
-`x-kde-passwordManagerHint` is not detected there and only the source-app
-guard applies. Every capture rewrites the whole JSON file, which stays
-O(history) per copy; an append-only store remains planned. File-drag
-clipboard types, per-entry pinning, and a size cap per text entry also
-remain planned.
+`x-kde-passwordManagerHint` is not detected on X11 either. On X11 the
+source-app guard still applies when `xdotool` answers. On Wayland no
+source guard runs; the accepted risk is documented above. Every capture
+rewrites the whole JSON file, which stays O(history) per copy; an
+append-only store remains planned. File-drag clipboard types, per-entry
+pinning, and a size cap per text entry also remain planned.
 
 ## 10. define-word and calculator history — P0.2
 

@@ -471,13 +471,29 @@ pub fn poll_clipboard_with_source(preferred_source: Option<&str>) {
 /// Platforms with no attribution at all report `"Unknown"` instead, so
 /// their history keeps working.
 fn resolve_capture_source(preferred_source: Option<&str>) -> Option<String> {
+    resolve_capture_source_with(
+        preferred_source,
+        corvo_platform::frontmost_app_identity,
+        corvo_platform::clipboard_source_attribution_available(),
+    )
+}
+
+/// The pure decision behind [`resolve_capture_source`].
+///
+/// The lookup and the attribution capability are parameters so every
+/// branch is testable without a desktop session.
+fn resolve_capture_source_with(
+    preferred_source: Option<&str>,
+    identity: impl FnOnce() -> Option<(i32, String)>,
+    attribution_available: bool,
+) -> Option<String> {
     if let Some(name) = preferred_source
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
         return Some(name.to_string());
     }
-    if let Some((pid, name)) = corvo_platform::frontmost_app_identity() {
+    if let Some((pid, name)) = identity() {
         if pid == std::process::id() as i32 {
             return Some(CORVO_SOURCE.into());
         }
@@ -486,7 +502,7 @@ fn resolve_capture_source(preferred_source: Option<&str>) -> Option<String> {
             return Some(name.to_string());
         }
     }
-    if corvo_platform::clipboard_source_attribution_available() {
+    if attribution_available {
         None
     } else {
         Some(UNKNOWN_SOURCE.into())
@@ -1213,6 +1229,43 @@ mod tests {
 
         assert!(!ingest_current_clipboard(&mut history, None, true));
         assert!(history.entries.is_empty());
+    }
+
+    #[test]
+    fn resolve_keeps_a_named_preferred_source() {
+        let source = resolve_capture_source_with(Some("Safari"), || None, true);
+
+        assert_eq!(source.as_deref(), Some("Safari"));
+    }
+
+    #[test]
+    fn resolve_names_corvo_for_its_own_pid() {
+        let own_pid = std::process::id() as i32;
+        let source =
+            resolve_capture_source_with(None, || Some((own_pid, "corvo".into())), true);
+
+        assert_eq!(source.as_deref(), Some(CORVO_SOURCE));
+    }
+
+    #[test]
+    fn resolve_fails_closed_when_attribution_is_available() {
+        let source = resolve_capture_source_with(None, || None, true);
+
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn resolve_uses_unknown_when_attribution_is_unavailable() {
+        let source = resolve_capture_source_with(None, || None, false);
+
+        assert_eq!(source.as_deref(), Some(UNKNOWN_SOURCE));
+    }
+
+    #[test]
+    fn resolve_keeps_a_named_frontmost_app() {
+        let source = resolve_capture_source_with(None, || Some((42, "Notes".into())), true);
+
+        assert_eq!(source.as_deref(), Some("Notes"));
     }
 
     #[test]
