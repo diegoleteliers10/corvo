@@ -1,26 +1,25 @@
-# Corvo 0.6.2
+# Corvo 0.7.0
 
-This release cuts idle memory, keeps the launcher in one place, and makes the
-shortcut on a row match Settings.
+Clipboard history with search, a dictionary command, and releases that verify
+their downloads.
 
-## Memory
+## Clipboard history
 
-- The launcher releases every decoded image when its window closes. GPUI keeps decoded images for the life of the process, so each app icon and clipboard screenshot stayed resident. Idle memory drops from about 524 MB to about 74 MB, and the launcher peaks around 139 MB while it is open.
-- Clipboard image previews decode to the preview card size instead of the full screenshot. Browsing the history keeps one preview at a time.
-- App icons render at 128x128 instead of 256x256. That covers the largest slot the launcher draws and cuts the decoded size by four.
+- History keeps three months and 2000 entries by default, with a 64 MB byte cap that drops the oldest entries first. Settings still offer 24 hours, 7 days, 30 days, 3 months and 1 year.
+- Search the history, copy an entry, or paste it straight back into the previous app. "Direct paste on Enter" decides whether Enter pastes or only copies.
+- Copies from Keychain Access, Apple Passwords and common password managers are skipped. On macOS and Windows a copy whose frontmost app cannot be named is not recorded at all, because the guard cannot run.
+- On Wayland the source cannot be named, so the entry is stored as `Unknown`. The password-manager guard cannot run there, which means a password copied from a manager may enter the history. That is the accepted trade-off for keeping history on Wayland.
 
-## Launcher position
+## Define Word and calculator
 
-- The launcher cannot be moved. It opens at the same top edge on every page and grows downward, so Clipboard, Files, and Emoji no longer open higher than the first summon.
-- Settings and the onboarding window stay movable.
+- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition and Cmd+Enter opens Dictionary.
+- Typing in the launcher no longer queries the dictionary on every keystroke: only the explicit `define` query does, and the fallback row comes from a cache of the last eight definitions.
+- The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again.
 
-## Shortcuts
+## Release pipeline
 
-- A row shows the shortcut Settings stores for it. The emoji row showed a default that ignored the recorded key, and the clipboard row did the same.
-- App, command, and system action rows show their configured shortcut at the right edge.
-- Clearing a shortcut in Settings removes it from the row. A state label such as Playing or Now stays.
+- Releases now publish a `SHA256SUMS` manifest for every asset, and the build fails when an asset is missing from it. The updater refuses any release without a checksum, which is why 0.6.0 to 0.6.2 could not update themselves.
 
-## Release
+## Upgrade note
 
-- A merge into main now starts the release build. The tag workflow dispatches the Release workflow explicitly, because a tag pushed with the default token does not trigger another workflow.
-- A merge where the tag already exists but the release is missing now publishes the release instead of stopping after the tag step.
+- If you are on 0.6.0 to 0.6.2, an update needs a release that carries the manifest. Nothing else changes.
