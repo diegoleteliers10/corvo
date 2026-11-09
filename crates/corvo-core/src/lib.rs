@@ -5,6 +5,9 @@
 //! register themselves with [`register_command!`] at link time. The binary
 //! keeps no central command list.
 
+/// Release version of the app, taken from the root manifest by `build.rs`.
+pub const VERSION: &str = env!("CORVO_VERSION");
+
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -496,5 +499,21 @@ mod tests {
             assert!(svg.starts_with("<svg"));
             assert!(svg.ends_with("</svg>"));
         }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    /// A release bumps only the root manifest, so the published version must
+    /// come from there and not from this crate's stale package version.
+    #[test]
+    fn published_version_matches_the_root_manifest() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let expected = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("version = \""))
+            .and_then(|rest| rest.split('"').next())
+            .expect("root manifest carries a package version");
+        assert_eq!(super::VERSION, expected);
     }
 }
