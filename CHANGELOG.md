@@ -3,7 +3,13 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
-# Unreleased
+# Corvo 0.7.0
+
+Clipboard history, a dictionary command, and releases that verify their downloads.
+
+## Release pipeline
+
+- Every release now publishes a `SHA256SUMS` manifest next to its assets, and the build fails when an asset is missing from it. The updater is fail-closed and refuses a release without a checksum, so 0.6.0 to 0.6.2 could not update themselves.
 
 ## Clipboard history
 
