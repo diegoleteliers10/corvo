@@ -7444,7 +7444,7 @@ impl SettingsView {
                             .border_color(rgb(COLOR_CONTROL_BORDER))
                             .text_size(px(12.0))
                             .text_color(rgb(COLOR_TEXT_DIM))
-                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                            .child(format!("Version {}", corvo_core::VERSION)),
                     )
                     .child(
                         div()
@@ -7940,7 +7940,7 @@ impl SettingsView {
         let (icon, title, subtitle, status_color) = match &self.update_status {
             UpdateStatusUI::Idle => (
                 phosphor_svgs::style::regular::ARROW_CIRCLE_DOWN,
-                format!("Corvo v{}", env!("CARGO_PKG_VERSION")),
+                format!("Corvo v{}", corvo_core::VERSION),
                 "Automatic updates are enabled.".to_string(),
                 rgb(COLOR_TEXT_MUTED),
             ),
@@ -7955,7 +7955,7 @@ impl SettingsView {
                 "Corvo is up to date".to_string(),
                 format!(
                     "Version {} ({}) is the latest available.",
-                    env!("CARGO_PKG_VERSION"),
+                    corvo_core::VERSION,
                     channel_str
                 ),
                 rgb(COLOR_ACCENT),

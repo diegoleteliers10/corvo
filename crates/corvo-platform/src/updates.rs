@@ -206,7 +206,7 @@ pub fn load_pending_release() -> Option<UpdateRelease> {
     let path = pending_release_path()?;
     let bytes = fs::read(&path).ok()?;
     let release: UpdateRelease = serde_json::from_slice(&bytes).ok()?;
-    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    let current = semver::Version::parse(corvo_core::VERSION).ok()?;
     if release.version > current {
         Some(release)
     } else {
@@ -320,7 +320,7 @@ pub fn check_for_updates(
     channel: UpdateChannel,
     force: bool,
 ) -> Result<Option<UpdateRelease>, UpdateError> {
-    let current_ver_str = env!("CARGO_PKG_VERSION");
+    let current_ver_str = corvo_core::VERSION;
     let current_ver = semver::Version::parse(current_ver_str)
         .map_err(|e| UpdateError::InvalidVersion(format!("Cannot parse current version: {e}")))?;
 
@@ -442,7 +442,7 @@ pub fn download_and_verify(
     let cache_dir = update_cache_dir()?;
     let dest_path = cache_dir.join(&release.asset.name);
 
-    let user_agent = format!("corvo/{}", env!("CARGO_PKG_VERSION"));
+    let user_agent = format!("corvo/{}", corvo_core::VERSION);
     let resp = ureq::get(&release.asset.browser_download_url)
         .set("User-Agent", &user_agent)
         .call()

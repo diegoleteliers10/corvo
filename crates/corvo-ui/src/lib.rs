@@ -918,6 +918,8 @@ pub enum LauncherPage {
     Brew,
     Text,
     Notes,
+    /// Stored calculator evaluations, with copy and paste per row.
+    CalculatorHistory,
     /// One page per browser extension; the id picks the browser.
     Browser(corvo_browser_tabs::BrowserId),
     Ports,
@@ -1842,6 +1844,7 @@ impl Launcher {
             LauncherPage::Root => launcher.refresh(cx),
             LauncherPage::Emoji => launcher.refresh_emoji(cx),
             LauncherPage::Clipboard => launcher.refresh_clipboard(cx),
+            LauncherPage::CalculatorHistory => launcher.refresh_calculator_history(cx),
             LauncherPage::Files => launcher.refresh_files(cx),
             LauncherPage::Brew => launcher.refresh_brew(cx),
             LauncherPage::Text => launcher.refresh_text(cx),
@@ -2105,6 +2108,7 @@ impl Launcher {
             LauncherPage::Root => self.refresh(cx),
             LauncherPage::Emoji => self.refresh_emoji(cx),
             LauncherPage::Clipboard => self.refresh_clipboard(cx),
+            LauncherPage::CalculatorHistory => self.refresh_calculator_history(cx),
             LauncherPage::Files => self.refresh_files(cx),
             LauncherPage::Brew => self.refresh_brew(cx),
             LauncherPage::Text => self.refresh_text(cx),
@@ -2172,6 +2176,7 @@ impl Launcher {
             || matches!(self.page, LauncherPage::Extension(_))
             || self.page == LauncherPage::Ports
             || self.page == LauncherPage::Processes
+            || self.page == LauncherPage::CalculatorHistory
         {
             if !self.query.is_empty() {
                 self.query.clear();
@@ -3102,6 +3107,7 @@ impl Launcher {
             || matches!(self.page, LauncherPage::Extension(_))
                 || self.page == LauncherPage::Ports
                 || self.page == LauncherPage::Processes
+                || self.page == LauncherPage::CalculatorHistory
                 || self.page == LauncherPage::Uninstaller
             {
                 self.open_root_page(window, cx);
@@ -3201,6 +3207,65 @@ impl Launcher {
         self.refresh_clipboard(cx);
         self.sync_palette_size(window, cx);
         cx.notify();
+    }
+
+    fn open_calculator_history_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = LauncherPage::CalculatorHistory;
+        self.query.clear();
+        self.cursor_idx = 0;
+        self.cursor_visible = true;
+        self.selected = 0;
+        self.actions_open = false;
+        self.burger_menu_open = false;
+        self.filter_dropdown_open = false;
+        self.results_scroll_handle.scroll_to_item(0);
+        self.refresh_calculator_history(cx);
+        self.sync_palette_size(window, cx);
+        cx.notify();
+    }
+
+    /// Asks the calculator command for the page rows. The query after
+    /// the prefix is the page's text filter.
+    fn refresh_calculator_history(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+        let query = self.query.clone();
+        let commands = self.registry.commands().to_vec();
+        let launcher_store = self.store.clone();
+        let Some(command) = commands
+            .iter()
+            .find(|command| command.id() == "calculator")
+            .cloned()
+        else {
+            cx.notify();
+            return;
+        };
+        if !self.store.command_enabled(command.id()) {
+            cx.notify();
+            return;
+        }
+
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        cx.spawn(async move |this, cx| {
+            let ctx = SearchContext {
+                max_results: 100,
+                store: Some(launcher_store),
+            };
+            let raw_query = format!("calculator-page:{query}");
+            let results = command.search(&raw_query, &ctx).await;
+            let _ = this.update(cx, |launcher, cx| {
+                if launcher.search_seq == seq && launcher.page == LauncherPage::CalculatorHistory {
+                    launcher.results = results;
+                    launcher.rebuild_root_flat_items();
+                    launcher.selected = launcher
+                        .selected
+                        .min(launcher.results.len().saturating_sub(1));
+                    launcher.results_scroll_handle.scroll_to_item(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_files_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4215,6 +4280,10 @@ impl Launcher {
     /// Runs every command's search on the background executor and swaps
     /// the result list when they answer.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.page == LauncherPage::CalculatorHistory {
+            self.refresh_calculator_history(cx);
+            return;
+        }
         let query = self.query.clone();
         let commands = self.registry.commands().to_vec();
         let scoped_command_id = commands
@@ -6968,6 +7037,9 @@ impl Launcher {
                 self.open_uninstaller_page(name, path, window, cx);
             }
             Ok(Action::OpenFileSearch) => self.open_files_page(window, cx),
+            Ok(Action::OpenCalculatorHistory) => {
+                self.open_calculator_history_page(window, cx)
+            }
             Ok(Action::SetResultFavorite {
                 result_id,
                 title,
@@ -7390,6 +7462,18 @@ impl Launcher {
                     self.open_clipboard_page(window, cx);
                 } else if msg == "Search Emoji & Symbols" {
                     self.open_emoji_page(window, cx);
+                } else if msg == "Calculator history cleared" {
+                    if self.page == LauncherPage::CalculatorHistory {
+                        self.refresh_calculator_history(cx);
+                    }
+                    show_action_toast(
+                        ToastNotice::success(
+                            ToastCategory::General,
+                            "History cleared",
+                            "Calculator history is empty",
+                        ),
+                        cx,
+                    );
                 } else {
                     show_action_toast(
                         ToastNotice::success(ToastCategory::General, "Action complete", msg),
@@ -7659,6 +7743,8 @@ impl Launcher {
             "Filter processes by name or PID...".into()
         } else if self.page == LauncherPage::Files {
             "Search files and folders...".into()
+        } else if self.page == LauncherPage::CalculatorHistory {
+            SharedString::from("Filter calculations...")
         } else if let Some(hint) = self.declared_argument_placeholder() {
             hint
         } else {
@@ -7853,6 +7939,37 @@ impl Launcher {
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(COLOR_TEXT_DIM))
             .child("PROCESSES")
+    }
+
+    fn calculator_history_subheader(&self) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .pb_1()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(COLOR_TEXT_DIM))
+            .child("CALCULATOR HISTORY")
+    }
+
+    fn calculator_history_list(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        if self.results.is_empty() {
+            let message = if self.query.trim().is_empty() {
+                "No calculations yet. Run a calculation and commit its result to store it."
+            } else {
+                "No calculations match this search."
+            };
+            return div()
+                .id("calculator-history-empty")
+                .flex_1()
+                .w_full()
+                .px(px(16.0))
+                .pt(px(24.0))
+                .text_size(px(13.0))
+                .text_color(rgb(COLOR_TEXT_DIM))
+                .child(message);
+        }
+        self.results_list(cx)
     }
 
     fn text_subheader(&self) -> Div {
@@ -10760,6 +10877,8 @@ impl Render for Launcher {
         let is_ports = self.page == LauncherPage::Ports && !detail_open;
         let is_processes = self.page == LauncherPage::Processes && !detail_open;
         let is_uninstaller = self.page == LauncherPage::Uninstaller && !detail_open;
+        let is_calculator_history =
+            self.page == LauncherPage::CalculatorHistory && !detail_open;
         div()
             .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
@@ -10835,6 +10954,11 @@ impl Render for Launcher {
                 view.child(self.search_row(window, cx))
                     .child(self.ports_subheader())
                     .child(self.results_list(cx))
+            })
+            .when(is_calculator_history, |view| {
+                view.child(self.search_row(window, cx))
+                    .child(self.calculator_history_subheader())
+                    .child(self.calculator_history_list(cx))
             })
             .when(is_processes, |view| {
                 view.child(self.search_row(window, cx))
@@ -11835,7 +11959,7 @@ fn execute_command_intent(cmd_id: &str, cx: &mut App) {
             open_launcher_with_query("define ", cx);
         }
         "calculator-history" | "Calculator History" => {
-            open_launcher_with_query("calculator", cx);
+            open_launcher_with_page(LauncherPage::CalculatorHistory, cx);
         }
         other => {
             if let Some(layout_id) = other.strip_prefix("apply-layout:") {

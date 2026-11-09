@@ -25,6 +25,9 @@ fn history_enabled(ctx: &SearchContext) -> bool {
         .is_none_or(|store| store.command_enabled("calculator-history"))
 }
 
+/// The launcher asks for the history page with this query prefix.
+const PAGE_QUERY_PREFIX: &str = "calculator-page:";
+
 fn history_row(entry: &history::HistoryEntry, index: usize) -> SearchResult {
     SearchResult {
         id: format!("calculator:history:{index}"),
@@ -49,6 +52,67 @@ fn clear_history_row() -> SearchResult {
         section: None,
         accessories: Vec::new(),
     }
+}
+
+fn open_history_row() -> SearchResult {
+    SearchResult {
+        id: "calculator:open-history".into(),
+        title: "Open Calculator History".into(),
+        subtitle: Some("Browse recent calculations in a page".into()),
+        icon: Icon::Calculator,
+        score: 15,
+        accessory: Some("Page".into()),
+        section: None,
+        accessories: Vec::new(),
+    }
+}
+
+/// A page row: the same entry, plus how long ago it was calculated.
+fn page_history_row(entry: &history::HistoryEntry, index: usize, now_secs: u64) -> SearchResult {
+    let mut row = history_row(entry, index);
+    row.accessory = Some(relative_time(entry.at_secs, now_secs));
+    row
+}
+
+fn relative_time(at_secs: u64, now_secs: u64) -> String {
+    let elapsed = now_secs.saturating_sub(at_secs);
+    match elapsed {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", elapsed / 60),
+        3600..=86_399 => format!("{} h ago", elapsed / 3600),
+        _ => format!("{} d ago", elapsed / 86_400),
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// Rows for the calculator history page. The filter matches the
+/// expression or the result, case-insensitively.
+fn page_rows(filter: &str, ctx: &SearchContext) -> Vec<SearchResult> {
+    if !history_enabled(ctx) {
+        return Vec::new();
+    }
+    let needle = filter.trim().to_lowercase();
+    let now = now_secs();
+    let mut rows: Vec<SearchResult> = history::all()
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            needle.is_empty()
+                || entry.expression.to_lowercase().contains(&needle)
+                || entry.result.to_lowercase().contains(&needle)
+        })
+        .map(|(index, entry)| page_history_row(entry, index, now))
+        .collect();
+    if !history::all().is_empty() {
+        rows.push(clear_history_row());
+    }
+    rows
 }
 
 use corvo_core::{
@@ -77,6 +141,9 @@ impl Command for CalculatorCommand {
 
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         currency::ensure_warm();
+        if let Some(filter) = query.strip_prefix(PAGE_QUERY_PREFIX) {
+            return page_rows(filter, ctx);
+        }
         let trimmed = query.trim();
         let after_prefix = trimmed
             .get(.."calculator".len())
@@ -94,6 +161,7 @@ impl Command for CalculatorCommand {
                 .enumerate()
                 .map(|(index, entry)| history_row(entry, index))
                 .collect();
+            rows.push(open_history_row());
             rows.push(clear_history_row());
             return rows;
         }
@@ -132,6 +200,9 @@ impl Command for CalculatorCommand {
         if result_id == "calculator:clear-history" {
             history::clear();
             return Ok(Action::ShowToast("Calculator history cleared".into()));
+        }
+        if result_id == "calculator:open-history" {
+            return Ok(Action::OpenCalculatorHistory);
         }
         if let Some(index) = result_id.strip_prefix("calculator:history:") {
             let index: usize = index.parse().map_err(|_| CommandError::NotFound)?;
@@ -442,5 +513,71 @@ mod tests {
         assert_eq!(evaluate_scalar("(1 + 2"), Err(ScalarError::InvalidExpression));
         assert_eq!(evaluate_scalar(""), Err(ScalarError::InvalidExpression));
         assert_eq!(evaluate_scalar("foo"), Err(ScalarError::InvalidExpression));
+    }
+
+    #[test]
+    fn relative_time_reports_minutes_hours_and_days() {
+        assert_eq!(relative_time(100, 130), "just now");
+        assert_eq!(relative_time(0, 300), "5 min ago");
+        assert_eq!(relative_time(0, 7200), "2 h ago");
+        assert_eq!(relative_time(0, 172_800), "2 d ago");
+    }
+
+    #[test]
+    fn the_page_lists_evaluations_with_a_clear_row() {
+        let _history = isolate_history();
+        history::clear();
+        history::record("10/2", "5");
+        let command = CalculatorCommand;
+        let rows = smol::block_on(command.search("calculator-page:", &search_context()));
+        assert!(rows.iter().any(|row| row.title == "5"));
+        assert!(rows.iter().any(|row| row.id == "calculator:clear-history"));
+        assert!(rows
+            .iter()
+            .all(|row| row.id != "calculator:open-history"));
+        assert!(rows
+            .iter()
+            .find(|row| row.title == "5")
+            .is_some_and(|row| row.accessory.as_deref() == Some("just now")));
+    }
+
+    #[test]
+    fn the_page_filters_by_expression_or_result() {
+        let _history = isolate_history();
+        history::clear();
+        history::record("10/2", "5");
+        history::record("7*6", "42");
+        let command = CalculatorCommand;
+        let rows = smol::block_on(command.search("calculator-page:42", &search_context()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title, "42");
+        assert_eq!(rows[1].id, "calculator:clear-history");
+    }
+
+    #[test]
+    fn an_empty_page_has_no_clear_row() {
+        let _history = isolate_history();
+        history::clear();
+        let command = CalculatorCommand;
+        let rows = smol::block_on(command.search("calculator-page:", &search_context()));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn the_scoped_history_offers_the_page_row() {
+        let _history = isolate_history();
+        history::clear();
+        history::record("2+2", "4");
+        let command = CalculatorCommand;
+        let rows = smol::block_on(command.search("calculator", &search_context()));
+        assert!(rows.iter().any(|row| row.id == "calculator:open-history"));
+    }
+
+    #[test]
+    fn opening_the_history_returns_the_page_action() {
+        let command = CalculatorCommand;
+        let action =
+            smol::block_on(command.execute("calculator:open-history", &execution_context())).unwrap();
+        assert_eq!(action, Action::OpenCalculatorHistory);
     }
 }
