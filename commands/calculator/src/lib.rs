@@ -290,6 +290,7 @@ mod tests {
 
     #[test]
     fn typing_does_not_record_history() {
+        let _history = isolate_history();
         let command = CalculatorCommand;
         let _ = smol::block_on(command.search("76543*3", &search_context()));
         assert!(!history::all()
@@ -299,6 +300,7 @@ mod tests {
 
     #[test]
     fn committing_an_answer_records_history_and_copies_it() {
+        let _history = isolate_history();
         let command = CalculatorCommand;
         let action =
             smol::block_on(command.execute("calculator:ok:321*3", &execution_context())).unwrap();
@@ -310,6 +312,7 @@ mod tests {
 
     #[test]
     fn a_prefixed_expression_still_evaluates_and_commits() {
+        let _history = isolate_history();
         let command = CalculatorCommand;
         let results = smol::block_on(command.search("calculator 7*6", &search_context()));
         assert_eq!(results.len(), 1);
