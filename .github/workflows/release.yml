@@ -315,6 +315,15 @@ jobs:
           find artifacts -type f -exec cp {} release-assets/ \;
           ls -la release-assets/
 
+      - name: Generate SHA-256 Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          while IFS= read -r asset; do
+            grep -q "  ${asset}$" SHA256SUMS || { echo "SHA256SUMS is missing ${asset}"; exit 1; }
+          done < <(ls -1 | grep -v '^SHA256SUMS$')
+
       - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:

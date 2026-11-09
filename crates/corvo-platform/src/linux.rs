@@ -12,7 +12,8 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use super::{
-    AppEntry, AppFileEntry, AppFileScan, PlatformError, PlatformOps, PlatformResult, WindowHandle,
+    AppEntry, AppFileEntry, AppFileScan, DictionaryDefinition, PlatformError, PlatformOps,
+    PlatformResult, WindowHandle,
 };
 
 pub struct LinuxPlatform;
@@ -850,6 +851,29 @@ fn valid_package_id(value: &str) -> bool {
 }
 
 pub fn frontmost_app_info() -> Option<(i32, String)> {
+    frontmost_app_info_inner(false)
+}
+
+/// Whether `xdotool` answers on this session. Probed once per process:
+/// the answer only changes if the user installs the package, and probing
+/// on every clipboard poll would spawn a process for nothing.
+pub fn xdotool_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("xdotool")
+            .arg("version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// The pid and display name of the frontmost app, including this process.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    frontmost_app_info_inner(true)
+}
+
+fn frontmost_app_info_inner(include_self: bool) -> Option<(i32, String)> {
     if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
         return None;
     }
@@ -874,11 +898,25 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
         .trim()
         .parse::<i32>()
         .ok()?;
-    if pid == std::process::id() as i32 {
+    if !include_self && pid == std::process::id() as i32 {
         return None;
     }
     let process_name = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some((pid, process_name.trim().to_owned()))
+}
+
+/// The system dictionary is macOS only, so this reports the limit instead
+/// of guessing at a definition.
+pub fn dictionary_definitions(_word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    Err(PlatformError::Unsupported(
+        "the system dictionary is macOS only".into(),
+    ))
+}
+
+pub fn open_dictionary() -> PlatformResult<()> {
+    Err(PlatformError::Unsupported(
+        "the Dictionary app is macOS only".into(),
+    ))
 }
 
 pub fn activate_app(pid: i32) -> PlatformResult<()> {

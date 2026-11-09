@@ -179,6 +179,92 @@ pub fn frontmost_app_info() -> Option<(i32, String)> {
     return None;
 }
 
+/// The pid and display name of the frontmost app, including this process.
+///
+/// Callers that must tell "Corvo is frontmost" from "the lookup failed"
+/// use this instead of [`frontmost_app_info`], which reports both as `None`.
+pub fn frontmost_app_identity() -> Option<(i32, String)> {
+    #[cfg(target_os = "macos")]
+    return macos::frontmost_app_identity();
+    #[cfg(target_os = "windows")]
+    return windows::frontmost_app_identity();
+    #[cfg(target_os = "linux")]
+    return linux::frontmost_app_identity();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return None;
+}
+
+/// Whether the OS can name the app that owns the clipboard.
+///
+/// macOS and Windows always can. Linux can only on X11 with `xdotool`
+/// installed; Wayland exposes no window-manager query, and X11 without
+/// `xdotool` cannot answer either, so both report "unavailable".
+pub fn clipboard_source_attribution_available() -> bool {
+    #[cfg(target_os = "macos")]
+    return true;
+    #[cfg(target_os = "windows")]
+    return true;
+    #[cfg(target_os = "linux")]
+    {
+        let x11 =
+            std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        if !x11 {
+            return false;
+        }
+        let available = linux::xdotool_available();
+        if !available {
+            // One line in the diagnostic log, so a missing package is not
+            // a silent loss of clipboard history.
+            static REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            REPORTED.get_or_init(|| {
+                diagnostics::record_error("clipboard", "xdotool_missing_source_attribution");
+            });
+        }
+        return available;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return false;
+}
+
+/// One definition of a word, as the system dictionary returns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DictionaryDefinition {
+    /// The part of speech, when the entry names one.
+    pub part_of_speech: Option<String>,
+    pub text: String,
+}
+
+/// Looks a word up in the system dictionaries.
+///
+/// macOS reads its local dictionaries. Windows and Linux have no system
+/// dictionary API here, so they return `Unsupported`.
+pub fn dictionary_definitions(word: &str) -> PlatformResult<Vec<DictionaryDefinition>> {
+    #[cfg(target_os = "macos")]
+    return macos::dictionary_definitions(word);
+    #[cfg(target_os = "windows")]
+    return windows::dictionary_definitions(word);
+    #[cfg(target_os = "linux")]
+    return linux::dictionary_definitions(word);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err(PlatformError::Unsupported(
+        "the system dictionary is unavailable on this platform".into(),
+    ));
+}
+
+/// Opens the macOS Dictionary app.
+pub fn open_dictionary() -> PlatformResult<()> {
+    #[cfg(target_os = "macos")]
+    return macos::open_dictionary();
+    #[cfg(target_os = "windows")]
+    return windows::open_dictionary();
+    #[cfg(target_os = "linux")]
+    return linux::open_dictionary();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err(PlatformError::Unsupported(
+        "the Dictionary app is macOS only".into(),
+    ));
+}
+
 /// Reads the current string from the system clipboard.
 pub fn read_clipboard_text() -> Option<String> {
     #[cfg(target_os = "macos")]
@@ -614,6 +700,9 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
 /// implementation reports `Unsupported` rather than doing nothing, so a
 /// missing capability is visible instead of silent.
 pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<String> {
+    if matches!(action, corvo_core::NativeAction::OpenDictionary) {
+        return open_dictionary().map(|()| "Dictionary".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         use corvo_core::NativeAction as A;
@@ -630,6 +719,7 @@ pub fn run_native_action(action: corvo_core::NativeAction) -> PlatformResult<Str
             A::MediaPreviousTrack => windows::media_previous_track().map(|()| String::new()),
             A::MediaPlayPause => windows::media_play_pause().map(|()| String::new()),
             A::EjectRemovableDisks => windows::eject_removable_disks(),
+            A::OpenDictionary => windows::open_dictionary().map(|()| String::new()),
         };
     }
     #[cfg(not(target_os = "windows"))]

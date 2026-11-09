@@ -22,6 +22,7 @@ remaining work. Native command crates compile into the application.
 | dia | Available (AppleScript) | CDP port 9226 | CDP port 9226 |
 | safari | Available | Unavailable | Unavailable |
 | aside | Available | CDP port 9227 | CDP port 9227 |
+| clipboard-manager | Available | Available | Available |
 
 Media Control reads Windows SMTC through PowerShell and Linux MPRIS
 through zbus. Browser extensions register on every OS but appear only
@@ -201,6 +202,79 @@ icon. The former unified Browser Tabs page is gone.
 Remaining work: Firefox bookmarks (places.sqlite), Arc bookmarks (its
 own store), history on every platform, tab closure, and Firefox live
 tabs on Windows and Linux (Firefox removed its CDP endpoint).
+
+## 9. clipboard-manager — P0
+
+- Keep local history for three months by default: `retention_days` 90,
+  `retention_option` 3, and `max_entries` 2000. Settings offer 24 hours,
+  7 days, 30 days, 3 months, and 1 year.
+- Record plain text and PNG images. Promote content that already has an
+  entry instead of recording it twice, so Corvo's own copy and paste
+  refresh the existing row.
+- Watch the clipboard every 400 ms from a background task. Persist history
+  to `data_dir()/clipboard_history.json` through a temporary file and an
+  atomic rename. Store images under `data_dir()/clipboard_images/`.
+- Search history on the Clipboard page. Filter chips cover all, text,
+  links, images, and JSON. Rank by match quality and show the source app.
+- Paste back with Enter: Corvo restores the previous app, writes the entry
+  to the clipboard, and posts the paste keystroke. With `auto_paste` off,
+  the entry goes to the clipboard only.
+- Copy, delete, and clear actions. Delete and clear remove the image file.
+- Never record secrets. Skip content with a password-manager pasteboard
+  marker, and skip copies whose source app holds secrets: Keychain Access,
+  Passwords, 1Password, Bitwarden, KeePassXC, LastPass, Dashlane, Enpass,
+  NordPass, Proton Pass, RoboForm, Seahorse, and GNOME Keyring.
+- Fail closed when macOS or Windows cannot name the frontmost app: the
+  copy is not recorded, because without a name the secret-app guard
+  cannot run.
+- Wayland cannot identify the source app at all. The accepted policy is
+  to keep the copy in the history with `Unknown` as its source. The
+  secret-app guard cannot run for those entries, so a password copied
+  from a password manager may be stored. The history otherwise keeps
+  working on Wayland.
+- Bound storage by bytes as well as entries: 64 MB total, oldest entries
+  removed first. Images count with their PNG size.
+
+Remaining work: Linux cannot enumerate pasteboard formats, so
+`x-kde-passwordManagerHint` is not detected on X11 either. On X11 the
+source-app guard still applies when `xdotool` answers. On Wayland no
+source guard runs; the accepted risk is documented above. Every capture
+rewrites the whole JSON file, which stays O(history) per copy; an
+append-only store remains planned. File-drag clipboard types, per-entry
+pinning, and a size cap per text entry also remain planned.
+
+## 10. define-word and calculator history — P0.2
+
+### define-word
+
+- `define <word>` looks the word up in the local macOS dictionaries
+  through CoreServices (`DCSCopyTextDefinition`) and shows the word, its
+  part of speech, and a one-line preview.
+- A single plain word can still return a low-ranked definition row, but only
+  when that word was already defined in this session: the row comes from a
+  bounded cache of the last 8 definitions. Ordinary launcher typing never
+  calls the system dictionary, because the launcher searches on every
+  keystroke. That row disappears with the command when Settings hides it.
+- Enter copies the definition. Cmd+Enter opens the Dictionary app through
+  `NativeAction::OpenDictionary`. Alt+Enter pushes the full definition as
+  a Detail page.
+- A word the dictionaries do not know shows "No definition found".
+  Windows and Linux report that the system dictionary is macOS only
+  instead of failing silently.
+
+### calculator history
+
+- Every successful evaluation is stored with its expression and result,
+  newest first, capped at 200 entries in
+  `data_dir()/calculator_history.json`.
+- The same expression and result pair is not stored twice in a row, so a
+  held query does not flood the list.
+- `calculator` lists the history, with Copy Result, Paste Result, Copy
+  Expression, and Run Again. `Clear Calculator History` empties the file.
+- Expressions keep working as before: `2+2` and `calculator 2+2` both
+  evaluate.
+- The history list obeys the `calculator-history` row in Settings; hiding
+  that command removes the list.
 
 ## Shared changes
 

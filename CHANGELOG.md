@@ -3,6 +3,22 @@
 Every released version of Corvo. The notes for the current release
 are in RELEASE_NOTES.md.
 
+# Unreleased
+
+## Clipboard history
+
+- Clipboard history keeps three months by default instead of 30 days, with an entry cap of 2000 instead of 500. Settings still offer 24 hours, 7 days, 30 days, 3 months, and 1 year.
+- Clipboard history skips copies made in Keychain Access, Apple Passwords, and common password managers. A pasteboard marker already covered most managers; the source app now covers the ones that expose no marker.
+- On macOS and Windows, a copy whose frontmost app cannot be named is not recorded. Without a name the secret-app guard cannot run, so the history fails closed instead of storing a possible password.
+- On Wayland, Corvo cannot identify the source app, so the copy is stored with the source `Unknown`. The password-manager guard cannot run there; content copied from a password manager may enter the history. This is the accepted trade-off for keeping history on Wayland.
+- History is bounded by bytes as well as entries: 64 MB total, with the oldest entries removed first.
+- "Direct paste on Enter" now controls clipboard entries. With it off, Enter copies the entry to the clipboard instead of pasting into the previous app.
+
+## Define Word and calculator history
+
+- `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition and Cmd+Enter opens Dictionary. A single word still gets a low-ranked definition row as a fallback, but only when it was already defined this session: ordinary launcher typing no longer calls the system dictionary on every keystroke.
+- The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again. `Clear Calculator History` empties the list.
+
 # Corvo 0.6.2
 
 This release cuts idle memory, keeps the launcher in one place, and makes the
