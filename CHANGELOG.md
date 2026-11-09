@@ -18,6 +18,9 @@ are in RELEASE_NOTES.md.
 
 - `define <word>` looks the word up in the macOS dictionaries. Enter copies the definition and Cmd+Enter opens Dictionary. A single word still gets a low-ranked definition row as a fallback, but only when it was already defined this session: ordinary launcher typing no longer calls the system dictionary on every keystroke.
 - The calculator keeps its last 200 evaluations. Type `calculator` to list them, copy a result, paste it, or run the expression again. `Clear Calculator History` empties the list.
+- A bare expression such as `10/2` now answers while typing, without the `calculator` keyword.
+- Ordinary searches no longer return calculator history rows. History appears only after the `calculator` keyword.
+- History saves an evaluation when the user commits it. Typing `123` no longer stores `1`, `12`, and `123`.
 
 # Corvo 0.6.2
 

@@ -75,10 +75,6 @@ impl Command for CalculatorCommand {
         80
     }
 
-    fn prefix(&self) -> Option<&'static str> {
-        Some("calculator")
-    }
-
     async fn search(&self, query: &str, ctx: &SearchContext) -> Vec<SearchResult> {
         currency::ensure_warm();
         let trimmed = query.trim();
@@ -102,6 +98,10 @@ impl Command for CalculatorCommand {
             return rows;
         }
 
+        if expression.is_empty() {
+            return Vec::new();
+        }
+
         let Some(outcome) = evaluate(expression) else {
             return Vec::new();
         };
@@ -111,15 +111,12 @@ impl Command for CalculatorCommand {
         let subtitle = Some(format!("= {}", outcome.expression()));
         let accessory = Some(outcome.category().to_string());
         let raw_val = outcome.raw_value().to_string();
-        if !is_error {
-            history::record(outcome.expression(), &title);
-        }
 
         vec![SearchResult {
             id: if is_error {
                 format!("calculator:error:{raw_val}")
             } else {
-                format!("calculator:{raw_val}")
+                format!("calculator:ok:{expression}")
             },
             title,
             subtitle,
@@ -144,14 +141,18 @@ impl Command for CalculatorCommand {
                 .ok_or(CommandError::NotFound)?;
             return Ok(Action::Copy(entry.result));
         }
-        let value = if let Some(err) = result_id.strip_prefix("calculator:error:") {
-            err
-        } else if let Some(val) = result_id.strip_prefix("calculator:") {
-            val
-        } else {
-            return Err(CommandError::NotFound);
-        };
-        Ok(Action::Copy(value.to_owned()))
+        if let Some(expression) = result_id.strip_prefix("calculator:ok:") {
+            let outcome = evaluate(expression).ok_or(CommandError::NotFound)?;
+            let value = outcome.display_result().to_string();
+            if !matches!(outcome, CalcOutcome::Error { .. }) {
+                history::record(outcome.expression(), &value);
+            }
+            return Ok(Action::Copy(value));
+        }
+        if let Some(message) = result_id.strip_prefix("calculator:error:") {
+            return Ok(Action::Copy(message.to_owned()));
+        }
+        Err(CommandError::NotFound)
     }
 
     fn actions(&self, result_id: &str) -> Vec<CommandAction> {
@@ -203,43 +204,43 @@ impl Command for CalculatorCommand {
                 },
             ];
         }
-        let (value, is_error) = if let Some(err) = result_id.strip_prefix("calculator:error:") {
-            (err, true)
-        } else if let Some(val) = result_id.strip_prefix("calculator:") {
-            (val, false)
-        } else {
-            return Vec::new();
-        };
+        if let Some(expression) = result_id.strip_prefix("calculator:ok:") {
+            let Some(outcome) = evaluate(expression) else {
+                return Vec::new();
+            };
+            let value = outcome.display_result().to_string();
+            return vec![
+                CommandAction {
+                    id: "calculator:copy".into(),
+                    label: "Copy Answer".into(),
+                    action: Action::Copy(value.clone()),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
+                    group: ActionGroup::Primary,
+                    hotkey: Some("enter"),
+                },
+                CommandAction {
+                    id: "calculator:paste".into(),
+                    label: "Paste to Active App".into(),
+                    action: Action::PasteText(value),
+                    icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
+                    group: ActionGroup::Standard,
+                    hotkey: Some("cmd+enter"),
+                },
+            ];
+        }
 
-        if is_error {
+        if let Some(message) = result_id.strip_prefix("calculator:error:") {
             return vec![CommandAction {
                 id: "calculator:copy_error".into(),
                 label: "Copy Message".into(),
-                action: Action::Copy(value.to_owned()),
+                action: Action::Copy(message.to_owned()),
                 icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
                 group: ActionGroup::Primary,
                 hotkey: Some("enter"),
             }];
         }
 
-        vec![
-            CommandAction {
-                id: "calculator:copy".into(),
-                label: "Copy Answer".into(),
-                action: Action::Copy(value.to_owned()),
-                icon: Icon::Svg(phosphor_svgs::style::regular::COPY),
-                group: ActionGroup::Primary,
-                hotkey: Some("enter"),
-            },
-            CommandAction {
-                id: "calculator:paste".into(),
-                label: "Paste to Active App".into(),
-                action: Action::PasteText(value.to_owned()),
-                icon: Icon::Svg(phosphor_svgs::style::regular::ARROW_BEND_DOWN_LEFT),
-                group: ActionGroup::Standard,
-                hotkey: Some("cmd+enter"),
-            },
-        ]
+        Vec::new()
     }
 }
 
@@ -263,6 +264,58 @@ mod tests {
             max_results: 50,
             store: None,
         }
+    }
+
+    fn execution_context() -> ExecutionContext {
+        ExecutionContext { store: None }
+    }
+
+    #[test]
+    fn a_bare_expression_is_evaluated() {
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("10/2", &search_context()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "5");
+        assert_eq!(results[0].id, "calculator:ok:10/2");
+    }
+
+    #[test]
+    fn a_word_search_returns_no_calculator_row() {
+        let command = CalculatorCommand;
+        for query in ["c", "s", "v", "chrome", "calculator history"] {
+            let results = smol::block_on(command.search(query, &search_context()));
+            assert!(results.is_empty(), "{query} returned {results:?}");
+        }
+    }
+
+    #[test]
+    fn typing_does_not_record_history() {
+        let command = CalculatorCommand;
+        let _ = smol::block_on(command.search("76543*3", &search_context()));
+        assert!(!history::all()
+            .iter()
+            .any(|entry| entry.expression == "76543*3"));
+    }
+
+    #[test]
+    fn committing_an_answer_records_history_and_copies_it() {
+        let command = CalculatorCommand;
+        let action =
+            smol::block_on(command.execute("calculator:ok:321*3", &execution_context())).unwrap();
+        assert_eq!(action, Action::Copy("963".into()));
+        assert!(history::all()
+            .iter()
+            .any(|entry| entry.expression == "321*3" && entry.result == "963"));
+    }
+
+    #[test]
+    fn a_prefixed_expression_still_evaluates_and_commits() {
+        let command = CalculatorCommand;
+        let results = smol::block_on(command.search("calculator 7*6", &search_context()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "42");
+        let action = smol::block_on(command.execute(&results[0].id, &execution_context())).unwrap();
+        assert_eq!(action, Action::Copy("42".into()));
     }
 
     #[test]
