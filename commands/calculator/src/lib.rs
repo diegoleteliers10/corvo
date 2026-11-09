@@ -246,6 +246,17 @@ impl Command for CalculatorCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// The history store is process-wide, so a test that clears it must not
+    /// interleave with a test that records and then reads it.
+    static HISTORY_TESTS: Mutex<()> = Mutex::new(());
+
+    fn isolate_history() -> MutexGuard<'static, ()> {
+        // A panicking test poisons the lock; recovering keeps one failure from
+        // failing every later test that needs the same store.
+        HISTORY_TESTS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     fn search_context() -> SearchContext {
         SearchContext {
@@ -256,6 +267,7 @@ mod tests {
 
     #[test]
     fn scoped_query_lists_history_and_a_clear_row() {
+        let _history = isolate_history();
         history::record("2+2", "4");
         let command = CalculatorCommand;
         let results = smol::block_on(command.search("calculator", &search_context()));
@@ -283,6 +295,7 @@ mod tests {
 
     #[test]
     fn clearing_history_leaves_the_clear_row_alone() {
+        let _history = isolate_history();
         history::record("9*9", "81");
         history::clear();
         let command = CalculatorCommand;
