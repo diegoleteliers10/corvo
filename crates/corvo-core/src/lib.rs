@@ -136,6 +136,8 @@ pub enum Action {
         path: PathBuf,
     },
     OpenFileSearch,
+    /// Opens the launcher page that lists stored calculator evaluations.
+    OpenCalculatorHistory,
     SetResultFavorite {
         result_id: String,
         title: String,
